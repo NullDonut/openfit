@@ -5,7 +5,7 @@ An independent, open-source Android starter for a simple watch companion. OpenFi
 ## Current scope
 
 - Dark, high-contrast dashboard with Home, Health, Devices, and Sleep tabs.
-- Permission-aware Bluetooth LE discovery that surfaces recognizable Noise / ColorFit names rather than every nearby device, plus a manually triggered reconnect to the saved watch.
+- Permission-aware Bluetooth LE discovery for recognizable Noise / ColorFit names, saved-watch reconnect, and Android system bonding when a watch explicitly reports a BLE authentication/encryption requirement.
 - Pairing QR scanner accepts QR content containing a Bluetooth MAC address; proprietary NoiseFit QR payloads are not decoded.
 - Live heart rate only when a connected device exposes the Bluetooth SIG Heart Rate Service (0x180D) and a notifiable Heart Rate Measurement characteristic (0x2A37). Notification-write outcomes are reflected in the connection state.
 - Read-only GATT diagnostics list discovered service/characteristic UUIDs and properties. No proprietary command is sent.
@@ -13,7 +13,7 @@ An independent, open-source Android starter for a simple watch companion. OpenFi
 - Editable manual sleep-duration entry in 15-minute increments, stored locally.
 - No account, analytics, network permission, or cloud sync.
 
-Earlier offline inspection notes for a supplied NoiseFit package mention BLE scan/connect and Health Connect write permissions, plus Ryeex/NoiseFit heart-rate and sleep model names. Those observations do **not** reveal the proprietary watch pairing, authentication, command, protobuf, or sleep-transfer protocol. This checkout currently has no APK/XAPK available for REA/JADX analysis. OpenFit does not decode proprietary NoiseFit QR codes; its QR flow currently accepts a Bluetooth MAC address only. Previous hard-coded UUID guesses have been removed; no proprietary writes are attempted. Device-name filtering is a convenience, not proof of identity. OpenFit deliberately does not claim ColorFit Ultra Buzz interoperability until a user-authorized, safe protocol capture or direct hardware test validates it. Generic BLE scanning and the standard Heart Rate Service may not be enough for this watch.
+Static inspection of NoiseFit 5.5.0's supplied XAPK found a main APK and ARM64 split, the `libVeryFitMulti.so` and `libble-crypto.so` libraries, and BLE/authentication-related DEX metadata. This confirms a proprietary watch stack exists, but does not by itself reveal the exact GATT UUID roles, handshake, keys, or wire format. OpenFit requests normal Android Bluetooth bonding only after a GATT operation reports insufficient authentication/encryption, then reconnects to check access; if the already-bonded watch still rejects access, OpenFit reports that proprietary NoiseFit authentication remains unsupported. It never sends guessed auth/protocol bytes or copies NoiseFit code. The QR flow accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity. Successful ColorFit Ultra Buzz app-level pairing remains unverified and requires a user-authorized device test.
 
 ## Build
 
@@ -29,7 +29,7 @@ The GitHub Actions Android workflow runs unit tests and creates this debug APK f
 
 ## Health data and limitations
 
-The current release does not estimate, infer, or import sleep stages, and does not use Health Connect. The heart-rate history is an on-device, notification-derived daily summary and cannot promise continuous coverage. A manually logged sleep duration is a journal entry, not a medical measurement. Background synchronization, Health Connect integration, validated ColorFit Ultra Buzz pairing, and watch sleep-transfer support are future work.
+The current release does not estimate, infer, or import sleep stages, and does not use Health Connect. The heart-rate history is an on-device, notification-derived daily summary and cannot promise continuous coverage. A manually logged sleep duration is a journal entry, not a medical measurement. Background synchronization, Health Connect integration, the proprietary NoiseFit application-level authentication handshake, validated ColorFit Ultra Buzz pairing, and watch sleep-transfer support are future work.
 
 ## Development
 

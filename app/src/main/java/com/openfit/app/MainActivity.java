@@ -16,8 +16,10 @@ import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -101,6 +103,9 @@ public final class MainActivity extends Activity {
     private int selectedTab;
     private Runnable scanTimeout;
     private Runnable connectionTimeout;
+    private BluetoothDevice pendingBondDevice;
+    private boolean bondInProgress;
+    private boolean bondReceiverRegistered;
     private boolean reconnectAfterPermission;
     private boolean qrConnectionPending;
     private boolean qrScanPending;
@@ -113,6 +118,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
+        registerBondReceiver();
         render();
         refreshConnectionState();
     }
@@ -151,7 +157,13 @@ public final class MainActivity extends Activity {
             }
             return;
         }
-        if (requestCode == REQUEST_ENABLE_BLUETOOTH && resultCode == RESULT_OK) {
+        if (requestCode == REQUEST_ENABLE_BLUETOOTH) {
+            if (resultCode != RESULT_OK) {
+                qrConnectionPending = false;
+                reconnectAfterPermission = false;
+                connectionStatus.setText("Bluetooth is off · turn it on to pair your watch");
+                return;
+            }
             if (qrConnectionPending) {
                 qrConnectionPending = false;
                 if (qrDeviceAddress != null) connect(bluetoothAdapter.getRemoteDevice(qrDeviceAddress));
@@ -613,6 +625,9 @@ public final class MainActivity extends Activity {
                             try { source.discoverServices(); } catch (SecurityException e) { scanStatus.setText("Bluetooth permission needed"); }
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             cancelConnectionTimeout();
+                            if ((status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
+                                    || status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION)
+                                    && handleGattSecurityFailure(source.getDevice(), status)) return;
                             deviceStatus.setText("No watch connected");
                             homeWatchSummary.setText("No watch connected");
                             connectionStatus.setText(status == BluetoothGatt.GATT_SUCCESS
@@ -628,8 +643,10 @@ public final class MainActivity extends Activity {
                     runOnUiThread(() -> {
                         if (source != gatt) return;
                         if (status != BluetoothGatt.GATT_SUCCESS) {
-                            connectionStatus.setText("Connected · service discovery failed");
-                            scanStatus.setText("Could not inspect watch services");
+                            if (!handleGattSecurityFailure(source.getDevice(), status)) {
+                                connectionStatus.setText("Connected · service discovery failed (GATT " + status + ")");
+                                scanStatus.setText("Could not inspect watch services");
+                            }
                             return;
                         }
                         BluetoothGattService service = source.getService(HEART_RATE_SERVICE);
@@ -682,8 +699,8 @@ public final class MainActivity extends Activity {
                         if (status == BluetoothGatt.GATT_SUCCESS) {
                             connectionStatus.setText("Connected · receiving standard heart-rate data");
                             scanStatus.setText("Heart-rate notifications enabled");
-                        } else {
-                            connectionStatus.setText("Connected · watch rejected heart-rate notifications");
+                        } else if (!handleGattSecurityFailure(source.getDevice(), status)) {
+                            connectionStatus.setText("Connected · watch rejected heart-rate notifications (GATT " + status + ")");
                             scanStatus.setText("Live heart-rate data unavailable");
                         }
                     });
@@ -716,6 +733,85 @@ public final class MainActivity extends Activity {
             connectionStatus.setText("Could not connect · retry pairing");
             scanStatus.setText("Bluetooth connection unavailable");
         }
+    }
+
+    private void registerBondReceiver() {
+        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(bondReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(bondReceiver, filter);
+        }
+        bondReceiverRegistered = true;
+    }
+
+    private final BroadcastReceiver bondReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction()) || !bondInProgress) return;
+            BluetoothDevice device;
+            if (Build.VERSION.SDK_INT >= 33) {
+                device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+            } else {
+                device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            }
+            if (device == null || pendingBondDevice == null) return;
+            try {
+                if (!pendingBondDevice.getAddress().equals(device.getAddress())) return;
+                int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                if (state == BluetoothDevice.BOND_BONDED) {
+                    bondInProgress = false;
+                    pendingBondDevice = null;
+                    connectionStatus.setText("Bluetooth pairing accepted · reconnecting to verify watch access");
+                    scanStatus.setText("Bluetooth bond complete · checking watch authentication");
+                    handler.postDelayed(() -> connect(device), 500L);
+                } else if (state == BluetoothDevice.BOND_NONE) {
+                    bondInProgress = false;
+                    pendingBondDevice = null;
+                    connectionStatus.setText("Bluetooth pairing was cancelled or rejected");
+                    scanStatus.setText("Keep the watch awake and accept its pairing prompt, then retry");
+                }
+            } catch (SecurityException e) {
+                bondInProgress = false;
+                pendingBondDevice = null;
+                connectionStatus.setText("Bluetooth permission is needed to finish pairing");
+            }
+        }
+    };
+
+    private boolean handleGattSecurityFailure(BluetoothDevice device, int status) {
+        if (status != BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
+                && status != BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION) return false;
+        try {
+            int bondState = device.getBondState();
+            if (bondState == BluetoothDevice.BOND_BONDED) {
+                connectionStatus.setText("Bluetooth is paired, but the watch requires NoiseFit authentication not implemented here");
+                scanStatus.setText("No proprietary authentication command was sent");
+                return true;
+            }
+            if (bondInProgress) return true;
+            connectionStatus.setText("Watch requests Bluetooth security · opening Android pairing");
+            scanStatus.setText("Accept the system Bluetooth pairing prompt if shown");
+            closeGatt();
+            pendingBondDevice = device;
+            bondInProgress = true;
+            if (!device.createBond()) {
+                bondInProgress = false;
+                pendingBondDevice = null;
+                connectionStatus.setText("Android could not start Bluetooth pairing");
+                scanStatus.setText("Retry while the watch is awake and nearby");
+            }
+        } catch (SecurityException e) {
+            bondInProgress = false;
+            pendingBondDevice = null;
+            connectionStatus.setText("Bluetooth permission is needed to pair the watch");
+            scanStatus.setText("Allow Bluetooth access, then retry");
+        } catch (IllegalStateException e) {
+            bondInProgress = false;
+            pendingBondDevice = null;
+            connectionStatus.setText("Could not start system Bluetooth pairing");
+            scanStatus.setText("Retry while the watch is awake and nearby");
+        }
+        return true;
     }
 
     private String describeDiscoveredServices(BluetoothGatt source) {
@@ -903,6 +999,10 @@ public final class MainActivity extends Activity {
         scanTimeout = null;
         stopScan();
         closeGatt();
+        if (bondReceiverRegistered) {
+            unregisterReceiver(bondReceiver);
+            bondReceiverRegistered = false;
+        }
         super.onDestroy();
     }
 
