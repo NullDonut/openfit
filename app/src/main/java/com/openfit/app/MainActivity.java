@@ -13,6 +13,7 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
@@ -34,17 +35,30 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.zxing.integration.android.IntentIntegrator;
+import com.google.zxing.integration.android.IntentResult;
+
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Original OpenFit starter UI and conservative BLE Heart Rate Service client. */
 public final class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 10;
     private static final int REQUEST_ENABLE_BLUETOOTH = 11;
+    private static final int REQUEST_QR_SCAN = 12;
+    private static final int C_BG = Color.rgb(8, 8, 8);
+    private static final int C_CARD = Color.rgb(23, 23, 23);
+    private static final int C_CARD_ALT = Color.rgb(31, 31, 31);
+    private static final int C_TEXT = Color.rgb(245, 245, 242);
+    private static final int C_MUTED = Color.rgb(157, 157, 151);
+    private static final int C_ACCENT = Color.rgb(216, 255, 46);
+    private static final int C_BORDER = Color.rgb(49, 49, 46);
     private static final UUID HEART_RATE_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_MEASUREMENT = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
@@ -67,6 +81,7 @@ public final class MainActivity extends Activity {
     private TextView heartSummary;
     private TextView scanStatus;
     private TextView sleepLog;
+    private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner scanner;
@@ -74,6 +89,9 @@ public final class MainActivity extends Activity {
     private ScanCallback scanCallback;
     private boolean scanning;
     private boolean reconnectAfterPermission;
+    private boolean qrConnectionPending;
+    private String qrDeviceAddress;
+    private final java.util.Map<String, String> watchNames = new java.util.HashMap<>();
     private int latestHeartRate = -1;
     private String connectedDeviceName = "No watch connected";
 
@@ -88,94 +106,200 @@ public final class MainActivity extends Activity {
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_PERMISSIONS && allGranted(grantResults)) {
-            if (reconnectAfterPermission) reconnectSavedDevice();
+            if (qrDeviceAddress != null) { reconnectAfterPermission = false; saveAndConnectQrDevice(); }
+            else if (reconnectAfterPermission) reconnectSavedDevice();
             else startScan();
         } else if (requestCode == REQUEST_PERMISSIONS) {
             reconnectAfterPermission = false;
+            qrDeviceAddress = null;
             toast("Bluetooth permission is needed to find your watch.");
         }
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_ENABLE_BLUETOOTH && resultCode == RESULT_OK) startScan();
+        if (requestCode == REQUEST_QR_SCAN) {
+            IntentResult result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+            if (result != null && result.getContents() != null) handlePairingQr(result.getContents());
+            return;
+        }
+        if (requestCode == REQUEST_ENABLE_BLUETOOTH && resultCode == RESULT_OK) {
+            if (qrConnectionPending) {
+                qrConnectionPending = false;
+                if (qrDeviceAddress != null) connect(bluetoothAdapter.getRemoteDevice(qrDeviceAddress));
+                else reconnectSavedDevice();
+            } else startScan();
+        }
     }
 
     private void render() {
-        int bg = Color.rgb(246, 248, 250);
+        getWindow().setStatusBarColor(C_BG);
+        getWindow().setNavigationBarColor(C_BG);
+        getWindow().getDecorView().setSystemUiVisibility(0);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
         page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(22), dp(22), dp(22), dp(30));
-        page.setBackgroundColor(bg);
+        page.setPadding(dp(22), dp(26), dp(22), dp(34));
+        page.setBackgroundColor(C_BG);
         scroll.addView(page);
         setContentView(scroll);
 
-        TextView brand = text("openfit", 30, Color.rgb(23, 37, 55), true);
-        page.addView(brand, lp(-1, -2));
-        TextView subtitle = text("YOUR HEALTH, YOUR DATA", 11, Color.rgb(109, 123, 139), true);
-        subtitle.setLetterSpacing(.13f);
-        page.addView(subtitle, lp(-1, -2, 0, 3, 0, 20));
+        LinearLayout masthead = new LinearLayout(this);
+        masthead.setGravity(Gravity.CENTER_VERTICAL);
+        page.addView(masthead, lp(-1, -2, 0, 0, 0, 25));
+        TextView mark = text("◉", 21, C_ACCENT, true);
+        masthead.addView(mark, lp(dp(34), -2));
+        TextView brand = text("openfit", 27, C_TEXT, true);
+        masthead.addView(brand, lp(-2, -2));
+        TextView edition = text("  /  DAILY", 10, C_MUTED, true);
+        edition.setLetterSpacing(.14f);
+        masthead.addView(edition, lp(-2, -2, 5, 4, 0, 0));
+
+        TextView greeting = text("YOUR BODY,", 12, C_MUTED, true);
+        greeting.setLetterSpacing(.16f);
+        page.addView(greeting, lp(-1, -2, 0, 0, 0, 2));
+        TextView headline = text("in your rhythm.", 31, C_TEXT, true);
+        page.addView(headline, lp(-1, -2));
+        TextView subtitle = text("A little more connected, every day.", 14, C_MUTED, false);
+        page.addView(subtitle, lp(-1, -2, 0, 5, 0, 23));
 
         LinearLayout deviceCard = card();
-        page.addView(deviceCard, lp(-1, -2, 0, 4, 0, 12));
-        TextView eyebrow = text("YOUR DEVICE", 11, Color.rgb(100, 116, 132), true);
-        eyebrow.setLetterSpacing(.1f);
-        deviceCard.addView(eyebrow, lp(-1, -2));
-        deviceStatus = text("No watch connected", 19, Color.rgb(27, 43, 60), true);
-        deviceCard.addView(deviceStatus, lp(-1, -2, 0, 12, 0, 0));
-        connectionStatus = text("Connect your ColorFit Ultra Buzz to get started.", 13, Color.rgb(108, 123, 138), false);
-        deviceCard.addView(connectionStatus, lp(-1, -2, 0, 4, 0, 0));
-        scanStatus = text("Bluetooth discovery", 12, Color.rgb(31, 133, 123), true);
+        page.addView(deviceCard, lp(-1, -2, 0, 0, 0, 13));
+        LinearLayout deviceHeading = new LinearLayout(this);
+        deviceHeading.setGravity(Gravity.CENTER_VERTICAL);
+        deviceCard.addView(deviceHeading, lp(-1, -2));
+        TextView eyebrow = text("MY WATCH", 11, C_MUTED, true);
+        eyebrow.setLetterSpacing(.13f);
+        deviceHeading.addView(eyebrow, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView liveMark = text("●  PRIVATE", 9, C_ACCENT, true);
+        liveMark.setLetterSpacing(.08f);
+        deviceHeading.addView(liveMark, lp(-2, -2));
+        deviceStatus = text("No watch connected", 21, C_TEXT, true);
+        deviceCard.addView(deviceStatus, lp(-1, -2, 0, 18, 0, 0));
+        connectionStatus = text("Bring your ColorFit close to get started.", 13, C_MUTED, false);
+        deviceCard.addView(connectionStatus, lp(-1, -2, 0, 6, 0, 0));
+        scanStatus = text("READY WHEN YOU ARE", 10, C_ACCENT, true);
+        scanStatus.setLetterSpacing(.1f);
         deviceCard.addView(scanStatus, lp(-1, -2, 0, 16, 0, 0));
-        Button pair = button("Pair a watch");
-        pair.setOnClickListener(v -> beginPermissionFlow());
-        deviceCard.addView(pair, lp(-1, dp(50), 0, 15, 0, 0));
-        reconnectButton = button("Reconnect saved watch");
+        Button pair = button("Find my watch   ↗");
+        pair.setOnClickListener(v -> showPairingOptions());
+        deviceCard.addView(pair, lp(-1, dp(52), 0, 16, 0, 0));
+        reconnectButton = secondaryButton("Reconnect saved watch");
         reconnectButton.setVisibility(View.GONE);
         reconnectButton.setOnClickListener(v -> reconnectSavedDevice());
         deviceCard.addView(reconnectButton, lp(-1, dp(48), 0, 8, 0, 0));
+        deviceResults = new LinearLayout(this);
+        deviceResults.setOrientation(LinearLayout.VERTICAL);
+        deviceCard.addView(deviceResults, lp(-1, -2, 0, 12, 0, 0));
 
-        TextView section = text("TODAY", 12, Color.rgb(101, 117, 134), true);
-        section.setLetterSpacing(.12f);
-        page.addView(section, lp(-1, -2, 2, 14, 0, 8));
+        TextView section = text("TODAY", 11, C_MUTED, true);
+        section.setLetterSpacing(.15f);
+        page.addView(section, lp(-1, -2, 1, 12, 0, 10));
 
         LinearLayout heartCard = card();
-        page.addView(heartCard, lp(-1, -2, 0, 0, 0, 10));
-        TextView heartTitle = text("Heart rate", 16, Color.rgb(28, 44, 61), true);
-        heartCard.addView(heartTitle, lp(-1, -2));
+        page.addView(heartCard, lp(-1, -2, 0, 0, 0, 12));
+        LinearLayout heartHeading = new LinearLayout(this);
+        heartHeading.setGravity(Gravity.CENTER_VERTICAL);
+        heartCard.addView(heartHeading, lp(-1, -2));
+        TextView heartTitle = text("Heart rate", 16, C_TEXT, true);
+        heartHeading.addView(heartTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView heartIcon = text("♥", 17, C_ACCENT, true);
+        heartHeading.addView(heartIcon, lp(-2, -2));
         LinearLayout metricRow = new LinearLayout(this);
         metricRow.setGravity(Gravity.BOTTOM);
-        heartCard.addView(metricRow, lp(-1, -2, 0, 11, 0, 0));
-        heartRateValue = text("--", 42, Color.rgb(20, 109, 101), true);
+        heartCard.addView(metricRow, lp(-1, -2, 0, 9, 0, 0));
+        heartRateValue = text("--", 52, C_ACCENT, true);
         metricRow.addView(heartRateValue, lp(-2, -2));
-        TextView bpm = text(" bpm", 14, Color.rgb(100, 115, 132), false);
-        metricRow.addView(bpm, lp(-2, -2, 0, 0, 0, 7));
-        TextView heartNote = text("Live reading when the watch exposes the standard Heart Rate Service.", 12, Color.rgb(108, 123, 138), false);
+        TextView bpm = text(" bpm", 13, C_MUTED, false);
+        metricRow.addView(bpm, lp(-2, -2, 0, 0, 0, 10));
+        TextView heartNote = text("Live reading when your watch shares standard heart-rate data.", 12, C_MUTED, false);
         heartNote.setLineSpacing(dp(2), 1f);
-        heartCard.addView(heartNote, lp(-1, -2, 0, 7, 0, 0));
-        heartSummary = text("No readings yet", 12, Color.rgb(108, 123, 138), false);
+        heartCard.addView(heartNote, lp(-1, -2, 0, 3, 0, 0));
+        heartSummary = text("No readings yet", 12, C_MUTED, false);
         heartSummary.setLineSpacing(dp(2), 1f);
-        heartCard.addView(heartSummary, lp(-1, -2, 0, 8, 0, 0));
+        heartCard.addView(heartSummary, lp(-1, -2, 0, 10, 0, 0));
 
         LinearLayout sleepCard = card();
-        page.addView(sleepCard, lp(-1, -2, 0, 0, 0, 12));
-        TextView sleepTitle = text("Sleep", 16, Color.rgb(28, 44, 61), true);
-        sleepCard.addView(sleepTitle, lp(-1, -2));
-        sleepLog = text("No sleep entry yet", 18, Color.rgb(28, 44, 61), true);
-        sleepCard.addView(sleepLog, lp(-1, -2, 0, 10, 0, 0));
-        TextView sleepNote = text("Sleep from the watch is not yet decoded. Add a private local note for now.", 12, Color.rgb(108, 123, 138), false);
+        page.addView(sleepCard, lp(-1, -2, 0, 0, 0, 14));
+        LinearLayout sleepHeading = new LinearLayout(this);
+        sleepHeading.setGravity(Gravity.CENTER_VERTICAL);
+        sleepCard.addView(sleepHeading, lp(-1, -2));
+        TextView sleepTitle = text("Sleep", 16, C_TEXT, true);
+        sleepHeading.addView(sleepTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView moon = text("◐", 18, C_ACCENT, true);
+        sleepHeading.addView(moon, lp(-2, -2));
+        sleepLog = text("No sleep entry yet", 20, C_TEXT, true);
+        sleepCard.addView(sleepLog, lp(-1, -2, 0, 12, 0, 0));
+        TextView sleepNote = text("A private note, stored only on this phone.", 12, C_MUTED, false);
         sleepNote.setLineSpacing(dp(2), 1f);
         sleepCard.addView(sleepNote, lp(-1, -2, 0, 5, 0, 0));
-        Button sleep = button("Add sleep duration");
+        Button sleep = secondaryButton("Add sleep duration   +");
         sleep.setOnClickListener(v -> showSleepEditor());
-        sleepCard.addView(sleep, lp(-1, dp(48), 0, 13, 0, 0));
+        sleepCard.addView(sleep, lp(-1, dp(48), 0, 14, 0, 0));
 
-        TextView privacy = text("On-device starter · no account · no analytics · no data leaves this phone", 11, Color.rgb(115, 127, 141), false);
+        TextView privacy = text("NO ACCOUNT     ·     NO TRACKING     ·     YOUR DATA STAYS HERE", 9, C_MUTED, true);
+        privacy.setLetterSpacing(.06f);
         privacy.setGravity(Gravity.CENTER);
-        privacy.setLineSpacing(dp(2), 1f);
+        privacy.setLineSpacing(dp(3), 1f);
         page.addView(privacy, lp(-1, -2, 0, 9, 0, 0));
+    }
+
+    private void showPairingOptions() {
+        new AlertDialog.Builder(this)
+                .setTitle("Add your watch")
+                .setItems(new String[] {"Search for my ColorFit", "Scan a pairing QR code"}, (dialog, which) -> {
+                    if (which == 0) beginPermissionFlow();
+                    else startQrScan();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void startQrScan() {
+        new IntentIntegrator(this)
+                .setRequestCode(REQUEST_QR_SCAN)
+                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                .setPrompt("Scan a QR code containing the watch Bluetooth address")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+                .initiateScan();
+    }
+
+    private void handlePairingQr(String contents) {
+        Matcher address = Pattern.compile("(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}").matcher(contents);
+        if (!address.find()) {
+            toast("This QR code doesn’t contain a Bluetooth address OpenFit can use.");
+            return;
+        }
+        if (bluetoothAdapter == null) { toast("This phone does not have Bluetooth."); return; }
+        qrDeviceAddress = address.group().toUpperCase(Locale.ROOT);
+        try { bluetoothAdapter.getRemoteDevice(qrDeviceAddress); }
+        catch (IllegalArgumentException e) { toast("The QR code contains an invalid Bluetooth address."); return; }
+        String[] permissions = requiredPermissions();
+        List<String> missing = new ArrayList<>();
+        for (String permission : permissions) if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
+        if (!missing.isEmpty()) {
+            reconnectAfterPermission = true;
+            requestPermissions(missing.toArray(new String[0]), REQUEST_PERMISSIONS);
+            return;
+        }
+        saveAndConnectQrDevice();
+    }
+
+    private void saveAndConnectQrDevice() {
+        if (qrDeviceAddress == null) return;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_DEVICE_ADDRESS, qrDeviceAddress)
+                .putString(KEY_DEVICE_NAME, "QR paired watch")
+                .apply();
+        if (!bluetoothAdapter.isEnabled()) {
+            qrConnectionPending = true;
+            startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), REQUEST_ENABLE_BLUETOOTH);
+            return;
+        }
+        connect(bluetoothAdapter.getRemoteDevice(qrDeviceAddress));
     }
 
     private void beginPermissionFlow() {
@@ -211,14 +335,16 @@ public final class MainActivity extends Activity {
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) { beginPermissionFlow(); return; }
         stopScan();
         foundDevices.clear();
+        watchNames.clear();
         try {
             scanner = bluetoothAdapter.getBluetoothLeScanner();
             if (scanner == null) { toast("Bluetooth LE scanning is unavailable."); return; }
             scanning = true;
-            scanStatus.setText("Looking for nearby BLE devices…");
+            deviceResults.removeAllViews();
+            scanStatus.setText("LOOKING FOR YOUR COLORFIT…");
             scanCallback = new ScanCallback() {
-                @Override public void onScanResult(int callbackType, ScanResult result) { addDevice(result.getDevice()); }
-                @Override public void onBatchScanResults(List<ScanResult> results) { for (ScanResult r : results) addDevice(r.getDevice()); }
+                @Override public void onScanResult(int callbackType, ScanResult result) { addDevice(result); }
+                @Override public void onBatchScanResults(List<ScanResult> results) { for (ScanResult r : results) addDevice(r); }
                 @Override public void onScanFailed(int errorCode) {
                     scanning = false;
                     runOnUiThread(() -> scanStatus.setText("Scan failed · code " + errorCode));
@@ -227,7 +353,7 @@ public final class MainActivity extends Activity {
             scanner.startScan(scanCallback);
             handler.postDelayed(() -> {
                 stopScan();
-                scanStatus.setText(foundDevices.isEmpty() ? "No BLE devices found. Keep the watch nearby and awake, then retry." : "Choose your watch below.");
+                scanStatus.setText(foundDevices.isEmpty() ? "NO MATCH FOUND · wake the watch and try again" : "WATCH FOUND · choose your device");
                 showDeviceChoices();
             }, SCAN_WINDOW_MS);
         } catch (SecurityException e) {
@@ -238,34 +364,49 @@ public final class MainActivity extends Activity {
     }
 
     @SuppressWarnings("MissingPermission")
-    private void addDevice(BluetoothDevice device) {
-        if (device == null) return;
+    private void addDevice(ScanResult result) {
+        if (result == null || result.getDevice() == null) return;
+        BluetoothDevice device = result.getDevice();
+        ScanRecord record = result.getScanRecord();
+        String advertisedName = record == null ? null : record.getDeviceName();
         runOnUiThread(() -> {
+            String cachedName;
+            try { cachedName = device.getName(); } catch (SecurityException e) { cachedName = null; }
+            String name = isTargetWatchName(advertisedName) ? advertisedName : cachedName;
+            if (!isTargetWatchName(name)) return;
             for (BluetoothDevice found : foundDevices) if (found.getAddress().equals(device.getAddress())) return;
             foundDevices.add(device);
-            scanStatus.setText("Found " + foundDevices.size() + " nearby device" + (foundDevices.size() == 1 ? "" : "s") + "…");
+            watchNames.put(device.getAddress(), name);
+            scanStatus.setText("COLORFIT FOUND · checking nearby");
         });
+    }
+
+    private boolean isTargetWatchName(String name) {
+        if (name == null) return false;
+        String normalized = name.toLowerCase(Locale.ROOT);
+        return normalized.contains("noisefit") || normalized.contains("noise")
+                || normalized.contains("colorfit") || normalized.contains("ultra buzz");
     }
 
     @SuppressWarnings("MissingPermission")
     private void showDeviceChoices() {
+        deviceResults.removeAllViews();
         if (foundDevices.isEmpty()) {
-            Button retry = button("Scan again");
+            TextView empty = text("No recognizable Noise / ColorFit watch was found. Keep it awake and nearby, or pair by QR.", 12, C_MUTED, false);
+            empty.setLineSpacing(dp(2), 1f);
+            deviceResults.addView(empty, lp(-1, -2, 0, 0, 0, 8));
+            Button retry = secondaryButton("Search again");
             retry.setOnClickListener(v -> beginPermissionFlow());
-            page.addView(retry, lp(-1, dp(48), 0, 0, 0, 12));
+            deviceResults.addView(retry, lp(-1, dp(46)));
             return;
         }
-        TextView heading = text("NEARBY DEVICES", 12, Color.rgb(101, 117, 134), true);
-        heading.setLetterSpacing(.1f);
-        page.addView(heading, lp(-1, -2, 2, 0, 0, 8));
         for (BluetoothDevice device : new ArrayList<>(foundDevices)) {
-            String name;
-            try { name = device.getName(); } catch (SecurityException e) { name = null; }
-            if (name == null || name.trim().isEmpty()) name = "Unnamed device";
-            Button choice = button(name + "  ·  Connect");
+            String name = watchNames.get(device.getAddress());
+            if (name == null) name = "Noise / ColorFit watch";
+            Button choice = secondaryButton(name + "   ·   Connect  ↗");
             BluetoothDevice selected = device;
             choice.setOnClickListener(v -> connect(selected));
-            page.addView(choice, lp(-1, dp(48), 0, 0, 0, 7));
+            deviceResults.addView(choice, lp(-1, dp(48), 0, 0, 0, 7));
         }
     }
 
@@ -407,7 +548,7 @@ public final class MainActivity extends Activity {
         String latest = "Latest · " + DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault())
                 .format(new Date(prefs.getLong(KEY_HEART_RATE_TIME, 0L)));
         if (java.time.LocalDate.now().toString().equals(prefs.getString("heart_rate_day", ""))) {
-            latest += "\\nToday · " + prefs.getInt("heart_rate_min", bpm) + "–"
+            latest += "\nToday · " + prefs.getInt("heart_rate_min", bpm) + "–"
                     + prefs.getInt("heart_rate_max", bpm) + " bpm · "
                     + prefs.getInt("heart_rate_samples", 1) + " minute samples";
         }
@@ -429,7 +570,7 @@ public final class MainActivity extends Activity {
         minutes.setDisplayedValues(new String[] {"00", "15", "30", "45"});
         minutes.setWrapSelectorWheel(false);
         fields.addView(hours, lp(dp(92), dp(150)));
-        TextView separator = text("h", 16, Color.rgb(80, 95, 110), true);
+        TextView separator = text("h", 16, C_MUTED, true);
         fields.addView(separator, lp(dp(25), -2));
         fields.addView(minutes, lp(dp(92), dp(150)));
         AlertDialog dialog = new AlertDialog.Builder(this)
@@ -528,10 +669,11 @@ public final class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(18), dp(17), dp(18), dp(17));
+        box.setPadding(dp(19), dp(18), dp(19), dp(18));
         GradientDrawable shape = new GradientDrawable();
-        shape.setColor(Color.WHITE);
-        shape.setCornerRadius(dp(18));
+        shape.setColor(C_CARD);
+        shape.setCornerRadius(dp(21));
+        shape.setStroke(dp(1), C_BORDER);
         box.setBackground(shape);
         if (Build.VERSION.SDK_INT >= 21) box.setElevation(dp(1));
         return box;
@@ -542,11 +684,28 @@ public final class MainActivity extends Activity {
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(14);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(Color.rgb(9, 9, 9));
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setStateListAnimator(null);
         GradientDrawable shape = new GradientDrawable();
-        shape.setColor(Color.rgb(20, 109, 101));
-        shape.setCornerRadius(dp(14));
+        shape.setColor(C_ACCENT);
+        shape.setCornerRadius(dp(15));
+        b.setBackground(shape);
+        return b;
+    }
+
+    private Button secondaryButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(14);
+        b.setTextColor(C_TEXT);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setStateListAnimator(null);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(C_CARD_ALT);
+        shape.setCornerRadius(dp(15));
+        shape.setStroke(dp(1), C_BORDER);
         b.setBackground(shape);
         return b;
     }
