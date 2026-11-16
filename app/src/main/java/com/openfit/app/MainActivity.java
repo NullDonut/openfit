@@ -105,6 +105,7 @@ public final class MainActivity extends Activity {
     private Runnable connectionTimeout;
     private BluetoothDevice pendingBondDevice;
     private boolean bondInProgress;
+    private boolean bondRequestedByApp;
     private boolean bondReceiverRegistered;
     private boolean reconnectAfterPermission;
     private boolean qrConnectionPending;
@@ -601,6 +602,7 @@ public final class MainActivity extends Activity {
         stopScan();
         closeGatt();
         try {
+            if (!ensureSystemBond(device)) return;
             String name = watchNames.get(device.getAddress());
             if (name == null || name.trim().isEmpty()) name = device.getName();
             connectedDeviceName = name == null || name.trim().isEmpty() ? "BLE watch" : name;
@@ -747,28 +749,37 @@ public final class MainActivity extends Activity {
 
     private final BroadcastReceiver bondReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction()) || !bondInProgress) return;
+            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction())) return;
             BluetoothDevice device;
             if (Build.VERSION.SDK_INT >= 33) {
                 device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
             } else {
                 device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
             }
-            if (device == null || pendingBondDevice == null) return;
+            if (device == null || pendingBondDevice == null || !bondInProgress) return;
             try {
                 if (!pendingBondDevice.getAddress().equals(device.getAddress())) return;
                 int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                int previousState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
                 if (state == BluetoothDevice.BOND_BONDED) {
+                    boolean shouldReconnect = bondRequestedByApp;
                     bondInProgress = false;
+                    bondRequestedByApp = false;
                     pendingBondDevice = null;
-                    connectionStatus.setText("Bluetooth pairing accepted · reconnecting to verify watch access");
-                    scanStatus.setText("Bluetooth bond complete · checking watch authentication");
-                    handler.postDelayed(() -> connect(device), 500L);
-                } else if (state == BluetoothDevice.BOND_NONE) {
+                    if (shouldReconnect) {
+                        connectionStatus.setText("Bluetooth pairing accepted · reconnecting to verify watch access");
+                        scanStatus.setText("Bluetooth bond complete · checking watch authentication");
+                        handler.postDelayed(() -> connect(device), 500L);
+                    }
+                } else if (state == BluetoothDevice.BOND_NONE && previousState == BluetoothDevice.BOND_BONDING) {
+                    boolean retryPairing = bondRequestedByApp;
                     bondInProgress = false;
+                    bondRequestedByApp = false;
                     pendingBondDevice = null;
-                    connectionStatus.setText("Bluetooth pairing was cancelled or rejected");
-                    scanStatus.setText("Keep the watch awake and accept its pairing prompt, then retry");
+                    if (retryPairing) {
+                        connectionStatus.setText("Bluetooth pairing was cancelled or rejected");
+                        scanStatus.setText("Keep the watch awake and accept its pairing prompt, then retry");
+                    }
                 }
             } catch (SecurityException e) {
                 bondInProgress = false;
@@ -777,6 +788,54 @@ public final class MainActivity extends Activity {
             }
         }
     };
+
+    @SuppressWarnings("MissingPermission")
+    private boolean ensureSystemBond(BluetoothDevice device) {
+        try {
+            int state = device.getBondState();
+            if (state == BluetoothDevice.BOND_BONDED) return true;
+            if (state == BluetoothDevice.BOND_BONDING) {
+                pendingBondDevice = device;
+                bondInProgress = true;
+                bondRequestedByApp = true;
+                connectionStatus.setText("Bluetooth pairing is in progress · accept the system prompt");
+                scanStatus.setText("Waiting for Android to finish pairing");
+                return false;
+            }
+            if (bondInProgress) {
+                connectionStatus.setText("Bluetooth pairing is in progress · accept the system prompt");
+                scanStatus.setText("Waiting for Android to finish pairing");
+                return false;
+            }
+            pendingBondDevice = device;
+            bondInProgress = true;
+            bondRequestedByApp = true;
+            connectionStatus.setText("Starting Android Bluetooth pairing…");
+            scanStatus.setText("Accept the system pairing prompt if shown");
+            if (!device.createBond()) {
+                pendingBondDevice = null;
+                bondInProgress = false;
+                bondRequestedByApp = false;
+                connectionStatus.setText("Android could not start Bluetooth pairing");
+                scanStatus.setText("Retry while the watch is awake and nearby");
+            }
+            return false;
+        } catch (SecurityException e) {
+            pendingBondDevice = null;
+            bondInProgress = false;
+            bondRequestedByApp = false;
+            connectionStatus.setText("Bluetooth permission is needed to pair the watch");
+            scanStatus.setText("Allow Nearby devices access, then retry");
+            return false;
+        } catch (IllegalStateException e) {
+            pendingBondDevice = null;
+            bondInProgress = false;
+            bondRequestedByApp = false;
+            connectionStatus.setText("Could not start system Bluetooth pairing");
+            scanStatus.setText("Retry while the watch is awake and nearby");
+            return false;
+        }
+    }
 
     private boolean handleGattSecurityFailure(BluetoothDevice device, int status) {
         if (status != BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
@@ -794,19 +853,23 @@ public final class MainActivity extends Activity {
             closeGatt();
             pendingBondDevice = device;
             bondInProgress = true;
+            bondRequestedByApp = true;
             if (!device.createBond()) {
                 bondInProgress = false;
+                bondRequestedByApp = false;
                 pendingBondDevice = null;
                 connectionStatus.setText("Android could not start Bluetooth pairing");
                 scanStatus.setText("Retry while the watch is awake and nearby");
             }
         } catch (SecurityException e) {
             bondInProgress = false;
+            bondRequestedByApp = false;
             pendingBondDevice = null;
             connectionStatus.setText("Bluetooth permission is needed to pair the watch");
             scanStatus.setText("Allow Bluetooth access, then retry");
         } catch (IllegalStateException e) {
             bondInProgress = false;
+            bondRequestedByApp = false;
             pendingBondDevice = null;
             connectionStatus.setText("Could not start system Bluetooth pairing");
             scanStatus.setText("Retry while the watch is awake and nearby");
