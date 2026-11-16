@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">OpenFit</string>
+    <string name="health_connect_rationale_title">OpenFit health data access</string>
+    <string name="health_connect_rationale_body">OpenFit can read heart-rate and sleep records you choose to share from Health Connect. Data is used only to show your personal dashboard and stays on this device.</string>
+</resources>
