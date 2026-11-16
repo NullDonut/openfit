@@ -37,6 +37,7 @@ import android.widget.Toast;
 
 import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
+import com.journeyapps.barcodescanner.CaptureActivity;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
@@ -52,13 +53,19 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 10;
     private static final int REQUEST_ENABLE_BLUETOOTH = 11;
     private static final int REQUEST_QR_SCAN = 12;
+    private static final int REQUEST_CAMERA_PERMISSION = 13;
     private static final int C_BG = Color.rgb(8, 8, 8);
-    private static final int C_CARD = Color.rgb(23, 23, 23);
-    private static final int C_CARD_ALT = Color.rgb(31, 31, 31);
-    private static final int C_TEXT = Color.rgb(245, 245, 242);
-    private static final int C_MUTED = Color.rgb(157, 157, 151);
-    private static final int C_ACCENT = Color.rgb(216, 255, 46);
-    private static final int C_BORDER = Color.rgb(49, 49, 46);
+    private static final int C_CARD = Color.rgb(17, 17, 17);
+    private static final int C_CARD_ALT = Color.rgb(27, 27, 27);
+    private static final int C_TEXT = Color.rgb(245, 245, 245);
+    private static final int C_MUTED = Color.rgb(143, 143, 143);
+    private static final int C_RED = Color.rgb(245, 40, 60);
+    private static final int C_ACCENT = Color.rgb(255, 255, 255);
+    private static final int C_BORDER = Color.rgb(53, 53, 53);
+    private static final UUID NOISEFIT_PROTOBUF_SERVICE = UUID.fromString("16186f00-0000-1000-8000-00807f9b34fb");
+    private static final UUID NOISEFIT_PROTOBUF_NOTIFY = UUID.fromString("16186f03-0000-1000-8000-00807f9b34fb");
+    private static final UUID NOISEFIT_BASE_SERVICE = UUID.fromString("00000001-0000-1000-8000-00805f9b34fb");
+    private static final UUID NOISEFIT_BASE_READ = UUID.fromString("00000003-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_MEASUREMENT = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
@@ -90,6 +97,7 @@ public final class MainActivity extends Activity {
     private boolean scanning;
     private boolean reconnectAfterPermission;
     private boolean qrConnectionPending;
+    private boolean qrScanPending;
     private String qrDeviceAddress;
     private final java.util.Map<String, String> watchNames = new java.util.HashMap<>();
     private int latestHeartRate = -1;
@@ -105,6 +113,16 @@ public final class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_CAMERA_PERMISSION) {
+            if (allGranted(grantResults) && qrScanPending) {
+                qrScanPending = false;
+                launchQrScanner();
+            } else {
+                qrScanPending = false;
+                toast("Camera permission is needed to scan a pairing QR code.");
+            }
+            return;
+        }
         if (requestCode == REQUEST_PERMISSIONS && allGranted(grantResults)) {
             if (qrDeviceAddress != null) { reconnectAfterPermission = false; saveAndConnectQrDevice(); }
             else if (reconnectAfterPermission) reconnectSavedDevice();
@@ -149,21 +167,27 @@ public final class MainActivity extends Activity {
         LinearLayout masthead = new LinearLayout(this);
         masthead.setGravity(Gravity.CENTER_VERTICAL);
         page.addView(masthead, lp(-1, -2, 0, 0, 0, 25));
-        TextView mark = text("◉", 21, C_ACCENT, true);
-        masthead.addView(mark, lp(dp(34), -2));
-        TextView brand = text("openfit", 27, C_TEXT, true);
+        TextView mark = text("●", 15, C_RED, true);
+        masthead.addView(mark, lp(dp(24), -2));
+        TextView brand = text("OPENFIT", 17, C_TEXT, true);
+        brand.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        brand.setLetterSpacing(.12f);
         masthead.addView(brand, lp(-2, -2));
-        TextView edition = text("  /  DAILY", 10, C_MUTED, true);
-        edition.setLetterSpacing(.14f);
-        masthead.addView(edition, lp(-2, -2, 5, 4, 0, 0));
+        TextView edition = text("  /  DAILY DEVICE LOG", 9, C_MUTED, true);
+        edition.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
+        edition.setLetterSpacing(.03f);
+        masthead.addView(edition, lp(-2, -2, 5, 3, 0, 0));
 
-        TextView greeting = text("YOUR BODY,", 12, C_MUTED, true);
-        greeting.setLetterSpacing(.16f);
-        page.addView(greeting, lp(-1, -2, 0, 0, 0, 2));
-        TextView headline = text("in your rhythm.", 31, C_TEXT, true);
+        TextView greeting = text(new java.text.SimpleDateFormat("EEE  d MMM", Locale.getDefault())
+                .format(new Date()).toUpperCase(Locale.ROOT) + "  ·  HEALTH STATUS", 10, C_MUTED, true);
+        greeting.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        greeting.setLetterSpacing(.04f);
+        page.addView(greeting, lp(-1, -2, 0, 0, 0, 9));
+        TextView headline = text("Less noise.\nMore signal.", 34, C_TEXT, true);
+        headline.setLineSpacing(dp(-1), 1f);
         page.addView(headline, lp(-1, -2));
-        TextView subtitle = text("A little more connected, every day.", 14, C_MUTED, false);
-        page.addView(subtitle, lp(-1, -2, 0, 5, 0, 23));
+        TextView subtitle = text("Your health, at a glance.", 13, C_MUTED, false);
+        page.addView(subtitle, lp(-1, -2, 0, 7, 0, 25));
 
         LinearLayout deviceCard = card();
         page.addView(deviceCard, lp(-1, -2, 0, 0, 0, 13));
@@ -173,17 +197,19 @@ public final class MainActivity extends Activity {
         TextView eyebrow = text("MY WATCH", 11, C_MUTED, true);
         eyebrow.setLetterSpacing(.13f);
         deviceHeading.addView(eyebrow, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView liveMark = text("●  PRIVATE", 9, C_ACCENT, true);
-        liveMark.setLetterSpacing(.08f);
+        TextView liveMark = text("●  ON DEVICE", 9, C_RED, true);
+        liveMark.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        liveMark.setLetterSpacing(.04f);
         deviceHeading.addView(liveMark, lp(-2, -2));
         deviceStatus = text("No watch connected", 21, C_TEXT, true);
         deviceCard.addView(deviceStatus, lp(-1, -2, 0, 18, 0, 0));
         connectionStatus = text("Bring your ColorFit close to get started.", 13, C_MUTED, false);
         deviceCard.addView(connectionStatus, lp(-1, -2, 0, 6, 0, 0));
-        scanStatus = text("READY WHEN YOU ARE", 10, C_ACCENT, true);
-        scanStatus.setLetterSpacing(.1f);
+        scanStatus = text("●  READY / NEARBY DEVICE", 10, C_RED, true);
+        scanStatus.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        scanStatus.setLetterSpacing(.02f);
         deviceCard.addView(scanStatus, lp(-1, -2, 0, 16, 0, 0));
-        Button pair = button("Find my watch   ↗");
+        Button pair = button("Add a device   +");
         pair.setOnClickListener(v -> showPairingOptions());
         deviceCard.addView(pair, lp(-1, dp(52), 0, 16, 0, 0));
         reconnectButton = secondaryButton("Reconnect saved watch");
@@ -194,8 +220,8 @@ public final class MainActivity extends Activity {
         deviceResults.setOrientation(LinearLayout.VERTICAL);
         deviceCard.addView(deviceResults, lp(-1, -2, 0, 12, 0, 0));
 
-        TextView section = text("TODAY", 11, C_MUTED, true);
-        section.setLetterSpacing(.15f);
+        TextView section = text("YOUR HEALTH", 10, C_MUTED, true);
+        section.setLetterSpacing(.14f);
         page.addView(section, lp(-1, -2, 1, 12, 0, 10));
 
         LinearLayout heartCard = card();
@@ -205,16 +231,16 @@ public final class MainActivity extends Activity {
         heartCard.addView(heartHeading, lp(-1, -2));
         TextView heartTitle = text("Heart rate", 16, C_TEXT, true);
         heartHeading.addView(heartTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView heartIcon = text("♥", 17, C_ACCENT, true);
+        TextView heartIcon = text("♥", 16, C_RED, true);
         heartHeading.addView(heartIcon, lp(-2, -2));
         LinearLayout metricRow = new LinearLayout(this);
         metricRow.setGravity(Gravity.BOTTOM);
         heartCard.addView(metricRow, lp(-1, -2, 0, 9, 0, 0));
-        heartRateValue = text("--", 52, C_ACCENT, true);
+        heartRateValue = text("--", 58, C_TEXT, true);
         metricRow.addView(heartRateValue, lp(-2, -2));
         TextView bpm = text(" bpm", 13, C_MUTED, false);
         metricRow.addView(bpm, lp(-2, -2, 0, 0, 0, 10));
-        TextView heartNote = text("Live reading when your watch shares standard heart-rate data.", 12, C_MUTED, false);
+        TextView heartNote = text("Latest reading from your connected device", 12, C_MUTED, false);
         heartNote.setLineSpacing(dp(2), 1f);
         heartCard.addView(heartNote, lp(-1, -2, 0, 3, 0, 0));
         heartSummary = text("No readings yet", 12, C_MUTED, false);
@@ -228,7 +254,7 @@ public final class MainActivity extends Activity {
         sleepCard.addView(sleepHeading, lp(-1, -2));
         TextView sleepTitle = text("Sleep", 16, C_TEXT, true);
         sleepHeading.addView(sleepTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView moon = text("◐", 18, C_ACCENT, true);
+        TextView moon = text("◌", 18, C_RED, true);
         sleepHeading.addView(moon, lp(-2, -2));
         sleepLog = text("No sleep entry yet", 20, C_TEXT, true);
         sleepCard.addView(sleepLog, lp(-1, -2, 0, 12, 0, 0));
@@ -239,7 +265,7 @@ public final class MainActivity extends Activity {
         sleep.setOnClickListener(v -> showSleepEditor());
         sleepCard.addView(sleep, lp(-1, dp(48), 0, 14, 0, 0));
 
-        TextView privacy = text("NO ACCOUNT     ·     NO TRACKING     ·     YOUR DATA STAYS HERE", 9, C_MUTED, true);
+        TextView privacy = text("PRIVATE BY DESIGN     ·     STORED ON THIS PHONE", 9, C_MUTED, true);
         privacy.setLetterSpacing(.06f);
         privacy.setGravity(Gravity.CENTER);
         privacy.setLineSpacing(dp(3), 1f);
@@ -258,13 +284,29 @@ public final class MainActivity extends Activity {
     }
 
     private void startQrScan() {
-        new IntentIntegrator(this)
-                .setRequestCode(REQUEST_QR_SCAN)
-                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-                .setPrompt("Scan a QR code containing the watch Bluetooth address")
-                .setBeepEnabled(false)
-                .setOrientationLocked(false)
-                .initiateScan();
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            qrScanPending = true;
+            requestPermissions(new String[] {Manifest.permission.CAMERA}, REQUEST_CAMERA_PERMISSION);
+            return;
+        }
+        launchQrScanner();
+    }
+
+    private void launchQrScanner() {
+        try {
+            new IntentIntegrator(this)
+                    .setRequestCode(REQUEST_QR_SCAN)
+                    .setCaptureActivity(CaptureActivity.class)
+                    .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                    .setPrompt("Scan the watch pairing code")
+                    .setBeepEnabled(false)
+                    .setOrientationLocked(false)
+                    .initiateScan();
+        } catch (SecurityException e) {
+            toast("Camera access was denied. Allow camera permission to scan a QR code.");
+        } catch (RuntimeException e) {
+            toast("Could not open the QR scanner. Check that the camera is available.");
+        }
     }
 
     private void handlePairingQr(String contents) {
@@ -341,19 +383,19 @@ public final class MainActivity extends Activity {
             if (scanner == null) { toast("Bluetooth LE scanning is unavailable."); return; }
             scanning = true;
             deviceResults.removeAllViews();
-            scanStatus.setText("LOOKING FOR YOUR COLORFIT…");
+            scanStatus.setText("●  SCANNING / 12 SEC");
             scanCallback = new ScanCallback() {
                 @Override public void onScanResult(int callbackType, ScanResult result) { addDevice(result); }
                 @Override public void onBatchScanResults(List<ScanResult> results) { for (ScanResult r : results) addDevice(r); }
                 @Override public void onScanFailed(int errorCode) {
                     scanning = false;
-                    runOnUiThread(() -> scanStatus.setText("Scan failed · code " + errorCode));
+                    runOnUiThread(() -> scanStatus.setText("●  SCAN ERROR / " + errorCode));
                 }
             };
             scanner.startScan(scanCallback);
             handler.postDelayed(() -> {
                 stopScan();
-                scanStatus.setText(foundDevices.isEmpty() ? "NO MATCH FOUND · wake the watch and try again" : "WATCH FOUND · choose your device");
+                scanStatus.setText(foundDevices.isEmpty() ? "●  NO DEVICE / RETRY WHEN AWAKE" : "●  DEVICE FOUND / SELECT TO CONNECT");
                 showDeviceChoices();
             }, SCAN_WINDOW_MS);
         } catch (SecurityException e) {
@@ -377,7 +419,7 @@ public final class MainActivity extends Activity {
             for (BluetoothDevice found : foundDevices) if (found.getAddress().equals(device.getAddress())) return;
             foundDevices.add(device);
             watchNames.put(device.getAddress(), name);
-            scanStatus.setText("COLORFIT FOUND · checking nearby");
+            scanStatus.setText("●  WATCH FOUND / CHECKING NEARBY");
         });
     }
 
@@ -446,11 +488,16 @@ public final class MainActivity extends Activity {
                 @Override public void onServicesDiscovered(BluetoothGatt source, int status) {
                     runOnUiThread(() -> {
                         if (source != gatt) return;
+                        if (status != BluetoothGatt.GATT_SUCCESS) {
+                            connectionStatus.setText("Connected · service discovery failed");
+                            scanStatus.setText("Could not inspect watch services");
+                            return;
+                        }
                         BluetoothGattService service = source.getService(HEART_RATE_SERVICE);
                         BluetoothGattCharacteristic characteristic = service == null ? null : service.getCharacteristic(HEART_RATE_MEASUREMENT);
-                        if (status != BluetoothGatt.GATT_SUCCESS || characteristic == null) {
-                            connectionStatus.setText("Connected · this watch doesn’t advertise standard heart-rate notifications");
-                            scanStatus.setText("Proprietary watch protocol not yet supported");
+                        if (characteristic == null) {
+                            connectionStatus.setText(inspectKnownNoiseFitServices(source));
+                            scanStatus.setText("Known NoiseFit channels checked · no commands sent");
                             return;
                         }
                         int properties = characteristic.getProperties();
@@ -474,8 +521,18 @@ public final class MainActivity extends Activity {
                             }
                             byte[] configuration = notify ? ENABLE_NOTIFICATION : new byte[] {0x02, 0x00};
                             connectionStatus.setText("Connected · enabling heart-rate notifications");
-                            if (Build.VERSION.SDK_INT >= 33) source.writeDescriptor(descriptor, configuration);
-                            else { descriptor.setValue(configuration); source.writeDescriptor(descriptor); }
+                            int writeResult;
+                            if (Build.VERSION.SDK_INT >= 33) {
+                                writeResult = source.writeDescriptor(descriptor, configuration);
+                            } else {
+                                descriptor.setValue(configuration);
+                                writeResult = source.writeDescriptor(descriptor)
+                                        ? BluetoothGatt.GATT_SUCCESS : BluetoothGatt.GATT_FAILURE;
+                            }
+                            if (writeResult != BluetoothGatt.GATT_SUCCESS) {
+                                connectionStatus.setText("Connected · could not queue heart-rate notifications");
+                                scanStatus.setText("Live heart-rate data unavailable");
+                            }
                         } catch (SecurityException e) { scanStatus.setText("Permission needed to enable notifications"); }
                     });
                 }
@@ -504,6 +561,18 @@ public final class MainActivity extends Activity {
         } catch (IllegalArgumentException | IllegalStateException e) {
             connectionStatus.setText("Could not connect · retry pairing");
         }
+    }
+
+    private String inspectKnownNoiseFitServices(BluetoothGatt source) {
+        BluetoothGattService protobuf = source.getService(NOISEFIT_PROTOBUF_SERVICE);
+        BluetoothGattService base = source.getService(NOISEFIT_BASE_SERVICE);
+        boolean protobufNotify = protobuf != null && protobuf.getCharacteristic(NOISEFIT_PROTOBUF_NOTIFY) != null;
+        boolean baseChannel = base != null && base.getCharacteristic(NOISEFIT_BASE_READ) != null;
+        if (protobufNotify || baseChannel) {
+            String channel = protobufNotify ? "Protobuf" : "base BLE";
+            return "Connected · NoiseFit " + channel + " service found; data commands are not yet validated";
+        }
+        return "Connected · no supported heart-rate service found on this watch";
     }
 
     private void updateHeartRate(byte[] value) {
@@ -672,7 +741,7 @@ public final class MainActivity extends Activity {
         box.setPadding(dp(19), dp(18), dp(19), dp(18));
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(C_CARD);
-        shape.setCornerRadius(dp(21));
+        shape.setCornerRadius(dp(4));
         shape.setStroke(dp(1), C_BORDER);
         box.setBackground(shape);
         if (Build.VERSION.SDK_INT >= 21) box.setElevation(dp(1));
@@ -689,7 +758,7 @@ public final class MainActivity extends Activity {
         b.setStateListAnimator(null);
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(C_ACCENT);
-        shape.setCornerRadius(dp(15));
+        shape.setCornerRadius(dp(8));
         b.setBackground(shape);
         return b;
     }
@@ -704,7 +773,7 @@ public final class MainActivity extends Activity {
         b.setStateListAnimator(null);
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(C_CARD_ALT);
-        shape.setCornerRadius(dp(15));
+        shape.setCornerRadius(dp(8));
         shape.setStroke(dp(1), C_BORDER);
         b.setBackground(shape);
         return b;
