@@ -4,15 +4,16 @@ An independent, open-source Android starter for a simple watch companion. OpenFi
 
 ## Current scope
 
-- Dark, high-contrast dashboard with a watch pairing entry point.
+- Dark, high-contrast dashboard with Home, Health, Devices, and Sleep tabs.
 - Permission-aware Bluetooth LE discovery that surfaces recognizable Noise / ColorFit names rather than every nearby device, plus a manually triggered reconnect to the saved watch.
 - Pairing QR scanner accepts QR content containing a Bluetooth MAC address; proprietary NoiseFit QR payloads are not decoded.
 - Live heart rate only when a connected device exposes the Bluetooth SIG Heart Rate Service (0x180D) and a notifiable Heart Rate Measurement characteristic (0x2A37). Notification-write outcomes are reflected in the connection state.
+- Read-only GATT diagnostics list discovered service/characteristic UUIDs and properties. No proprietary command is sent.
 - Latest heart rate plus local daily min/max and minute-sample summary. This is a summary of received BLE notifications, not continuous monitoring.
 - Editable manual sleep-duration entry in 15-minute increments, stored locally.
 - No account, analytics, network permission, or cloud sync.
 
-The supplied NoiseFit package declares BLE scan/connect and Health Connect write permissions, and contains Ryeex/NoiseFit heart-rate and sleep model names. Those observations do **not** reveal the proprietary watch pairing, authentication, command, or sleep-transfer protocol. OpenFit does not decode proprietary NoiseFit QR codes; its QR flow currently accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity. OpenFit deliberately does not claim ColorFit Ultra Buzz interoperability until a user-authorized, safe protocol capture or direct hardware test validates it. Generic BLE scanning and the standard Heart Rate Service may not be enough for this watch.
+Earlier offline inspection notes for a supplied NoiseFit package mention BLE scan/connect and Health Connect write permissions, plus Ryeex/NoiseFit heart-rate and sleep model names. Those observations do **not** reveal the proprietary watch pairing, authentication, command, protobuf, or sleep-transfer protocol. This checkout currently has no APK/XAPK available for REA/JADX analysis. OpenFit does not decode proprietary NoiseFit QR codes; its QR flow currently accepts a Bluetooth MAC address only. Previous hard-coded UUID guesses have been removed; no proprietary writes are attempted. Device-name filtering is a convenience, not proof of identity. OpenFit deliberately does not claim ColorFit Ultra Buzz interoperability until a user-authorized, safe protocol capture or direct hardware test validates it. Generic BLE scanning and the standard Heart Rate Service may not be enough for this watch.
 
 ## Build
 

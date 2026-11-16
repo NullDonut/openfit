@@ -62,10 +62,6 @@ public final class MainActivity extends Activity {
     private static final int C_RED = Color.rgb(245, 40, 60);
     private static final int C_ACCENT = Color.rgb(255, 255, 255);
     private static final int C_BORDER = Color.rgb(53, 53, 53);
-    private static final UUID NOISEFIT_PROTOBUF_SERVICE = UUID.fromString("16186f00-0000-1000-8000-00807f9b34fb");
-    private static final UUID NOISEFIT_PROTOBUF_NOTIFY = UUID.fromString("16186f03-0000-1000-8000-00807f9b34fb");
-    private static final UUID NOISEFIT_BASE_SERVICE = UUID.fromString("00000001-0000-1000-8000-00805f9b34fb");
-    private static final UUID NOISEFIT_BASE_READ = UUID.fromString("00000003-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_MEASUREMENT = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
@@ -82,6 +78,13 @@ public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
     private LinearLayout page;
+    private LinearLayout homePanel;
+    private LinearLayout healthPanel;
+    private LinearLayout devicePanel;
+    private LinearLayout sleepPanel;
+    private LinearLayout bottomNavigation;
+    private final List<TextView> tabLabels = new ArrayList<>();
+    private TextView homeWatchSummary;
     private TextView connectionStatus;
     private TextView deviceStatus;
     private TextView heartRateValue;
@@ -95,6 +98,9 @@ public final class MainActivity extends Activity {
     private BluetoothGatt gatt;
     private ScanCallback scanCallback;
     private boolean scanning;
+    private int selectedTab;
+    private Runnable scanTimeout;
+    private Runnable connectionTimeout;
     private boolean reconnectAfterPermission;
     private boolean qrConnectionPending;
     private boolean qrScanPending;
@@ -137,8 +143,12 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_QR_SCAN) {
-            IntentResult result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
-            if (result != null && result.getContents() != null) handlePairingQr(result.getContents());
+            try {
+                IntentResult result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+                if (result != null && result.getContents() != null) handlePairingQr(result.getContents());
+            } catch (RuntimeException e) {
+                toast("The QR scan could not be read. Try again or use Bluetooth search.");
+            }
             return;
         }
         if (requestCode == REQUEST_ENABLE_BLUETOOTH && resultCode == RESULT_OK) {
@@ -154,19 +164,25 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(C_BG);
         getWindow().setNavigationBarColor(C_BG);
         getWindow().getDecorView().setSystemUiVisibility(0);
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
+        shell.setBackgroundColor(C_BG);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
         page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(22), dp(26), dp(22), dp(34));
+        page.setPadding(dp(22), dp(24), dp(22), dp(20));
         page.setBackgroundColor(C_BG);
         scroll.addView(page);
-        setContentView(scroll);
+        shell.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        setContentView(shell);
 
+        homePanel = panel();
+        page.addView(homePanel);
         LinearLayout masthead = new LinearLayout(this);
         masthead.setGravity(Gravity.CENTER_VERTICAL);
-        page.addView(masthead, lp(-1, -2, 0, 0, 0, 25));
+        homePanel.addView(masthead, lp(-1, -2, 0, 0, 0, 25));
         TextView mark = text("●", 15, C_RED, true);
         masthead.addView(mark, lp(dp(24), -2));
         TextView brand = text("OPENFIT", 17, C_TEXT, true);
@@ -182,15 +198,34 @@ public final class MainActivity extends Activity {
                 .format(new Date()).toUpperCase(Locale.ROOT) + "  ·  HEALTH STATUS", 10, C_MUTED, true);
         greeting.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         greeting.setLetterSpacing(.04f);
-        page.addView(greeting, lp(-1, -2, 0, 0, 0, 9));
+        homePanel.addView(greeting, lp(-1, -2, 0, 0, 0, 9));
         TextView headline = text("Less noise.\nMore signal.", 34, C_TEXT, true);
         headline.setLineSpacing(dp(-1), 1f);
-        page.addView(headline, lp(-1, -2));
+        homePanel.addView(headline, lp(-1, -2));
         TextView subtitle = text("Your health, at a glance.", 13, C_MUTED, false);
-        page.addView(subtitle, lp(-1, -2, 0, 7, 0, 25));
+        homePanel.addView(subtitle, lp(-1, -2, 0, 7, 0, 18));
+        LinearLayout overview = card();
+        homePanel.addView(overview, lp(-1, -2, 0, 0, 0, 14));
+        TextView overviewLabel = text("YOUR WATCH", 10, C_MUTED, true);
+        overviewLabel.setLetterSpacing(.12f);
+        overview.addView(overviewLabel, lp(-1, -2));
+        homeWatchSummary = text("No watch connected", 18, C_TEXT, true);
+        overview.addView(homeWatchSummary, lp(-1, -2, 0, 10, 0, 0));
+        TextView overviewHint = text("Pair a watch to see supported data and connection details.", 12, C_MUTED, false);
+        overviewHint.setLineSpacing(dp(2), 1f);
+        overview.addView(overviewHint, lp(-1, -2, 0, 5, 0, 10));
+        Button openWatch = secondaryButton("Manage watch   →");
+        openWatch.setOnClickListener(v -> selectTab(2));
+        overview.addView(openWatch, lp(-1, dp(44)));
+        Button openHealth = secondaryButton("View health   →");
+        openHealth.setOnClickListener(v -> selectTab(1));
+        homePanel.addView(openHealth, lp(-1, dp(48), 0, 0, 0, 0));
 
+        devicePanel = panel();
+        page.addView(devicePanel);
+        addPanelHeading(devicePanel, "DEVICES", "Pair and manage your watch");
         LinearLayout deviceCard = card();
-        page.addView(deviceCard, lp(-1, -2, 0, 0, 0, 13));
+        devicePanel.addView(deviceCard, lp(-1, -2, 0, 0, 0, 13));
         LinearLayout deviceHeading = new LinearLayout(this);
         deviceHeading.setGravity(Gravity.CENTER_VERTICAL);
         deviceCard.addView(deviceHeading, lp(-1, -2));
@@ -208,6 +243,7 @@ public final class MainActivity extends Activity {
         scanStatus = text("●  READY / NEARBY DEVICE", 10, C_RED, true);
         scanStatus.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         scanStatus.setLetterSpacing(.02f);
+        scanStatus.setOnClickListener(v -> showGattDiagnostics());
         deviceCard.addView(scanStatus, lp(-1, -2, 0, 16, 0, 0));
         Button pair = button("Add a device   +");
         pair.setOnClickListener(v -> showPairingOptions());
@@ -222,10 +258,13 @@ public final class MainActivity extends Activity {
 
         TextView section = text("YOUR HEALTH", 10, C_MUTED, true);
         section.setLetterSpacing(.14f);
-        page.addView(section, lp(-1, -2, 1, 12, 0, 10));
+        healthPanel = panel();
+        page.addView(healthPanel);
+        addPanelHeading(healthPanel, "HEALTH", "Your data, at a glance");
+        healthPanel.addView(section, lp(-1, -2, 1, 12, 0, 10));
 
         LinearLayout heartCard = card();
-        page.addView(heartCard, lp(-1, -2, 0, 0, 0, 12));
+        healthPanel.addView(heartCard, lp(-1, -2, 0, 0, 0, 12));
         LinearLayout heartHeading = new LinearLayout(this);
         heartHeading.setGravity(Gravity.CENTER_VERTICAL);
         heartCard.addView(heartHeading, lp(-1, -2));
@@ -247,8 +286,11 @@ public final class MainActivity extends Activity {
         heartSummary.setLineSpacing(dp(2), 1f);
         heartCard.addView(heartSummary, lp(-1, -2, 0, 10, 0, 0));
 
+        sleepPanel = panel();
+        page.addView(sleepPanel);
+        addPanelHeading(sleepPanel, "SLEEP", "Personal log");
         LinearLayout sleepCard = card();
-        page.addView(sleepCard, lp(-1, -2, 0, 0, 0, 14));
+        sleepPanel.addView(sleepCard, lp(-1, -2, 0, 0, 0, 14));
         LinearLayout sleepHeading = new LinearLayout(this);
         sleepHeading.setGravity(Gravity.CENTER_VERTICAL);
         sleepCard.addView(sleepHeading, lp(-1, -2));
@@ -269,7 +311,95 @@ public final class MainActivity extends Activity {
         privacy.setLetterSpacing(.06f);
         privacy.setGravity(Gravity.CENTER);
         privacy.setLineSpacing(dp(3), 1f);
-        page.addView(privacy, lp(-1, -2, 0, 9, 0, 0));
+        homePanel.addView(privacy, lp(-1, -2, 0, 9, 0, 0));
+        buildBottomNavigation(shell);
+        selectTab(0);
+    }
+
+    private LinearLayout panel() {
+        LinearLayout result = new LinearLayout(this);
+        result.setOrientation(LinearLayout.VERTICAL);
+        result.setVisibility(View.GONE);
+        return result;
+    }
+
+    private void addPanelHeading(LinearLayout target, String eyebrow, String title) {
+        TextView label = text(eyebrow, 10, C_RED, true);
+        label.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        label.setLetterSpacing(.12f);
+        target.addView(label, lp(-1, -2, 0, 0, 0, 8));
+        TextView heading = text(title, 27, C_TEXT, true);
+        target.addView(heading, lp(-1, -2, 0, 0, 0, 22));
+    }
+
+    private void buildBottomNavigation(LinearLayout shell) {
+        bottomNavigation = new LinearLayout(this);
+        bottomNavigation.setOrientation(LinearLayout.HORIZONTAL);
+        bottomNavigation.setGravity(Gravity.CENTER);
+        bottomNavigation.setPadding(dp(8), dp(8), dp(8), dp(8));
+        bottomNavigation.setBackgroundColor(C_CARD);
+        String[] labels = {"⌂\nHome", "♥\nHealth", "◉\nDevices", "◌\nSleep"};
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            TextView item = text(labels[i], 11, C_MUTED, true);
+            item.setGravity(Gravity.CENTER);
+            item.setLineSpacing(dp(2), 1f);
+            item.setPadding(dp(4), dp(5), dp(4), dp(5));
+            item.setOnClickListener(v -> selectTab(index));
+            bottomNavigation.addView(item, new LinearLayout.LayoutParams(0, dp(50), 1f));
+            tabLabels.add(item);
+        }
+        shell.addView(bottomNavigation, lp(-1, dp(66)));
+    }
+
+    private void selectTab(int tab) {
+        selectedTab = Math.max(0, Math.min(tab, 3));
+        if (homePanel == null) return;
+        homePanel.setVisibility(selectedTab == 0 ? View.VISIBLE : View.GONE);
+        healthPanel.setVisibility(selectedTab == 1 ? View.VISIBLE : View.GONE);
+        devicePanel.setVisibility(selectedTab == 2 ? View.VISIBLE : View.GONE);
+        sleepPanel.setVisibility(selectedTab == 3 ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < tabLabels.size(); i++) {
+            tabLabels.get(i).setTextColor(i == selectedTab ? C_TEXT : C_MUTED);
+            tabLabels.get(i).setBackgroundColor(i == selectedTab ? C_CARD_ALT : Color.TRANSPARENT);
+        }
+        if (page != null) page.scrollTo(0, 0);
+    }
+
+    private void showGattDiagnostics() {
+        if (gatt == null) {
+            toast("Connect a watch first to inspect its GATT services.");
+            return;
+        }
+        StringBuilder report = new StringBuilder("GATT service report\n\n");
+        List<BluetoothGattService> services = gatt.getServices();
+        if (services == null || services.isEmpty()) {
+            report.append("No services discovered yet. Keep the watch connected and check again.");
+        } else {
+            for (BluetoothGattService service : services) {
+                report.append("SERVICE  ").append(service.getUuid()).append('\n');
+                for (BluetoothGattCharacteristic characteristic : service.getCharacteristics()) {
+                    int p = characteristic.getProperties();
+                    report.append("  CHAR  ").append(characteristic.getUuid()).append("  [")
+                            .append((p & BluetoothGattCharacteristic.PROPERTY_READ) != 0 ? "READ " : "")
+                            .append((p & BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ? "WRITE " : "")
+                            .append((p & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 ? "WRITE_NO_RESPONSE " : "")
+                            .append((p & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ? "NOTIFY " : "")
+                            .append((p & BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0 ? "INDICATE " : "")
+                            .append("]\n");
+                }
+                report.append('\n');
+            }
+            report.append("UUIDs and properties only. No proprietary writes have been sent.");
+        }
+        TextView body = text(report.toString(), 12, C_TEXT, false);
+        body.setTypeface(Typeface.MONOSPACE);
+        body.setTextIsSelectable(true);
+        body.setPadding(dp(18), dp(14), dp(18), dp(14));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        new AlertDialog.Builder(this).setTitle("Watch diagnostics")
+                .setView(scroll).setPositiveButton("Done", null).show();
     }
 
     private void showPairingOptions() {
@@ -332,10 +462,6 @@ public final class MainActivity extends Activity {
 
     private void saveAndConnectQrDevice() {
         if (qrDeviceAddress == null) return;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString(KEY_DEVICE_ADDRESS, qrDeviceAddress)
-                .putString(KEY_DEVICE_NAME, "QR paired watch")
-                .apply();
         if (!bluetoothAdapter.isEnabled()) {
             qrConnectionPending = true;
             startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), REQUEST_ENABLE_BLUETOOTH);
@@ -393,15 +519,21 @@ public final class MainActivity extends Activity {
                 }
             };
             scanner.startScan(scanCallback);
-            handler.postDelayed(() -> {
+            scanTimeout = () -> {
+                if (!scanning) return;
                 stopScan();
                 scanStatus.setText(foundDevices.isEmpty() ? "●  NO DEVICE / RETRY WHEN AWAKE" : "●  DEVICE FOUND / SELECT TO CONNECT");
                 showDeviceChoices();
-            }, SCAN_WINDOW_MS);
+            };
+            handler.postDelayed(scanTimeout, SCAN_WINDOW_MS);
         } catch (SecurityException e) {
+            scanning = false;
+            scanCallback = null;
             scanStatus.setText("Bluetooth permission was not granted.");
-        } catch (IllegalStateException e) {
-            scanStatus.setText("Bluetooth is unavailable right now.");
+        } catch (RuntimeException e) {
+            scanning = false;
+            scanCallback = null;
+            scanStatus.setText("Could not start BLE scan · " + e.getClass().getSimpleName());
         }
     }
 
@@ -457,29 +589,36 @@ public final class MainActivity extends Activity {
         stopScan();
         closeGatt();
         try {
-            String name = device.getName();
+            String name = watchNames.get(device.getAddress());
+            if (name == null || name.trim().isEmpty()) name = device.getName();
             connectedDeviceName = name == null || name.trim().isEmpty() ? "BLE watch" : name;
-            connectionStatus.setText("Connecting securely over Bluetooth LE…");
+            connectionStatus.setText("Connecting over Bluetooth LE…");
             scanStatus.setText("Connecting");
             gatt = device.connectGatt(this, false, new BluetoothGattCallback() {
                 @Override public void onConnectionStateChange(BluetoothGatt source, int status, int newState) {
                     runOnUiThread(() -> {
                         if (source != gatt) return;
                         if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                            cancelConnectionTimeout();
                             deviceStatus.setText(connectedDeviceName);
+                            homeWatchSummary.setText(connectedDeviceName);
                             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                                     .putString(KEY_DEVICE_ADDRESS, source.getDevice().getAddress())
                                     .putString(KEY_DEVICE_NAME, connectedDeviceName)
                                     .apply();
                             reconnectButton.setText("Reconnect to " + connectedDeviceName);
                             reconnectButton.setVisibility(View.VISIBLE);
-                            connectionStatus.setText("Connected · checking for heart-rate support");
+                            connectionStatus.setText("Connected over Bluetooth LE · checking watch services");
                             scanStatus.setText("Discovering standard BLE services…");
                             try { source.discoverServices(); } catch (SecurityException e) { scanStatus.setText("Bluetooth permission needed"); }
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                            cancelConnectionTimeout();
                             deviceStatus.setText("No watch connected");
-                            connectionStatus.setText("Disconnected · pair again when you’re ready");
-                            scanStatus.setText("Bluetooth discovery");
+                            homeWatchSummary.setText("No watch connected");
+                            connectionStatus.setText(status == BluetoothGatt.GATT_SUCCESS
+                                    ? "Disconnected · reconnect when you’re ready"
+                                    : "Connection failed · GATT status " + status);
+                            scanStatus.setText(status == BluetoothGatt.GATT_SUCCESS ? "Bluetooth discovery" : "Check that the watch is awake and nearby, then retry");
                             gatt = null;
                             source.close();
                         }
@@ -496,8 +635,8 @@ public final class MainActivity extends Activity {
                         BluetoothGattService service = source.getService(HEART_RATE_SERVICE);
                         BluetoothGattCharacteristic characteristic = service == null ? null : service.getCharacteristic(HEART_RATE_MEASUREMENT);
                         if (characteristic == null) {
-                            connectionStatus.setText(inspectKnownNoiseFitServices(source));
-                            scanStatus.setText("Known NoiseFit channels checked · no commands sent");
+                            connectionStatus.setText("Connected · no standard heart-rate characteristic");
+                            scanStatus.setText(describeDiscoveredServices(source));
                             return;
                         }
                         int properties = characteristic.getProperties();
@@ -556,23 +695,41 @@ public final class MainActivity extends Activity {
                     updateHeartRate(value);
                 }
             }, BluetoothDevice.TRANSPORT_LE);
+            if (gatt == null) {
+                connectionStatus.setText("Could not start the Bluetooth connection · retry pairing");
+                scanStatus.setText("Bluetooth connection unavailable");
+                return;
+            }
+            BluetoothGatt attempt = gatt;
+            connectionTimeout = () -> {
+                if (gatt != attempt) return;
+                connectionTimeout = null;
+                connectionStatus.setText("Connection timed out · keep the watch awake and nearby");
+                scanStatus.setText("No Bluetooth connection was established");
+                closeGatt();
+            };
+            handler.postDelayed(connectionTimeout, 20_000L);
         } catch (SecurityException e) {
             connectionStatus.setText("Bluetooth permission was not granted.");
+            scanStatus.setText("Allow Bluetooth access, then retry");
         } catch (IllegalArgumentException | IllegalStateException e) {
             connectionStatus.setText("Could not connect · retry pairing");
+            scanStatus.setText("Bluetooth connection unavailable");
         }
     }
 
-    private String inspectKnownNoiseFitServices(BluetoothGatt source) {
-        BluetoothGattService protobuf = source.getService(NOISEFIT_PROTOBUF_SERVICE);
-        BluetoothGattService base = source.getService(NOISEFIT_BASE_SERVICE);
-        boolean protobufNotify = protobuf != null && protobuf.getCharacteristic(NOISEFIT_PROTOBUF_NOTIFY) != null;
-        boolean baseChannel = base != null && base.getCharacteristic(NOISEFIT_BASE_READ) != null;
-        if (protobufNotify || baseChannel) {
-            String channel = protobufNotify ? "Protobuf" : "base BLE";
-            return "Connected · NoiseFit " + channel + " service found; data commands are not yet validated";
+    private String describeDiscoveredServices(BluetoothGatt source) {
+        List<BluetoothGattService> services = source.getServices();
+        if (services == null || services.isEmpty()) return "No GATT services returned by the watch";
+        StringBuilder summary = new StringBuilder("GATT ").append(services.size()).append(" service(s): ");
+        int shown = Math.min(3, services.size());
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) summary.append(" · ");
+            String uuid = services.get(i).getUuid().toString();
+            summary.append(uuid.substring(0, 8));
         }
-        return "Connected · no supported heart-rate service found on this watch";
+        if (services.size() > shown) summary.append(" · +").append(services.size() - shown);
+        return summary.toString();
     }
 
     private void updateHeartRate(byte[] value) {
@@ -705,6 +862,7 @@ public final class MainActivity extends Activity {
             String name = prefs.getString(KEY_DEVICE_NAME, "saved watch");
             connectedDeviceName = name;
             deviceStatus.setText(name);
+            homeWatchSummary.setText(name);
             connectionStatus.setText("Saved watch · reconnect when nearby");
             reconnectButton.setText("Reconnect to " + name);
             reconnectButton.setVisibility(View.VISIBLE);
@@ -713,6 +871,10 @@ public final class MainActivity extends Activity {
 
     @SuppressWarnings("MissingPermission")
     private void stopScan() {
+        if (scanTimeout != null) {
+            handler.removeCallbacks(scanTimeout);
+            scanTimeout = null;
+        }
         if (scanner != null && scanCallback != null && scanning) {
             try { scanner.stopScan(scanCallback); } catch (SecurityException ignored) { }
         }
@@ -720,8 +882,16 @@ public final class MainActivity extends Activity {
         scanCallback = null;
     }
 
+    private void cancelConnectionTimeout() {
+        if (connectionTimeout != null) {
+            handler.removeCallbacks(connectionTimeout);
+            connectionTimeout = null;
+        }
+    }
+
     @SuppressWarnings("MissingPermission")
     private void closeGatt() {
+        cancelConnectionTimeout();
         if (gatt != null) {
             try { gatt.disconnect(); gatt.close(); } catch (SecurityException ignored) { }
             gatt = null;
@@ -730,6 +900,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        scanTimeout = null;
         stopScan();
         closeGatt();
         super.onDestroy();
