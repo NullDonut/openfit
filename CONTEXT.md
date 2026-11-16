@@ -8,7 +8,7 @@ OpenFit is an independent Android watch-companion starter (`com.openfit.app`), n
 
 - Native Android app is implemented in Java in `app/src/main/java/com/openfit/app/MainActivity.java`.
 - Min SDK 26, compile/target SDK 35. AGP 8.6.1 and Gradle 8.9; Java source compatibility 11; CI uses JDK 17.
-- Pairing QR uses JourneyApps ZXing Embedded 4.3.0. CAMERA is requested at runtime. The current working changes explicitly register and select `com.journeyapps.barcodescanner.CaptureActivity`; QR contents are still accepted only when they include a Bluetooth MAC address. This change has not yet been verified on a physical Android device.
+- Pairing QR uses JourneyApps ZXing Embedded 4.3.0. CAMERA is requested at runtime. The app explicitly registers and selects `com.journeyapps.barcodescanner.CaptureActivity`; because the library manifest also sets `screenOrientation` and `theme`, the app manifest must declare `tools:replace="android:screenOrientation,android:theme"` when overriding them. QR contents are still accepted only when they include a Bluetooth MAC address. This has not yet been verified on a physical Android device.
 - Dashboard styling is intentionally dark and high contrast, with white/black surfaces, small red status accents, monospaced labels, and a live date.
 - Heart-rate data is accepted only from the standard BLE Heart Rate Measurement characteristic (service 0x180D, characteristic 0x2A37). Daily min/max and minute sample counts are stored locally; they describe received notifications, not continuous monitoring.
 - Manual sleep duration is stored locally and is not a device measurement or sleep-stage estimate.
@@ -32,4 +32,4 @@ GitHub Actions (`.github/workflows/android.yml`) runs these unit tests/builds fo
 
 ## Current work handoff
 
-Current branch: `feat/nothing-dark-pairing-ui`. The local working tree includes QR capture-activity registration/explicit selection, more specific camera failure feedback, revised dark/red UI treatment and dynamic date label, and explicit reporting when BLE notification descriptor writes cannot be queued. Run the Android workflow after committing/pushing; test QR scanning and watch behavior on a real device before calling the QR fix verified.
+Current branch: `feat/nothing-dark-pairing-ui`. Latest CI identified duplicate ZXing `CaptureActivity` orientation/theme attributes; the app now declares tools:replace for its intentional portrait orientation and app theme overrides. The working tree also includes camera failure feedback, revised dark/red UI treatment and dynamic date label, and explicit reporting when BLE notification descriptor writes cannot be queued. Re-run the Android workflow after committing/pushing; test QR scanning and watch behavior on a real device before calling the QR fix verified.
