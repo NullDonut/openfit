@@ -389,8 +389,9 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/BerryFrameTest.java` | 10 tests: golden bind bytes, round-trip, truncation rejection, serial wrap, nested payload |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK. It is **not yet wired into
-`MainActivity`** and has **not been validated against hardware**.
+with `javac` + JUnit without Gradle or the Android SDK. `BerryProfile` is now used by
+`MainActivity` for profile detection; `BerryFrame`/`BerrySewear` are **not yet used** to send
+commands, and the protocol has **not been validated against hardware**.
 
 Connection layer added on 2026-11-17 (in `MainActivity`, not yet device-tested):
 
