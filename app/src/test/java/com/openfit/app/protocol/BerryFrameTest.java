@@ -54,9 +54,16 @@ public class BerryFrameTest {
     }
 
     @Test public void privateFrameExposesCommandId() {
-        BerryFrame frame = BerryFrame.decode(BerryFrame.privateCommand(2, 4, new byte[] {0}).toBytes());
+        BerryFrame frame = BerryFrame.decode(BerryFrame.privateCommand(2, 4, new byte[] {0, 1, 2}).toBytes());
         assertTrue(frame.isPrivate());
         assertEquals(4, frame.privateCmdId());
+        assertArrayEquals(new byte[] {0, 1, 2}, frame.privateData());
+    }
+
+    @Test public void ackIsAShortControlFrame() {
+        assertArrayEquals(new byte[] {
+            (byte) 0x99, (byte) 0x99, 0x48, 0x5A, 0x2A, 0x00, 0x00, 0x00
+        }, BerryFrame.ackBytes(0x2A, 0));
     }
 
     @Test public void frameLengthMatchesDeclaredPayload() {

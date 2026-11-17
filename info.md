@@ -102,20 +102,22 @@ Verified in this pass (details and wire tables in `PROTOCOL.md`):
   magics `0x5A488888` (app→dev), `0x5A486666` (dev→app), `0x5A489999` (ack),
   `0x5A481111` (large file); `event` 1=protobuf / 3=private, `type` 3=protobuf / 2=private.
 - `SEWear` protobuf schema (type=1, id=2, payload fields 3..21, error_code=100).
-- Bind sequence: private `cmdId=3` (bind), `cmdId=2` (user id), `cmdId=4` (bind result ± flag),
-  plus `SEWear{ACCOUNT,0}` bind-state query. **No encryption or challenge/response was found
-  on the Berry path** — the earlier assumption that a proprietary encrypted handshake blocks
-  pairing does not hold for this stack.
+- Bind sequence: private `cmdId=1` (protocol description) → `cmdId=2` (`UserIdBean` account
+  identity) → `cmdId=3` (bind request, only if not already bound) → `cmdId=4` (confirmation
+  ± flag). The watch answers cmd 3 with a bind status byte and cmd 4 with 0/1. **No encryption
+  or challenge/response was found on the Berry path** — the earlier assumption that a proprietary
+  encrypted handshake blocks pairing does not hold for this stack.
 - `libble-crypto.so` is fully decoded: `nativeEncrypt` is RC4 seeded with a fixed 256-byte
   permutation from `.rodata`, keyed by the first array argument; `mixA`/`mixB` are byte
   permutations of MAC + 16-bit pid; `regA/regB/logA/logB/logC` are hard-coded ints.
 - Implemented independently in `app/src/main/java/com/openfit/app/protocol/`
-  (`BerryFrame`, `BerrySewear`, `BerryProfile`) with `app/src/test/java/.../BerryFrameTest.java`;
-  verified locally with javac + JUnit 4.13.2 (10 tests green). Not yet wired into `MainActivity`
-  and not validated against a watch.
+  (`BerryFrame`, `BerryBinding`, `BerryFrameReader`, `BerrySewear`, `BerryProfile`) with 28
+  unit tests, verified locally with javac + JUnit 4.13.2 and wired into `MainActivity` (MTU,
+  chunked writes, reassembly, bind state machine, per-watch token). The bind write path is not
+  yet validated against a watch.
 
-Still open: which stack the ColorFit Ultra Buzz exposes; Berry MTU segmentation; inner field
-numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
+Still open: whether this watch answers the Berry bind over GATT or expects classic SPP; inner
+field numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
 
 ## Project notes
 

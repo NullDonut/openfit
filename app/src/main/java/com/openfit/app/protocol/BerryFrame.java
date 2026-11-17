@@ -66,9 +66,15 @@ public final class BerryFrame {
         return of(HEAD_APP_REQ_DEV, serialNo, EVENT_PRIVATE, TYPE_PRIVATE, privatePayload(cmdId, data));
     }
 
-    /** Acknowledgement to a watch request; empty payload, error byte only. */
-    public static BerryFrame ack(int serialNo, int error) {
-        return of(HEAD_ASK, serialNo, 0, 0, new byte[] {(byte) error, 0, 0});
+    /**
+     * Acknowledgement to a watch request. Unlike command frames, an ack has no event/type/length
+     * header: it is exactly {@code head(4) serial(1) error(1) placeholder(1) placeholder(1)}.
+     */
+    public static byte[] ackBytes(int serialNo, int error) {
+        return new byte[] {
+            (byte) HEAD_ASK, (byte) (HEAD_ASK >> 8), (byte) (HEAD_ASK >> 16), (byte) (HEAD_ASK >> 24),
+            (byte) serialNo, (byte) error, 0, 0
+        };
     }
 
     public static byte[] privatePayload(int cmdId, byte[] data) {
@@ -141,5 +147,11 @@ public final class BerryFrame {
     /** cmdId of a private frame, or -1 when this is not a private frame. */
     public int privateCmdId() {
         return isPrivate() && payload.length >= 2 ? (payload[0] & 0xff) | ((payload[1] & 0xff) << 8) : -1;
+    }
+
+    /** Body of a private frame (after cmdId and its length), or an empty array. */
+    public byte[] privateData() {
+        if (!isPrivate() || payload.length < 4) return new byte[0];
+        return Arrays.copyOfRange(payload, 4, payload.length);
     }
 }

@@ -36,6 +36,7 @@ public final class BerrySewear {
     public static final int FIELD_ID = 2;
 
     // Private (event=3) command ids observed in the reference implementation.
+    public static final int PRIVATE_CMD_PROTOCOL = 1;
     public static final int PRIVATE_CMD_USER_ID = 2;
     public static final int PRIVATE_CMD_BIND = 3;
     public static final int PRIVATE_CMD_BIND_RESULT = 4;

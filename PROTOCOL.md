@@ -1,8 +1,9 @@
 # OpenFit protocol notes (from NoiseFit 5.5.0 static analysis)
 
-Status: **protocol recovered statically; Berry stack now confirmed on hardware.** The GATT
-layout and notification setup have been validated against a physical ColorFit Ultra Buzz, but no
-proprietary command (bind, HR control) has been sent to a watch yet.
+Status: **protocol recovered statically; Berry stack confirmed on hardware.** The GATT layout and
+notification setup have been validated against a physical ColorFit Ultra Buzz. The Berry account
+bind (protocol → user id → bind → confirm) is now implemented over that GATT link, but the watch
+has not yet been observed answering the proprietary writes; only a physical test can confirm it.
 
 ## Provenance
 
@@ -50,7 +51,9 @@ Conclusions:
   whole successful connection), which supports OpenFit's connect-first ordering.
 - `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`); `0000fee7` does not
   appear in the Berry or Ryeex sources and is not used.
-- No proprietary write has been sent to the watch yet.
+- No proprietary write was sent during the GATT dump above. OpenFit now implements the full
+  Berry bind over this same GATT service (see the bind sequence below) and sends it on connect;
+  that write path still needs a physical-device confirmation.
 
 
 ## Berry profile (primary candidate)
@@ -104,8 +107,17 @@ Head magics (`BleCommonAttributes`, written LE so the bytes on the wire are reve
 | `BERRY_ASK_HEAD_VALUE` | `0x5A489999` | `99 99 48 5A` | ack/ask |
 | `BERRY_DEV_LARGE_FILES_HEAD_VALUE` | `0x5A481111` | `11 11 48 5A` | large files |
 
-Ack frame (`CmdAskBean`, answering a request): head `0x5A489999`, same serialNo,
-`error` byte, two zero placeholders — i.e. 9-byte frame with empty payload.
+Ack frame (`CmdAskBean`, answering a request): `head(4) 0x5A489999`, the **same serialNo**,
+`error` byte, two zero placeholders. It is a bare 8-byte control frame — unlike command frames
+it has **no event/type/length header**:
+
+```
+99 99 48 5A  <serialNo>  <error>  00 00
+```
+
+The watch sends one ack for every command frame the phone sends; OpenFit also acks every
+`66 66 48 5A` frame it receives. `error` is the index of the sub-request being acknowledged
+(0 for a single command).
 
 Large-file chunks use a second wrapper (`BluetoothService#a(byte[])`):
 `[1][len+4 hi][len+4 lo][payload…][CRC32 of the preceding bytes]`.
@@ -130,19 +142,70 @@ Type: OTHER=0 ACCOUNT=1 DEVICE=2 SYSTEM_TIME=3 USER_SETTINGS=4 SPORTING=5 FITNES
 
 ### Bind (pairing) sequence, as implemented by NoiseFit
 
-NoiseFit performs Android system bonding first (`BerryBluetoothService#checkBondByMac` →
-`createBond` → `BOND_STATE_CHANGED` receiver → connect). OpenFit now connects first and keeps
-that bond flow as a fallback for GATT 5/15, so the sequence below is only reached once a watch
-actually accepts the link. On top of bonding the
-Berry protocol uses private commands (`event=3`, `type=2`, payload `cmdId:2 len:2 data`):
+NoiseFit normally performs Android system bonding first (`BerryBluetoothService#checkBondByMac` →
+`createBond` → `BOND_STATE_CHANGED` receiver → connect) and then talks Berry over **classic
+SPP** (`00001101-…`). OpenFit deliberately connects over **BLE GATT** first and keeps the system
+bond as a fallback for GATT 5/15. The account bind itself is the same on both transports.
+
+On top of bonding the Berry protocol uses private commands (`event=3`, `type=2`, payload
+`cmdId:2 len:2 data`), in this order:
 
 | Step | Frame | Meaning |
 |---|---|---|
-| 1 | private `cmdId=3`, empty | `bindDevice()` — request bind |
-| 2 | private `cmdId=2`, `UserIdBean` | user id/account data (`a(String,String,String)`) |
-| 3 | private `cmdId=4`, `[0/1]` | `bindDeviceSuc(boolean)` — confirm |
-| alt | SEWear `ACCOUNT(1)` id `0` | `requestDeviceBindState()` |
-| alt | SEWear `FACTORY(12)` id `6` | `sendBlueToothName` (example of type/id pairing) |
+| 0 | private `cmdId=1`, empty | protocol description request (`internalGetProtocol`) |
+| 1 | watch → private `cmdId=1`, `ProtocolBean` | device type, protocol version, platform |
+| 2 | private `cmdId=2`, `UserIdBean` | account identity (`setUserIdByBerryProtocol`) |
+| 3 | watch → private `cmdId=2`, `BerryDeviceInfoBean` | `isBind`, `isSameUser` |
+| 4 | private `cmdId=3`, empty | only when `!isBind` (`bindDevice`) |
+| 5 | watch → private `cmdId=3`, one status byte | see below |
+| 6 | private `cmdId=4`, `[1]` | only when status is `0` (`bindDeviceSuc(true)`) |
+| 7 | watch → private `cmdId=4`, one byte | `0` = bind confirmed |
+
+If step 3 reports `isBind && isSameUser`, the watch is already paired with this account and
+steps 4–7 are skipped. If it reports `isBind && !isSameUser`, the watch belongs to another
+account and pairing stops.
+
+`UserIdBean` (`com.zhapp.ble.bean.berry.UserIdBean#getCmdBytes`):
+
+```
+[len(userId):1][userId UTF-8][0xBB][len(phoneName):1][phoneName][len(version):1][version]
+```
+
+The length bytes come from `String.length()` (UTF-16 units), not the UTF-8 byte count; fields
+are truncated to 100 / 255 / 50 characters. Phone name is `Build.MODEL` with all whitespace
+removed, version is `Build.VERSION.RELEASE`.
+
+Token rule (`ZhConnectHandler`, when the device has no stored token):
+
+```
+token = (UUID.randomUUID() + random(10..9999) + userId).substring(30)
+```
+
+The token is persisted per device so later connections can prove the same account.
+
+Bind status byte from the watch (private `cmdId=3`):
+
+| Value | Meaning |
+|---|---|
+| 0 | accepted — send `cmdId=4 [1]` |
+| 1 | invalid token |
+| 2 | bind refused |
+| 3 | already bound (treated as success) |
+| 4 | device was already reset |
+| 5 | watch timed out waiting for confirmation |
+| 6 | watch could not parse the request |
+
+`BerryDeviceInfoBean` (`cmdId=2`) layout:
+
+```
+0..1    device type, LE
+2..4    firmware version, printed as v[4].[3].[2]
+5..10   device MAC, LE
+11..16  Bluetooth MAC, LE
+17      serial-number length
+18..    serial number bytes, printed in reverse
++       flags: bit7 clear => same user, bit6 set => bound
+```
 
 No encryption, no challenge/response and no key material were observed on the Berry path:
 the private/protobuf payloads are sent in clear inside the frame above. This is why the Berry
@@ -209,9 +272,15 @@ not yet decompiled.
 
 1. ~~Which profile the ColorFit Ultra Buzz exposes~~ — answered by the hardware dump above:
    Berry (and the Ryeex base service) are present; Berry is selected.
-2. Berry MTU/segmentation: whether a frame larger than the negotiated MTU is split by the
-   stack or must be chunked by the caller (the large-file path uses `CHAR_PROTOBUF_UUID_03`).
+2. ~~Berry MTU/segmentation~~ — answered: the reference GATT stack (`BerryRingService`) requests
+   MTU 517 and splits every outbound frame into `MTU - 3` chunks (20 when negotiation fails).
+   OpenFit mirrors that with a 247-byte request and no-response write pacing.
 3. Exact `SEFitness`/`SESettingMenu` field numbers for HR responses (only command-side
    builders were read).
 4. Ryeex application handshake, opcodes and protobuf envelopes.
-5. Whether `bindDevice` (private cmd 3) needs prior `UserIdBean`, or the watch initiates bind.
+5. ~~Whether `bindDevice` (private cmd 3) needs prior `UserIdBean`~~ — answered: yes. The order is
+   protocol (cmd 1) → user id (cmd 2) → bind (cmd 3, only if not bound) → confirm (cmd 4).
+6. Whether the ColorFit Ultra Buzz's `16186f00` GATT service implements the full Berry command
+   set, or only the Ryeex dual-mode firmware exposes it while real Berry traffic expects classic
+   SPP (`00001101`). If the GATT bind is silent, the next step is the vendor's system-bond + SPP
+   transport.
