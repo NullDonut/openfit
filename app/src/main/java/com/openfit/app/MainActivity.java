@@ -435,6 +435,11 @@ public final class MainActivity extends Activity {
             }
             report.append("UUIDs and properties only. No proprietary writes have been sent.");
         }
+        String lastCrash = OpenFitApp.readLastCrash(this);
+        report.append("\n\nLAST APP CRASH\n");
+        report.append(lastCrash == null
+                ? "None recorded. A crash report is captured on the next failure.\n"
+                : lastCrash + "\n");
         final String reportText = report.toString();
         TextView body = text(reportText, 12, C_TEXT, false);
         body.setTypeface(Typeface.MONOSPACE);
@@ -442,10 +447,15 @@ public final class MainActivity extends Activity {
         body.setPadding(dp(18), dp(14), dp(18), dp(14));
         ScrollView scroll = new ScrollView(this);
         scroll.addView(body);
-        new AlertDialog.Builder(this).setTitle("Watch diagnostics")
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("Watch diagnostics")
                 .setView(scroll)
                 .setNeutralButton("Copy", (dialog, which) -> copyDiagnostics(reportText))
-                .setPositiveButton("Done", null).show();
+                .setPositiveButton("Done", null);
+        if (lastCrash != null) {
+            builder.setNegativeButton("Clear crash log", (dialog, which) -> OpenFitApp.clearLastCrash(this));
+        }
+        builder.show();
     }
 
     private void copyDiagnostics(String text) {
@@ -491,6 +501,10 @@ public final class MainActivity extends Activity {
     }
 
     private void launchQrScanner() {
+        if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            toast("This phone reports no camera, so a QR code can’t be scanned. Use Bluetooth search instead.");
+            return;
+        }
         try {
             new IntentIntegrator(this)
                     .setRequestCode(REQUEST_QR_SCAN)
@@ -501,10 +515,12 @@ public final class MainActivity extends Activity {
                     .setOrientationLocked(false)
                     .initiateScan();
         } catch (SecurityException e) {
+            OpenFitApp.recordCaught(this, "QR scanner launch", e);
             toast("Camera access was denied. Allow camera permission to scan a QR code.");
         } catch (RuntimeException | LinkageError e) {
             // LinkageError covers a missing scanner dependency as well as a missing activity, so
             // a packaging problem degrades to the Bluetooth search instead of killing the app.
+            OpenFitApp.recordCaught(this, "QR scanner launch", e);
             toast("Could not open the QR scanner. Use Bluetooth search instead.");
         }
     }
