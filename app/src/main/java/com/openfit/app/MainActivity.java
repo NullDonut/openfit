@@ -502,8 +502,10 @@ public final class MainActivity extends Activity {
                     .initiateScan();
         } catch (SecurityException e) {
             toast("Camera access was denied. Allow camera permission to scan a QR code.");
-        } catch (RuntimeException e) {
-            toast("Could not open the QR scanner. Check that the camera is available.");
+        } catch (RuntimeException | LinkageError e) {
+            // LinkageError covers a missing scanner dependency as well as a missing activity, so
+            // a packaging problem degrades to the Bluetooth search instead of killing the app.
+            toast("Could not open the QR scanner. Use Bluetooth search instead.");
         }
     }
 

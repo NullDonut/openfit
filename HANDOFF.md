@@ -412,6 +412,10 @@ Connection layer added on 2026-11-17 (in `MainActivity`, not yet device-tested):
   pasted into the next session without adb.
 - **Rotation** no longer recreates `MainActivity` (`configChanges`), so an active GATT link is
   not torn down by an orientation change.
+- **QR crash fixed**: ZXing 4.3.0's POM omits `androidx.core`/`androidx.fragment` even though
+  its bytecode uses them; both are now explicit dependencies, and QR launch catches
+  `LinkageError`. Connection itself is confirmed on hardware (Android 16, ColorFit Ultra Buzz,
+  Berry service, 5 notifiable characteristics); QR still needs a physical retest.
 
 Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
