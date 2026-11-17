@@ -40,15 +40,13 @@ import android.widget.Toast;
 import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.journeyapps.barcodescanner.CaptureActivity;
-import com.openfit.app.protocol.BerryBinding;
-import com.openfit.app.protocol.BerryFrame;
-import com.openfit.app.protocol.BerryFrameReader;
 import com.openfit.app.protocol.BerryProfile;
 import com.openfit.app.protocol.BerrySewear;
+import com.openfit.app.protocol.SeGatt;
+import com.openfit.app.protocol.SePairing;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -84,9 +82,12 @@ public final class MainActivity extends Activity {
     private static final long RETRY_DELAY_MS = 1_000L;
     private static final long PAIRING_TIMEOUT_MS = 45_000L;
     private static final long NOTIFICATION_TIMEOUT_MS = 5_000L;
-    private static final long BERRY_MTU_TIMEOUT_MS = 3_000L;
-    private static final long BERRY_BIND_TIMEOUT_MS = 8_000L;
-    private static final int BERRY_MTU_REQUEST = 247;
+    private static final int PAIRING_MTU_REQUEST = 247;
+    private static final long PAIRING_MTU_TIMEOUT_MS = 3_000L;
+    private static final long SE_ACK_TIMEOUT_MS = 2_000L;
+    private static final long SE_STEP_TIMEOUT_MS = 8_000L;
+    private static final long SE_CHUNK_GAP_MS = 15L;
+    private static final long SE_BUSY_DELAY_MS = 300L;
     private static final String PREFS = "openfit_local";
     private static final String KEY_DEVICE_ADDRESS = "device_address";
     private static final String KEY_DEVICE_NAME = "device_name";
@@ -146,24 +147,28 @@ public final class MainActivity extends Activity {
     private int notificationIndex;
     private final List<String> connectionLog = new ArrayList<>();
 
-    // Berry vendor pairing (bind) state.
-    private final BerryFrameReader berryReader = new BerryFrameReader();
-    private BluetoothGattCharacteristic berryWriteChar;
-    private int berrySerial;
-    private int berryMtu = 23;
-    private boolean berrySetupStarted;
-    private boolean berryBindStarted;
-    private boolean berryBindFinished;
-    private int berryBindAttempts;
-    private String berryBindStep = "idle";
-    private String berryBindState = "not started";
-    private boolean berryWriteBusy;
-    private boolean berryWriteAwaitingCallback;
-    private int berryWriteRetries;
-    private final List<BerryWrite> berryWriteQueue = new ArrayList<>();
-    private final List<String> berryLog = new ArrayList<>();
-    private Runnable berryMtuTimeout;
-    private Runnable berryBindTimeout;
+    // SE / Apricot vendor pairing (account bind) state. The command channel lives on the
+    // 16186f00 service; it uses a chunked protobuf transport, not the Berry SPP frames.
+    private final SeGatt.Transfer seTransfer = new SeGatt.Transfer();
+    private BluetoothGattCharacteristic seWriteChar;   // 16186f02: announce + chunks + control
+    private BluetoothGattCharacteristic seInboundChar; // characteristic that announced a reply
+    private int seMtu = 23;
+    private boolean seSetupStarted;
+    private boolean sePairStarted;
+    private boolean sePairFinished;
+    private int seStepAttempts;
+    private String seStep = "idle";
+    private String seState = "not started";
+    private boolean seAwaitingReady;
+    private int seAnnounceRetries;
+    private SeWrite seCurrentWrite;
+    private final List<SeWrite> seWriteQueue = new ArrayList<>();
+    private final List<String> pairingLog = new ArrayList<>();
+    private Runnable seMtuTimeout;
+    private Runnable seStepTimeout;
+    private Runnable seAckTimeout;
+    private byte[] seLastPayload;
+    private String seLastLabel;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -437,8 +442,9 @@ public final class MainActivity extends Activity {
                 .append(" · bond ").append(bondStateLabel(lastConnectAddress)).append('\n');
         report.append("Profile  ").append(watchProfile)
                 .append(connectionReady ? "  ·  connected" : "  ·  not connected").append('\n');
-        report.append("Pairing  ").append(berryBindState)
-                .append("  ·  MTU ").append(berryMtu).append("\n\n");
+        report.append("Pairing  ").append(seState)
+                .append("  ·  MTU ").append(seMtu)
+                .append("  ·  step ").append(seStep).append("\n\n");
         report.append("CONNECTION LOG\n");
         if (connectionLog.isEmpty()) {
             report.append("No connection events yet.\n");
@@ -466,11 +472,11 @@ public final class MainActivity extends Activity {
             }
             report.append("UUIDs and properties only; pairing traffic is in the log below.\n");
         }
-        report.append("\nBERRY PAIRING LOG\n");
-        if (berryLog.isEmpty()) {
-            report.append("No Berry frames yet.\n");
+        report.append("\nPAIRING LOG\n");
+        if (pairingLog.isEmpty()) {
+            report.append("No pairing frames yet.\n");
         } else {
-            for (String line : berryLog) report.append(line).append('\n');
+            for (String line : pairingLog) report.append(line).append('\n');
         }
         String lastCrash = OpenFitApp.readLastCrash(this);
         report.append("\n\nLAST APP CRASH\n");
@@ -719,7 +725,7 @@ public final class MainActivity extends Activity {
         connectAttempt = 0;
         connectionReady = false;
         bondFallbackTried = false;
-        resetBerrySession();
+        resetPairingSession();
         lastConnectAddress = device.getAddress();
         logBle("Connect requested for " + lastConnectAddress);
         String name = watchNames.get(device.getAddress());
@@ -736,7 +742,7 @@ public final class MainActivity extends Activity {
         closeGatt();
         // A retry starts a fresh GATT link, so any half-finished bind must run again. The account
         // token itself is persistent and is deliberately left untouched.
-        prepareBerryAttempt();
+        preparePairingAttempt();
         connectAttempt++;
         boolean retry = connectAttempt > 1;
         connectionStatus.setText(retry
@@ -911,8 +917,8 @@ public final class MainActivity extends Activity {
         notificationSetupFailed = false;
         BluetoothGattService berry = source.getService(BerryProfile.SERVICE);
         if (berry != null) {
-            watchProfile = "Berry";
-            berryWriteChar = berry.getCharacteristic(BerryProfile.CHAR_WRITE);
+            watchProfile = "Noise";
+            seWriteChar = berry.getCharacteristic(BerryProfile.CHAR_WRITE);
             for (BluetoothGattCharacteristic characteristic : berry.getCharacteristics()) {
                 if (isNotifiable(characteristic)
                         && characteristic.getDescriptor(CLIENT_CONFIGURATION) != null) {
@@ -1039,203 +1045,336 @@ public final class MainActivity extends Activity {
         scanStatus.setText("●  CONNECTED / TAP FOR DIAGNOSTICS");
         reconnectButton.setText("Reconnect to " + connectedDeviceName);
         reconnectButton.setVisibility(View.VISIBLE);
-        if ("Berry".equals(watchProfile)) {
+        if ("Noise".equals(watchProfile)) {
             // The vendor app performs its account bind immediately after connecting. Do the same
             // over the GATT link we already have, instead of leaving the watch merely connected.
-            connectionStatus.setText("Connected · Berry watch · pairing…");
+            connectionStatus.setText("Connected · noise watch · pairing…");
             scanStatus.setText("●  CONNECTED / PAIRING");
-            beginBerrySetup(source);
+            beginVendorPairing(source);
         }
     }
 
     /**
      * The vendor app starts pairing as soon as the transport is up. Negotiate a larger MTU first
-     * so the account frame normally fits in one write; the bind still starts if the watch refuses
-     * the MTU request, because the write queue can split frames at the 23-byte default.
+     * so commands and replies fit in fewer chunks; the bind still starts if the watch refuses,
+     * because the chunk size adapts to whatever MTU we end up with.
      */
     @SuppressWarnings("MissingPermission")
-    private void beginBerrySetup(BluetoothGatt source) {
-        if (berrySetupStarted || berryBindStarted || berryBindFinished) return;
-        berrySetupStarted = true;
-        berryMtu = 23;
-        if (berryWriteChar == null) {
-            finishBerryBind(false, "Berry write characteristic is missing");
+    private void beginVendorPairing(BluetoothGatt source) {
+        if (seSetupStarted || sePairStarted || sePairFinished) return;
+        seSetupStarted = true;
+        seMtu = 23;
+        if (seWriteChar == null) {
+            finishPairing(false, "command characteristic 16186f02 is missing");
             return;
         }
-        berryBindState = "negotiating MTU";
+        seState = "negotiating MTU";
+        seStep = "mtu";
         boolean requested = false;
         try {
-            requested = source.requestMtu(BERRY_MTU_REQUEST);
+            requested = source.requestMtu(PAIRING_MTU_REQUEST);
         } catch (SecurityException ignored) {
         }
-        logBerry("MTU request  " + (requested ? String.valueOf(BERRY_MTU_REQUEST) : "failed"));
+        logPairing("MTU request  " + (requested ? String.valueOf(PAIRING_MTU_REQUEST) : "failed"));
         if (!requested) {
-            startBerryBind();
+            startSePairing();
             return;
         }
-        berryMtuTimeout = () -> {
-            berryMtuTimeout = null;
-            if (berryBindStarted || berryBindFinished) return;
-            logBerry("MTU timeout · continuing with " + berryMtu + " bytes");
-            startBerryBind();
+        seMtuTimeout = () -> {
+            seMtuTimeout = null;
+            if (sePairStarted || sePairFinished) return;
+            logPairing("MTU timeout · continuing with " + seMtu + " bytes");
+            startSePairing();
         };
-        handler.postDelayed(berryMtuTimeout, BERRY_MTU_TIMEOUT_MS);
+        handler.postDelayed(seMtuTimeout, PAIRING_MTU_TIMEOUT_MS);
     }
 
     private void handleMtuChanged(BluetoothGatt source, int mtu, int status) {
         if (source != gatt) return;
-        berryMtu = Math.max(23, Math.min(mtu, 517));
-        cancelBerryMtuTimeout();
-        logBerry("MTU " + mtu + " (status " + status + ") · chunk "
-                + Math.max(20, berryMtu - 3));
-        logBle("Berry MTU negotiated · " + berryMtu + " bytes");
-        if (berrySetupStarted && !berryBindStarted) startBerryBind();
-    }
-
-    private void startBerryBind() {
-        if (berryBindStarted || berryBindFinished) return;
-        if (gatt == null || berryWriteChar == null) {
-            finishBerryBind(false, "connection lost before pairing");
-            return;
-        }
-        cancelBerryMtuTimeout();
-        berryBindStarted = true;
-        berryBindAttempts = 1;
-        berryBindStep = "protocol";
-        berryBindState = "requesting watch protocol";
-        sendBerryProtocol();
+        seMtu = Math.max(23, Math.min(mtu, 517));
+        cancelSeMtuTimeout();
+        logPairing("MTU " + mtu + " (status " + status + ") · chunk "
+                + SeGatt.chunkSize(seMtu) + " data bytes");
+        logBle("SE transport MTU negotiated · " + seMtu + " bytes");
+        if (seSetupStarted && !sePairStarted) startSePairing();
     }
 
     /**
-     * The reference app reads the watch protocol description before the account exchange, so do
-     * that first and only then send the token.
+     * Opens the account exchange exactly as the vendor client does: the id-0 connect-parameter
+     * greeting first, then the id-16 "are you already bound?" probe. Each command travels through
+     * the announce/ready/chunk transport in {@link SeGatt}.
      */
-    private void sendBerryProtocol() {
-        enqueueBerryFrame(BerryBinding.protocolFrame(nextBerrySerial()), "protocol");
-        berryBindState = "waiting for watch protocol";
-        connectionStatus.setText("Pairing · reading " + connectedDeviceName + "…");
-        scanStatus.setText("●  PAIRING / PROTOCOL");
-        scheduleBerryBindTimeout();
+    private void startSePairing() {
+        if (sePairStarted || sePairFinished) return;
+        if (gatt == null || seWriteChar == null) {
+            finishPairing(false, "connection lost before pairing");
+            return;
+        }
+        cancelSeMtuTimeout();
+        sePairStarted = true;
+        seStepAttempts = 1;
+        seStep = "connect-params";
+        seState = "configuring command channel";
+        connectionStatus.setText("Pairing · opening " + connectedDeviceName + " command channel…");
+        scanStatus.setText("●  PAIRING / MTU");
+        sendSe(SePairing.connectParameterConfig(), "connect-params");
+        seStep = "binding-status";
+        sendSe(SePairing.bindingStatusRequest(), "binding-status");
+        scheduleSeStepTimeout();
     }
 
-    private void onBerryProtocol(byte[] data) {
-        cancelBerryBindTimeout();
-        BerryBinding.ProtocolInfo info = BerryBinding.ProtocolInfo.parse(data);
-        logBerry("protocol  " + (info == null ? "short reply" : info.toString()));
-        logBle("Berry protocol · " + (info == null ? "short reply" : info.toString()));
-        berryBindStep = "user-id";
-        berryBindAttempts = 1;
-        sendBerryUserId();
+    private void sendSe(byte[] payload, String label) {
+        if (payload == null || payload.length == 0) return;
+        logPairing("TX " + label + " · " + hex(payload));
+        seWriteQueue.add(new SeWrite(payload, label));
+        pumpSeWrites();
     }
 
-    private void sendBerryUserId() {
-        String token = berryToken(lastConnectAddress);
-        String version = Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE;
-        logBerry("token  len=" + token.length() + " ·…"
-                + token.substring(Math.max(0, token.length() - 4)));
-        enqueueBerryFrame(BerryBinding.userIdFrame(
-                        nextBerrySerial(), token, berryPhoneName(), version),
-                "account-token");
-        berryBindState = "waiting for watch account reply";
-        connectionStatus.setText("Pairing · sending account to " + connectedDeviceName + "…");
-        scanStatus.setText("●  PAIRING / ACCOUNT");
-        scheduleBerryBindTimeout();
+    private void pumpSeWrites() {
+        if (seCurrentWrite != null || seWriteQueue.isEmpty()) return;
+        if (gatt == null || seWriteChar == null) {
+            seWriteQueue.clear();
+            return;
+        }
+        SeWrite write = seWriteQueue.remove(0);
+        seCurrentWrite = write;
+        seLastPayload = write.data;
+        seLastLabel = write.label;
+        seAwaitingReady = true;
+        seAnnounceRetries = 0;
+        sendSeAnnounce(write);
     }
 
-    private void scheduleBerryBindTimeout() {
-        cancelBerryBindTimeout();
-        berryBindTimeout = () -> {
-            berryBindTimeout = null;
-            if (berryBindFinished) return;
-            if (("protocol".equals(berryBindStep) || "user-id".equals(berryBindStep))
-                    && berryBindAttempts < 2) {
-                berryBindAttempts++;
-                logBle("No Berry reply for step " + berryBindStep + " · retrying");
-                if ("protocol".equals(berryBindStep)) sendBerryProtocol();
-                else sendBerryUserId();
+    private void sendSeAnnounce(SeWrite write) {
+        if (write == null || sePairFinished) return;
+        int count = SeGatt.chunkCount(write.data.length, seMtu);
+        logPairing("announce " + write.label + " · " + count + " chunk(s)");
+        if (!writeSe(SeGatt.announce(count))) {
+            if (++seAnnounceRetries > 4) {
+                seAwaitingReady = false;
+                seCurrentWrite = null;
+                finishPairing(false, "the watch rejected the command announcement");
                 return;
             }
-            if ("protocol".equals(berryBindStep)) {
-                // Some firmware does not answer cmd 1 over this transport. The account exchange
-                // may still work, so log the silence and continue rather than abort pairing.
-                berryBindStep = "user-id";
-                berryBindAttempts = 1;
-                logBle("No Berry protocol reply · trying the account exchange anyway");
-                sendBerryUserId();
+            handler.postDelayed(() -> sendSeAnnounce(write), 80L);
+            return;
+        }
+        scheduleSeAckTimeout();
+    }
+
+    private void scheduleSeAckTimeout() {
+        cancelSeAckTimeout();
+        seAckTimeout = () -> {
+            seAckTimeout = null;
+            if (!seAwaitingReady || seCurrentWrite == null || sePairFinished) return;
+            SeWrite write = seCurrentWrite;
+            if (++seAnnounceRetries > 3) {
+                seAwaitingReady = false;
+                seCurrentWrite = null;
+                logPairing("no READY control frame · giving up on " + write.label);
+                pumpSeWrites();
                 return;
             }
-            finishBerryBind(false, "no reply from the watch");
+            logPairing("no READY control frame · retrying " + write.label
+                    + " (" + seAnnounceRetries + "/3)");
+            sendSeAnnounce(write);
         };
-        handler.postDelayed(berryBindTimeout, BERRY_BIND_TIMEOUT_MS);
+        handler.postDelayed(seAckTimeout, SE_ACK_TIMEOUT_MS);
     }
 
-    private void onBerryDeviceInfo(byte[] data) {
-        cancelBerryBindTimeout();
-        BerryBinding.DeviceInfo info = BerryBinding.DeviceInfo.parse(data);
-        if (info == null) {
-            finishBerryBind(false, "watch sent a short account reply");
+    private void onSeReady() {
+        if (sePairFinished || !seAwaitingReady || seCurrentWrite == null) return;
+        cancelSeAckTimeout();
+        seAwaitingReady = false;
+        logPairing("watch ready · sending " + seCurrentWrite.label);
+        sendSeChunk();
+    }
+
+    private void sendSeChunk() {
+        SeWrite write = seCurrentWrite;
+        if (write == null || sePairFinished) return;
+        int size = SeGatt.chunkSize(seMtu);
+        if (write.offset >= write.data.length) {
+            int chunks = (write.data.length + size - 1) / size;
+            logPairing("sent " + chunks + " chunk(s) · " + write.label);
+            seCurrentWrite = null;
+            handler.postDelayed(this::pumpSeWrites, SE_CHUNK_GAP_MS);
             return;
         }
-        logBerry("device info  " + info);
-        logBle("Berry device · " + info);
-        if (!info.isBind) {
-            berryBindStep = "bind";
-            berryBindAttempts = 1;
-            berryBindState = "requesting bind";
-            connectionStatus.setText("Pairing · asking the watch to bind…");
-            scanStatus.setText("●  PAIRING / BIND REQUEST");
-            enqueueBerryFrame(BerryBinding.bindFrame(nextBerrySerial()), "bind-request");
-            scheduleBerryBindTimeout();
+        int length = Math.min(size, write.data.length - write.offset);
+        int index = write.offset / size + 1;
+        if (!writeSe(SeGatt.packet(index, write.data, write.offset, length))) {
+            // A no-response write can be refused while the controller queue is full.
+            handler.postDelayed(this::sendSeChunk, 40L);
             return;
         }
-        if (info.isSameUser) {
-            finishBerryBind(true, "watch already paired with this account");
+        write.offset += length;
+        handler.postDelayed(this::sendSeChunk, SE_CHUNK_GAP_MS);
+    }
+
+    private void onSeBusy() {
+        if (seCurrentWrite == null || sePairFinished) return;
+        logPairing("watch busy · retrying " + seCurrentWrite.label + " after a pause");
+        cancelSeAckTimeout();
+        seAwaitingReady = true;
+        SeWrite write = seCurrentWrite;
+        handler.postDelayed(() -> {
+            if (seCurrentWrite == write && seAwaitingReady) sendSeAnnounce(write);
+        }, SE_BUSY_DELAY_MS);
+    }
+
+    private void resendSeChunk(int index) {
+        byte[] data = seLastPayload;
+        if (data == null || index < 1) return;
+        int size = SeGatt.chunkSize(seMtu);
+        int offset = (index - 1) * size;
+        if (offset >= data.length) return;
+        int length = Math.min(size, data.length - offset);
+        logPairing("resend chunk " + index + " · " + seLastLabel);
+        writeSe(SeGatt.packet(index, data, offset, length));
+    }
+
+    private void onSeMessage(byte[] message) {
+        int id = BerrySewear.readId(message);
+        logPairing("SEWear · " + SePairing.describe(message) + " · " + hex(message));
+        int error = BerrySewear.readErrorCode(message);
+        if (error != 0) logBle("Watch reported error " + error + " for command " + id);
+        if (id == SePairing.FUNCTION_MTU) return; // id-0 greeting reply, not part of the bind
+        if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS) {
+            onSeBindingStatus(message);
+        } else if (id == SePairing.FUNCTION_BINDING_CHECK) {
+            onSeBindCheck(message);
+        } else if (id == SePairing.FUNCTION_BINDING_RESULT) {
+            onSeBindResult(message);
+        } else if (id == SePairing.FUNCTION_VERIFY_USER_NUMBER) {
+            onSeVerifyUser(message);
         } else {
-            finishBerryBind(false, "watch is paired to another account");
+            logPairing("ignoring command id " + id);
         }
     }
 
-    private void onBerryBindStatus(byte[] data) {
-        cancelBerryBindTimeout();
-        int status = data.length == 0 ? -1 : data[0] & 0xff;
-        logBerry("bind status  " + status + " · " + BerryBinding.bindStatusLabel(status));
-        if (status == BerryBinding.BIND_OK) {
-            berryBindStep = "confirm";
-            berryBindAttempts = 1;
-            berryBindState = "confirming bind";
-            connectionStatus.setText("Pairing · confirming with the watch…");
-            scanStatus.setText("●  PAIRING / CONFIRM");
-            enqueueBerryFrame(BerryBinding.bindResultFrame(nextBerrySerial(), true), "bind-confirm");
-            scheduleBerryBindTimeout();
+    private void onSeBindingStatus(byte[] message) {
+        if (sePairFinished) return;
+        cancelSeStepTimeout();
+        Boolean bound = SePairing.bindingStatus(message);
+        logBle("Watch bound state · " + (bound == null ? "unreadable" : bound ? "yes" : "no"));
+        if (bound == null || !bound) {
+            requestSeBindCheck();
             return;
         }
-        if (status == BerryBinding.BIND_ALREADY_BOUND) {
-            finishBerryBind(true, "watch reports it is already bound");
+        String token = storedToken(lastConnectAddress);
+        if (token == null) {
+            finishPairing(false,
+                    "watch is already bound to another account · unbind it in the watch settings");
             return;
         }
-        if (status == BerryBinding.BIND_INVALID_TOKEN) clearBerryToken(lastConnectAddress);
-        finishBerryBind(false, BerryBinding.bindStatusLabel(status));
+        seStep = "verify-user";
+        seStepAttempts = 1;
+        seState = "verifying saved account";
+        connectionStatus.setText("Pairing · verifying " + connectedDeviceName + "…");
+        scanStatus.setText("●  PAIRING / VERIFY");
+        sendSe(SePairing.verifyUserNumber(token), "verify-user");
+        scheduleSeStepTimeout();
     }
 
-    private void onBerryBindResult(byte[] data) {
-        cancelBerryBindTimeout();
-        int status = data.length == 0 ? -1 : data[0] & 0xff;
-        logBerry("bind result  " + status + " · " + BerryBinding.bindResultLabel(status));
-        if (status == 0) {
-            finishBerryBind(true, "vendor bind confirmed");
+    private void requestSeBindCheck() {
+        seStep = "bind-check";
+        seStepAttempts = 1;
+        seState = "requesting bind";
+        connectionStatus.setText("Pairing · asking the watch to bind…");
+        scanStatus.setText("●  PAIRING / BIND REQUEST");
+        sendSe(SePairing.bindCheckRequest(), "bind-check");
+        scheduleSeStepTimeout();
+    }
+
+    private void onSeBindCheck(byte[] message) {
+        if (sePairFinished) return;
+        cancelSeStepTimeout();
+        SePairing.BindCheck check = SePairing.bindCheck(message);
+        if (check == null) {
+            finishPairing(false, "watch sent an unreadable bind check reply");
+            return;
+        }
+        logPairing("bind check · " + check);
+        logBle("Watch bind check · " + SePairing.resultLabel(check.result));
+        if (check.result != SePairing.BIND_RESULT_SUCCESS) {
+            finishPairing(false, SePairing.resultLabel(check.result));
+            return;
+        }
+        String token = openFitToken(lastConnectAddress);
+        seStep = "bind-result";
+        seStepAttempts = 1;
+        seState = "confirming bind";
+        connectionStatus.setText("Pairing · confirming with " + connectedDeviceName + "…");
+        scanStatus.setText("●  PAIRING / CONFIRM");
+        sendSe(SePairing.bindResult(token), "bind-result");
+        scheduleSeStepTimeout();
+    }
+
+    private void onSeBindResult(byte[] message) {
+        if (sePairFinished) return;
+        cancelSeStepTimeout();
+        int type = SePairing.bindResultType(message);
+        int error = BerrySewear.readErrorCode(message);
+        if (type < 0) {
+            // Some firmware answers id 18 with only an errorCode; NO_ERROR means accepted.
+            if (error == 0) finishPairing(true, "vendor bind confirmed");
+            else finishPairing(false, "watch rejected the bind (error " + error + ")");
+            return;
+        }
+        if (type == SePairing.BIND_RESULT_SUCCESS) {
+            finishPairing(true, "vendor bind confirmed");
         } else {
-            clearBerryToken(lastConnectAddress);
-            finishBerryBind(false, BerryBinding.bindResultLabel(status));
+            clearStoredToken(lastConnectAddress);
+            finishPairing(false, SePairing.resultLabel(type));
         }
     }
 
-    private void finishBerryBind(boolean success, String detail) {
-        if (berryBindFinished) return;
-        berryBindFinished = true;
-        berryBindState = success ? "paired" : "failed";
-        cancelBerryTimeouts();
-        logBerry((success ? "PAIRED  " : "FAILED  ") + detail);
-        logBle("Berry pairing " + (success ? "succeeded" : "failed") + " · " + detail);
+    private void onSeVerifyUser(byte[] message) {
+        if (sePairFinished) return;
+        cancelSeStepTimeout();
+        int type = SePairing.verifyResultType(message);
+        if (type <= 0) finishPairing(true, "saved account verified");
+        else finishPairing(false, "watch rejected the saved account (" + type + ")");
+    }
+
+    private void scheduleSeStepTimeout() {
+        cancelSeStepTimeout();
+        seStepTimeout = () -> {
+            seStepTimeout = null;
+            if (sePairFinished) return;
+            if (seStepAttempts < 2) {
+                seStepAttempts++;
+                logPairing("no reply for " + seStep + " · retrying");
+                if ("binding-status".equals(seStep)) {
+                    sendSe(SePairing.bindingStatusRequest(), "binding-status");
+                } else if ("bind-check".equals(seStep)) {
+                    sendSe(SePairing.bindCheckRequest(), "bind-check");
+                } else if ("bind-result".equals(seStep)) {
+                    sendSe(SePairing.bindResult(openFitToken(lastConnectAddress)), "bind-result");
+                } else if ("verify-user".equals(seStep)) {
+                    String token = storedToken(lastConnectAddress);
+                    if (token != null) sendSe(SePairing.verifyUserNumber(token), "verify-user");
+                }
+                scheduleSeStepTimeout();
+                return;
+            }
+            finishPairing(false, "no reply from the watch for " + seStep);
+        };
+        handler.postDelayed(seStepTimeout, SE_STEP_TIMEOUT_MS);
+    }
+
+    private void finishPairing(boolean success, String detail) {
+        if (sePairFinished) return;
+        sePairFinished = true;
+        seState = success ? "paired" : "failed";
+        cancelSeTimeouts();
+        seWriteQueue.clear();
+        seCurrentWrite = null;
+        seAwaitingReady = false;
+        seTransfer.reset();
+        logPairing((success ? "PAIRED  " : "FAILED  ") + detail);
+        logBle("Vendor pairing " + (success ? "succeeded" : "failed") + " · " + detail);
         if (success) {
             connectionStatus.setText("Paired · " + connectedDeviceName);
             scanStatus.setText("●  PAIRED / READY");
@@ -1245,227 +1384,205 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static String berryPhoneName() {
-        String model = Build.MODEL == null ? "" : Build.MODEL;
-        return model.replaceAll("\\s+", "");
-    }
-
-    private String berryToken(String address) {
+    /**
+     * The vendor client derives its account token from a random UUID plus a small number. The
+     * watch stores it, so it must survive reconnects; it is kept per watch address.
+     */
+    private String openFitToken(String address) {
         String key = KEY_WATCH_TOKEN_PREFIX + (address == null ? "unknown" : address);
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String token = prefs.getString(key, null);
         if (token == null || token.isEmpty()) {
-            token = BerryBinding.newToken(UUID.randomUUID().toString(),
-                    10 + new Random().nextInt(9990), "openfit");
+            token = (UUID.randomUUID().toString()
+                    + (10 + new Random().nextInt(9990)) + "openfit").substring(30);
             prefs.edit().putString(key, token).apply();
         }
         return token;
     }
 
-    private void clearBerryToken(String address) {
+    private String storedToken(String address) {
+        if (address == null) return null;
+        String token = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(KEY_WATCH_TOKEN_PREFIX + address, null);
+        return token == null || token.isEmpty() ? null : token;
+    }
+
+    private void clearStoredToken(String address) {
         if (address == null) return;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .remove(KEY_WATCH_TOKEN_PREFIX + address).apply();
     }
 
-    private int nextBerrySerial() {
-        berrySerial = (berrySerial + 1) & 0xff;
-        return berrySerial;
-    }
-
-    private void enqueueBerryFrame(byte[] frame, String label) {
-        if (frame == null || frame.length == 0) return;
-        logBerry("TX " + label + " · " + BerryBinding.hex(frame));
-        berryWriteQueue.add(new BerryWrite(frame, label));
-        pumpBerryWrites();
-    }
-
-    /**
-     * Sends queued Berry frames in MTU-sized chunks. The vendor stack splits frames itself, so
-     * the watch expects a frame to arrive over several GATT writes when it is larger than the
-     * negotiated payload. No-response writes are paced because they have no completion callback.
-     */
     @SuppressWarnings("MissingPermission")
-    private void pumpBerryWrites() {
-        if (berryWriteBusy || berryWriteQueue.isEmpty()) return;
+    private boolean writeSe(byte[] value) {
+        return writeGattValue(seWriteChar, value);
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private boolean writeGattValue(BluetoothGattCharacteristic characteristic, byte[] value) {
         BluetoothGatt source = gatt;
-        BluetoothGattCharacteristic characteristic = berryWriteChar;
-        if (source == null || characteristic == null) {
-            berryWriteQueue.clear();
-            return;
-        }
-        BerryWrite write = berryWriteQueue.get(0);
-        int chunkSize = Math.max(20, berryMtu - 3);
-        int length = Math.min(chunkSize, write.data.length - write.offset);
-        if (length <= 0) {
-            berryWriteQueue.remove(0);
-            pumpBerryWrites();
-            return;
-        }
-        byte[] chunk = Arrays.copyOfRange(write.data, write.offset, write.offset + length);
+        if (source == null || characteristic == null || value == null) return false;
         int writeType = (characteristic.getProperties()
-                & BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-                ? BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                : BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
-        boolean queued;
+                & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
         try {
             if (Build.VERSION.SDK_INT >= 33) {
-                queued = source.writeCharacteristic(characteristic, chunk, writeType)
+                return source.writeCharacteristic(characteristic, value, writeType)
                         == BluetoothGatt.GATT_SUCCESS;
-            } else {
-                characteristic.setWriteType(writeType);
-                characteristic.setValue(chunk);
-                queued = source.writeCharacteristic(characteristic);
             }
+            characteristic.setWriteType(writeType);
+            characteristic.setValue(value);
+            return source.writeCharacteristic(characteristic);
         } catch (SecurityException e) {
-            queued = false;
+            return false;
         }
-        if (!queued) {
-            berryWriteRetries++;
-            logBerry("TX busy · " + write.label + " chunk "
-                    + (write.offset / chunkSize + 1) + " · retry " + berryWriteRetries);
-            if (berryWriteRetries > 5) {
-                berryWriteQueue.clear();
-                berryWriteBusy = false;
-                berryWriteRetries = 0;
-                finishBerryBind(false, "the watch rejected the pairing write");
-                return;
-            }
-            // A GATT write request can be temporarily busy; retry the same chunk shortly.
-            handler.postDelayed(this::pumpBerryWrites, 40L);
-            return;
-        }
-        berryWriteRetries = 0;
-        write.offset += length;
-        if (write.offset >= write.data.length) berryWriteQueue.remove(0);
-        berryWriteBusy = true;
-        berryWriteAwaitingCallback = writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
-        if (!berryWriteAwaitingCallback) {
-            // No-response writes have no completion callback; pace them instead.
-            handler.postDelayed(() -> {
-                berryWriteBusy = false;
-                pumpBerryWrites();
-            }, 20L);
+    }
+
+    /** Answers an inbound announce/chunk on the characteristic that delivered it. */
+    private void writeSeAck(int code) {
+        BluetoothGattCharacteristic characteristic = seInboundChar;
+        if (characteristic == null) return;
+        byte[] frame = SeGatt.control(code);
+        logPairing("TX " + SeGatt.controlLabel(code) + " · " + hex(frame));
+        if (!writeGattValue(characteristic, frame)) {
+            logPairing("ack write failed on " + shortUuid(characteristic.getUuid()));
         }
     }
 
     private void handleCharacteristicWrite(BluetoothGatt source,
                                            BluetoothGattCharacteristic characteristic, int status) {
-        if (source != gatt || characteristic == null || berryWriteChar == null) return;
-        if (!berryWriteChar.getUuid().equals(characteristic.getUuid())) return;
-        if (!berryWriteAwaitingCallback) return; // no-response write; the pacer advances instead
-        berryWriteAwaitingCallback = false;
-        if (status != BluetoothGatt.GATT_SUCCESS) {
-            logBerry("TX callback failed · GATT " + status);
-            berryWriteQueue.clear();
-            berryWriteBusy = false;
-            if ((status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
-                    || status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION)
-                    && handleGattSecurityFailure(source.getDevice(), status)) {
-                return;
-            }
-            finishBerryBind(false, "pairing write failed (GATT " + status + ")");
-            return;
+        if (source != gatt || characteristic == null) return;
+        if (status == BluetoothGatt.GATT_SUCCESS) return;
+        if (seWriteChar != null && seWriteChar.getUuid().equals(characteristic.getUuid())) {
+            logPairing("TX callback failed · GATT " + status);
         }
-        berryWriteBusy = false;
-        pumpBerryWrites();
     }
 
     private void handleNotification(BluetoothGattCharacteristic characteristic, byte[] value) {
         if (characteristic == null || value == null) return;
         BluetoothGattService service = characteristic.getService();
         if (service != null && BerryProfile.SERVICE.equals(service.getUuid())) {
-            handleBerryChunk(value);
+            handleSeNotification(characteristic, value);
         } else {
             updateHeartRate(value);
         }
     }
 
-    private void handleBerryChunk(byte[] value) {
-        logBerry("RX " + BerryBinding.hex(value));
-        for (BerryFrame frame : berryReader.append(value)) handleBerryFrame(frame);
-    }
-
-    private void handleBerryFrame(BerryFrame frame) {
-        if (frame == null) return;
-        if (frame.head() == BerryFrame.HEAD_DEV_REQ_APP) {
-            // The watch acks every command it sends; answer even for frames we do not decode.
-            byte[] ack = BerryBinding.ackFrame(frame.serialNo());
-            logBerry("TX ack · " + BerryBinding.hex(ack));
-            berryWriteQueue.add(new BerryWrite(ack, "ack"));
-            pumpBerryWrites();
-        }
-        if (frame.isPrivate()) {
-            int cmdId = frame.privateCmdId();
-            byte[] data = frame.privateData();
-            logBerry("RX private cmd " + cmdId + " · " + BerryBinding.hex(data));
-            if (cmdId == BerrySewear.PRIVATE_CMD_PROTOCOL) onBerryProtocol(data);
-            else if (cmdId == BerrySewear.PRIVATE_CMD_USER_ID) onBerryDeviceInfo(data);
-            else if (cmdId == BerrySewear.PRIVATE_CMD_BIND) onBerryBindStatus(data);
-            else if (cmdId == BerrySewear.PRIVATE_CMD_BIND_RESULT) onBerryBindResult(data);
+    /**
+     * Dispatches one notification from the {@code 16186f00} service. The watch announces every
+     * reply, expects the ready control frame, then sends indexed chunks. Control frames from the
+     * watch arrive on the write characteristic (16186f02).
+     */
+    private void handleSeNotification(BluetoothGattCharacteristic characteristic, byte[] value) {
+        if (value.length == 0) return;
+        logPairing("RX " + shortUuid(characteristic.getUuid()) + " · " + hex(value));
+        if (SeGatt.isAnnounce(value)) {
+            int count = SeGatt.announceCount(value);
+            seInboundChar = characteristic;
+            if (!seTransfer.start(count)) {
+                logPairing("inbound announce with implausible chunk count " + count);
+                return;
+            }
+            logPairing("inbound transfer · " + count + " chunk(s)");
+            writeSeAck(SeGatt.CODE_READY);
             return;
         }
-        if (frame.isProtobuf()) {
-            logBerry("RX protobuf type " + BerrySewear.readType(frame.payload())
-                    + " id " + BerrySewear.readId(frame.payload()));
+        if (SeGatt.isControl(value)) {
+            int code = SeGatt.controlCode(value);
+            int payload = SeGatt.controlPayload(value);
+            logPairing("control " + SeGatt.controlLabel(code)
+                    + (code == SeGatt.CODE_RESEND ? " " + payload : ""));
+            if (code == SeGatt.CODE_READY) onSeReady();
+            else if (code == SeGatt.CODE_RESEND) resendSeChunk(payload);
+            else if (code == SeGatt.CODE_BUSY) onSeBusy();
+            // CODE_DONE (01 03) arrives after the last chunk. The app-level SEWear reply is
+            // what advances the bind, so the done frame needs no action here.
+            return;
         }
+        if (seTransfer.isActive()) {
+            byte[] full = seTransfer.accept(SeGatt.packetIndex(value), SeGatt.packetData(value));
+            if (full != null) {
+                writeSeAck(SeGatt.CODE_RECEIVED);
+                onSeMessage(full);
+            }
+            return;
+        }
+        logPairing("unframed notification · " + hex(value));
     }
 
-    private void logBerry(String message) {
+    private void logPairing(String message) {
         String time = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-        berryLog.add(time + "  " + message);
-        while (berryLog.size() > 40) berryLog.remove(0);
+        pairingLog.add(time + "  " + message);
+        while (pairingLog.size() > 60) pairingLog.remove(0);
     }
 
-    private void resetBerrySession() {
-        prepareBerryAttempt();
-        berryLog.clear();
+    private static String hex(byte[] data) {
+        if (data == null) return "null";
+        StringBuilder out = new StringBuilder(data.length * 2);
+        for (byte b : data) out.append(String.format(Locale.US, "%02X", b & 0xff));
+        return out.toString();
+    }
+
+    private void resetPairingSession() {
+        preparePairingAttempt();
+        pairingLog.clear();
     }
 
     /** Clears per-link pairing state while keeping the persistent token and diagnostic log. */
-    private void prepareBerryAttempt() {
-        cancelBerryTimeouts();
-        berryReader.reset();
-        berryWriteQueue.clear();
-        berryWriteBusy = false;
-        berryWriteAwaitingCallback = false;
-        berryWriteRetries = 0;
-        berryWriteChar = null;
-        berrySerial = 0;
-        berryMtu = 23;
-        berrySetupStarted = false;
-        berryBindStarted = false;
-        berryBindFinished = false;
-        berryBindAttempts = 0;
-        berryBindStep = "idle";
-        berryBindState = "not started";
+    private void preparePairingAttempt() {
+        cancelSeTimeouts();
+        seTransfer.reset();
+        seWriteQueue.clear();
+        seCurrentWrite = null;
+        seAwaitingReady = false;
+        seAnnounceRetries = 0;
+        seWriteChar = null;
+        seInboundChar = null;
+        seLastPayload = null;
+        seLastLabel = null;
+        seMtu = 23;
+        seSetupStarted = false;
+        sePairStarted = false;
+        sePairFinished = false;
+        seStepAttempts = 0;
+        seStep = "idle";
+        seState = "not started";
     }
 
-    private void cancelBerryMtuTimeout() {
-        if (berryMtuTimeout != null) {
-            handler.removeCallbacks(berryMtuTimeout);
-            berryMtuTimeout = null;
+    private void cancelSeMtuTimeout() {
+        if (seMtuTimeout != null) {
+            handler.removeCallbacks(seMtuTimeout);
+            seMtuTimeout = null;
         }
     }
 
-    private void cancelBerryBindTimeout() {
-        if (berryBindTimeout != null) {
-            handler.removeCallbacks(berryBindTimeout);
-            berryBindTimeout = null;
+    private void cancelSeStepTimeout() {
+        if (seStepTimeout != null) {
+            handler.removeCallbacks(seStepTimeout);
+            seStepTimeout = null;
         }
     }
 
-    private void cancelBerryTimeouts() {
-        cancelBerryMtuTimeout();
-        cancelBerryBindTimeout();
+    private void cancelSeAckTimeout() {
+        if (seAckTimeout != null) {
+            handler.removeCallbacks(seAckTimeout);
+            seAckTimeout = null;
+        }
     }
 
-    private static final class BerryWrite {
+    private void cancelSeTimeouts() {
+        cancelSeMtuTimeout();
+        cancelSeStepTimeout();
+        cancelSeAckTimeout();
+    }
+
+    private static final class SeWrite {
         final byte[] data;
         final String label;
         int offset;
 
-        BerryWrite(byte[] data, String label) {
+        SeWrite(byte[] data, String label) {
             this.data = data;
             this.label = label;
         }
@@ -1843,15 +1960,14 @@ public final class MainActivity extends Activity {
     private void closeGatt() {
         cancelConnectionTimeout();
         cancelNotificationTimeout();
-        cancelBerryTimeouts();
-        berryWriteQueue.clear();
-        berryWriteBusy = false;
-        berryWriteAwaitingCallback = false;
-        berryWriteRetries = 0;
-        if (berryBindStarted && !berryBindFinished) {
-            berryBindFinished = true;
-            berryBindState = "disconnected";
-            logBerry("disconnected during pairing");
+        cancelSeTimeouts();
+        seWriteQueue.clear();
+        seCurrentWrite = null;
+        seAwaitingReady = false;
+        if (sePairStarted && !sePairFinished) {
+            sePairFinished = true;
+            seState = "disconnected";
+            logPairing("disconnected during pairing");
         }
         if (gatt != null) {
             try { gatt.disconnect(); gatt.close(); } catch (SecurityException ignored) { }
@@ -1867,6 +1983,7 @@ public final class MainActivity extends Activity {
     }
 
     private static String shortUuid(UUID uuid) {
+        if (uuid == null) return "unknown";
         String value = uuid.toString();
         return value.length() > 8 ? value.substring(0, 8) : value;
     }

@@ -1,6 +1,8 @@
 package com.openfit.app.protocol;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 /**
  * Minimal protobuf (proto3) encoder/decoder for the Berry {@code SEWear} envelope.
@@ -34,6 +36,9 @@ public final class BerrySewear {
     // SEWear fields
     public static final int FIELD_TYPE = 1;
     public static final int FIELD_ID = 2;
+    public static final int FIELD_BIND_ACCOUNT = 4;
+    public static final int FIELD_BLE_CONNECT_PARAMETER_CONFIG = 99;
+    public static final int FIELD_ERROR_CODE = 100;
 
     // Private (event=3) command ids observed in the reference implementation.
     public static final int PRIVATE_CMD_PROTOCOL = 1;
@@ -64,9 +69,39 @@ public final class BerrySewear {
         return out.toByteArray();
     }
 
+    /**
+     * Like {@link #wear(int, int, int, byte[])}, but always emits the payload field, including
+     * when the nested message is empty. The vendor stack encodes {@code bindCheck{}} and
+     * {@code bleConnectParmeterConfig{}} this way.
+     */
+    public static byte[] wearWithMessage(int type, int id, int payloadField, byte[] payload) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (type != 0) writeVarintField(out, FIELD_TYPE, type);
+        if (id != 0) writeVarintField(out, FIELD_ID, id);
+        if (payloadField > 0) {
+            byte[] body = payload == null ? new byte[0] : payload;
+            writeTag(out, payloadField, 2);
+            writeVarint(out, body.length);
+            out.write(body, 0, body.length);
+        }
+        return out.toByteArray();
+    }
+
     /** Account/bind-state request: SEWear{ACCOUNT, id=0}. */
     public static byte[] bindStateRequest() {
         return wear(TYPE_ACCOUNT, 0);
+    }
+
+    /**
+     * The command the vendor stack sends immediately after enabling notifications:
+     * {@code SEWear{id=0, bleConnectParmeterConfig{}}}. Because every proto3 default is
+     * omitted this is the three bytes {@code 9A 06 00}.
+     */
+    public static byte[] connectParameterConfig() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        writeTag(out, FIELD_BLE_CONNECT_PARAMETER_CONFIG, 2);
+        writeVarint(out, 0);
+        return out.toByteArray();
     }
 
     public static void writeVarintField(ByteArrayOutputStream out, int field, int value) {
@@ -96,6 +131,56 @@ public final class BerrySewear {
     /** Returns SEWear.id, or -1 when absent or unparsable. */
     public static int readId(byte[] sewear) {
         return (int) readVarintField(sewear, FIELD_ID);
+    }
+
+    /**
+     * Returns a top-level length-delimited field (a nested message) as a byte slice, or
+     * {@code null} when the field is absent or the buffer is malformed.
+     */
+    public static byte[] readMessageField(byte[] message, int wantedField) {
+        if (message == null) return null;
+        int pos = 0;
+        while (pos < message.length) {
+            long tag = readVarint(message, pos);
+            if (tag < 0) return null;
+            pos += varintSize(tag);
+            int field = (int) (tag >>> 3);
+            int wireType = (int) (tag & 7);
+            if (wireType == 0) {
+                long value = readVarint(message, pos);
+                if (value < 0) return null;
+                pos += varintSize(value);
+            } else if (wireType == 2) {
+                long length = readVarint(message, pos);
+                if (length < 0 || length > message.length) return null;
+                pos += varintSize(length);
+                if (pos + length > message.length) return null;
+                if (field == wantedField) {
+                    return Arrays.copyOfRange(message, pos, pos + (int) length);
+                }
+                pos += (int) length;
+            } else if (wireType == 5) {
+                pos += 4;
+            } else if (wireType == 1) {
+                pos += 8;
+            } else {
+                return null;
+            }
+            if (pos > message.length) return null;
+        }
+        return null;
+    }
+
+    /** Returns a top-level length-delimited field decoded as UTF-8, or {@code null}. */
+    public static String readStringField(byte[] message, int wantedField) {
+        byte[] raw = readMessageField(message, wantedField);
+        return raw == null ? null : new String(raw, StandardCharsets.UTF_8);
+    }
+
+    /** SEWear.errorCode; {@code 0} when absent (the proto3 default). */
+    public static int readErrorCode(byte[] sewear) {
+        long value = readVarintField(sewear, FIELD_ERROR_CODE);
+        return value < 0 ? 0 : (int) value;
     }
 
     /** Reads a top-level varint field; -1 when the field is absent or the buffer is malformed. */

@@ -2,8 +2,9 @@
 
 Last updated: 2026-11-17
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: `bd80c98` (Berry bind handshake + frame reader + 28 unit
-tests); CI run **44058236613** passed and uploaded `openfit-debug-bd80c98`.
+Latest code commit at time of writing: this commit (SE/Apricot GATT transport + id 16/17/18/19
+account bind + 52 unit tests). The previous CI build `openfit-debug-b982023` is the one that
+proved the watch answers Berry frames with the SE busy control frame.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -16,7 +17,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 28 JUnit tests for the frame, bind and reassembly layers |
+| `app/src/test/java/com/openfit/app/protocol/` | 52 JUnit tests for the Berry frames, SE transport, bind encoders and reassembly |
 
 ---
 
@@ -233,7 +234,7 @@ still unknown and must be decided by a GATT dump of the real watch, not by name.
 
 ---
 
-## 6. Berry protocol (primary candidate, fully documented)
+## 6. Berry and SE protocols (both recovered; SE is what the GATT service speaks)
 
 ### 6.1 GATT
 
@@ -305,7 +306,7 @@ message SEWear {
 GNSS 7, MICRO_FUNCTION 8, NOTIFICATION 9, MUSIC 10, SETTING_MENU 11, FACTORY 12, ALEAX 13,
 NEW_WATCH_FACE 14, NEW_WEATHER 15, CHILDREN 16, AIFUNCTION 17, TVREMOTE 18.
 
-### 6.4 Bind (pairing) sequence
+### 6.4 Berry SPP bind sequence (alternate transport)
 
 Android system bond happens first in NoiseFit (`checkBondByMac` → `createBond` →
 `BOND_STATE_CHANGED` receiver → connect), and the full Berry stack then uses **classic SPP**
@@ -337,7 +338,51 @@ is `(UUID.randomUUID() + random(10..9999) + userId).substring(30)` and is persis
 frames above are sent in clear inside the 9-byte envelope. This invalidates the earlier
 assumption that a proprietary handshake blocks pairing on this stack.
 
-### 6.5 Heart rate and keepalive
+### 6.5 SE ("Apricot") transport and account bind (used on the GATT service)
+
+A physical write attempt on `16186f00` settled the transport question: the watch interpreted the
+Berry frame bytes as packet index `0x8888` and answered `00 00 01 02 00 00`, the SE stack's busy
+control frame. The vendor app routes `16186f00` through `com.zhapp.ble.BluetoothService`
+(`DEVICE_PROTOCOL_APRICOT`); the Berry SPP code above is only used over classic SPP.
+
+Control frames are `00 00 <code:2 BE> <payload:2 LE>`:
+
+| Code | Bytes | Meaning |
+|---|---|---|
+| `0x0100` | `00 00 01 00 00 00` | phone: reply received |
+| `0x0101` | `00 00 01 01 00 00` | ready (also the phone's answer to an announce) |
+| `0x0102` | `00 00 01 02 00 00` | busy |
+| `0x0103` | `00 00 01 03 00 00` | transfer complete |
+| `0x0105` | `00 00 01 05 <n LE16>` | resend chunk `n` |
+
+Outbound: announce `00 00 00 00 <count LE16> 00` on `6f02` → wait for ready → `<index LE16>
+<chunk>` × count on `6f02` → wait for done. Inbound replies: announce on `6f01` → phone answers
+`00 00 01 01 00 00` on `6f01` → indexed chunks → phone answers `00 00 01 00 00 00` and parses the
+concatenation as one `SEWear`. Chunk data is `MTU - 5` bytes; count is `ceil(length / (MTU - 5))`.
+
+The first command after notifications is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+Account bind ids (`SEFunctionId`) and bodies (`BindAccountProtos`):
+
+| Id | Phone message | Watch reply |
+|---|---|---|
+| 16 | `SEWear{id=16}` | `bind_account{request_binding_status}` |
+| 17 | `bind_check{device_verify:true}` | `bind_check{bind_check_result, mac, serial_number, device_number, firmware_version, device_name}` |
+| 18 | `bind_result{user_id:token}` | `bind_result{bind_result_type}` and/or `error_code` |
+| 19 | `verify_user_number:token` | `verify_result{verify_result_type}` |
+| 23 | `SEWear{id=23}` | unbind |
+
+`SEBindAccount` fields: 1 request_binding_status, 2 bind_check, 3 bind_result,
+4 inquiry_pairing_status, 5 request_pairing_result, 6 verify_user_number, 7 verify_result,
+8 classic_bluetooth_status. `SEBindCheck`: 1 device_verify, 2 bind_random_key, 3 bind_check_result,
+4 device_number, 5 mac, 6 serial_number, 7 firmware_version, 8 device_name. `SEBindResult`:
+1 bind_result_type, 2 user_id, 3 phone_type. Result enum: 0 SUCCESS, 1 REFUSE, 2 OVER_TIME,
+3 VERIFICATION_FAILED (only bind check). Phone type: ANDROID 0, IOS 1.
+
+Vendor order: id 16; if not bound → id 17 `device_verify:true`; on SUCCESS → id 18 with a random
+token; if already bound → id 19 with the stored token. OpenFit follows this and persists the token
+as `watch_token_<ADDRESS>`.
+
+### 6.6 Heart rate and keepalive
 
 | Purpose | Command |
 |---|---|
@@ -402,17 +447,21 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
 | `app/src/main/java/com/openfit/app/protocol/BerryFrameReader.java` | Reassembles frames from split notifications, skips noise, consumes 8-byte acks |
-| `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Minimal proto3 writer/reader for the SEWear envelope, type enum, private cmd ids |
+| `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Minimal proto3 writer/reader for the SEWear envelope, nested-field helpers, error code, connect-parameter greeting |
+| `app/src/main/java/com/openfit/app/protocol/SeGatt.java` | SE transport: announce, indexed chunks, control frames, MTU chunk size, incoming transfer reassembler |
+| `app/src/main/java/com/openfit/app/protocol/SePairing.java` | SE account bind: id 16/17/18/19 builders, `SEBindCheck`/`SEBindResult`/`SEVerifyResult` parsers |
 | `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | Berry and Ryeex GATT UUID constants and profile detection |
 | `app/src/test/java/com/openfit/app/protocol/BerryFrameTest.java` | 12 tests: golden bytes, round-trip, truncation rejection, serial wrap, private/ack framing |
 | `app/src/test/java/com/openfit/app/protocol/BerryBindingTest.java` | 11 tests: `UserIdBean` layout/truncation, token rule, protocol/device-info parsing, status labels |
 | `app/src/test/java/com/openfit/app/protocol/BerryFrameReaderTest.java` | 6 tests: split notifications, ack consumption, leading noise, reset |
+| `app/src/test/java/com/openfit/app/protocol/SeGattTest.java` | 9 tests: chunk math, announce/control golden bytes, packet prefix, out-of-order transfer reassembly |
+| `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 12 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (28 tests as of this commit). `MainActivity`
-wires the package into the live GATT link: MTU negotiation, chunked no-response writes, notification
-reassembly, the bind state machine, and per-watch token persistence. The bind write path itself
-has **not yet been confirmed by a physical watch**.
+with `javac` + JUnit without Gradle or the Android SDK (52 tests as of this commit). `MainActivity`
+wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
+inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
+persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
 
 Connection layer added on 2026-11-17 (successful on hardware; the watch stayed unbonded):
 
@@ -450,12 +499,14 @@ Connection layer added on 2026-11-17 (successful on hardware; the watch stayed u
 - **Hardware evidence (2026-11-17):** the watch stayed `not bonded` while connected, exposed six
   services (Berry `16186f00-…`, Ryeex base `00000001-…`, `1800`, `1801`, `aa01`, `fee7`), and all
   five Berry characteristics accepted notification setup. Berry is therefore the active stack.
-- **Berry pairing on connect (new, awaits hardware test):** after notifications are enabled the
-  app requests MTU 247 (falling back to 23), then runs protocol (cmd 1) → account token (cmd 2) →
-  bind if unbound (cmd 3) → confirmation (cmd 4). Writes are chunked to `MTU - 3` and paced; the
-  frame reader reassembles split notifications and acks every `66 66 48 5A` frame. The account
-  token is stored as `watch_token_<ADDRESS>`; a connection retry restarts pairing but keeps that
-  token. Diagnostics gained a `BERRY PAIRING LOG` with TX/RX hex and the bind state.
+- **SE pairing on connect (new, awaits hardware test):** the first build's Berry-frame writes were
+  answered with `00 00 01 02 00 00` (SE busy), proving `16186f00` uses the SE transport. The app
+  now requests MTU 247 (falling back to 23), announces and chunks commands with `MTU - 5` data
+  bytes per chunk, answers inbound announces, reassembles replies, and runs id 0 (link greeting) →
+  id 16 (binding status) → id 17 (`bind_check{device_verify:true}`) → id 18 (`bind_result{user_id}`),
+  or id 19 (verify the saved token) when the watch is already bound. The token is stored as
+  `watch_token_<ADDRESS>`; a connection retry restarts pairing but keeps that token. Diagnostics
+  gained a `PAIRING LOG` with TX/RX hex, chunk counts and the bind step/state.
 
 Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
@@ -478,25 +529,27 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 5. ~~Whether private `cmdId=3` (bind) needs a prior `UserIdBean`~~ **Answered:** yes — protocol
    (cmd 1), user id (cmd 2), bind (cmd 3, only if unbound), confirm (cmd 4).
 6. **Wiring:** `MainActivity` now performs connect → discovery → profile detection → notification
-   setup → MTU → protocol → account token → bind → confirm. Still needed after the device test:
-   HR control and parsing of the remaining Berry notifications.
+   setup → MTU → id 0 → id 16 → id 17 → id 18 (or id 19). Still needed after the device test:
+   HR control and parsing of the remaining SE notifications.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the bind on hardware.** The next APK sends proprietary writes for the first time.
-   Watch the status line and the `BERRY PAIRING LOG`: if the watch never answers cmd 1/2 over
-   GATT, switch the transport to the vendor's classic bond + SPP (`00001101`). Do not add further
-   write types until each step is confirmed.
+8. **Validate the SE bind on hardware.** The previous APK proved the transport; this APK is the
+   first to send SE account commands. Watch the status line and the `PAIRING LOG` for
+   `inbound transfer`, `control ready`, `bind check`, and `bind result`. If id 16/17 stay silent,
+   the log distinguishes a transport failure (no READY/announce) from an account refusal. Do not
+   add further write types until each step is confirmed.
 
 ### Suggested order from here
 
 ```
-install the pairing APK from CI
-    -> connect; read the BERRY PAIRING LOG and status line
-    -> if cmd 1/2 are silent over GATT, implement classic bond + SPP and retry
+install the SE pairing APK from CI
+    -> connect; read the PAIRING LOG and status line
+    -> if the watch announces replies but refuses id 17, try bindCheckKeyRequest
+    -> if nothing at all is announced, fall back to classic bond + SPP
     -> extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
-    -> wire HR control + parse incoming Berry frames
+    -> wire HR control + parse incoming SE replies
 ```
 
 The QR result-to-connection gap and QR on-device retest remain separate, lower-priority items.

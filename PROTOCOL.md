@@ -1,9 +1,10 @@
 # OpenFit protocol notes (from NoiseFit 5.5.0 static analysis)
 
-Status: **protocol recovered statically; Berry stack confirmed on hardware.** The GATT layout and
-notification setup have been validated against a physical ColorFit Ultra Buzz. The Berry account
-bind (protocol → user id → bind → confirm) is now implemented over that GATT link, but the watch
-has not yet been observed answering the proprietary writes; only a physical test can confirm it.
+Status: **protocol recovered statically; SE transport identified on hardware.** The GATT layout and
+notification setup have been validated against a physical ColorFit Ultra Buzz. The watch does not
+speak the Berry SPP frames on `16186f00`; it uses the vendor's generic SE ("Apricot") chunked
+protobuf transport. That transport and the `SEFunctionId` account bind (16 → 17 → 18, or 19 when
+already bound) are implemented in OpenFit. A physical-device test of the bind is still pending.
 
 ## Provenance
 
@@ -23,7 +24,7 @@ profile by discovered GATT service, not by name; Berry wins when both are presen
 
 | Stack | Package | Transport | Cipher |
 |---|---|---|---|
-| Berry | `com.zhapp.ble`, `com.zjw.zhbraceletsdk` | GATT `16186f00-…` + optional SPP `00001101-…` | none observed |
+| Berry | `com.zhapp.ble`, `com.zjw.zhbraceletsdk` | GATT `16186f00-…` (SE chunked protobuf) + optional SPP `00001101-…` | none observed |
 | Ryeex | `com.ryeex.ble`, `com.ryeex.common.ble.stack` | GATT `00000001-…` | RC4 variant in `libble-crypto.so` |
 | Realtek BBPro | `com.realsil.sdk.bbpro` | GATT (Realtek) | BBPro authentication (link keys) |
 
@@ -51,9 +52,10 @@ Conclusions:
   whole successful connection), which supports OpenFit's connect-first ordering.
 - `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`); `0000fee7` does not
   appear in the Berry or Ryeex sources and is not used.
-- No proprietary write was sent during the GATT dump above. OpenFit now implements the full
-  Berry bind over this same GATT service (see the bind sequence below) and sends it on connect;
-  that write path still needs a physical-device confirmation.
+- No proprietary write was sent during the GATT dump above. A later write attempt proved that
+  `16186f00` speaks the SE chunked-protobuf transport, not the Berry SPP frames. OpenFit now
+  implements the SE transport and the id 16/17/18 account bind on this service; that write path
+  still needs a physical-device confirmation.
 
 
 ## Berry profile (primary candidate)
@@ -83,7 +85,76 @@ Other services the stack knows (all SIG base `0000805f9b34fb` unless noted):
 `00001601-00001603` (theme), `00001701/00001703` (log), `0000aa01-0000aa05`,
 `00001800/00002a00` (GAP device name), `0000fe78-…` (scan record).
 
-### Frame format
+### Transport on `16186f00`: SE ("Apricot") chunked protobuf
+
+**Hardware result, 2026-11-17:** this service does not accept Berry `88 88 48 5A` frames.
+OpenFit's first attempt put a Berry frame on `6f02`; the watch read the first two bytes as packet
+number `0x8888` and answered `00 00 01 02 00 00`, the SE stack's "busy" control frame. The vendor
+app routes `16186f00` through `com.zhapp.ble.BluetoothService` (protocol string `Apricot`); the
+Berry SPP classes are used only over classic SPP. OpenFit therefore implements the SE framing first
+and keeps the Berry SPP bind below as the alternate transport.
+
+Control frame: `00 00 <code:2 BE> <payload:2 LE>`. The codes handled by
+`BluetoothService.j(byte[])` are:
+
+| Code | Bytes | Meaning |
+|---|---|---|
+| `0x0100` | `00 00 01 00 00 00` | phone: reply fully received |
+| `0x0101` | `00 00 01 01 00 00` | ready to receive; the phone also sends this to answer an announce |
+| `0x0102` | `00 00 01 02 00 00` | device busy; drop or retry |
+| `0x0103` | `00 00 01 03 00 00` | transfer complete |
+| `0x0105` | `00 00 01 05 <n LE16>` | resend chunk `n` (1-based) |
+
+Outbound command (`BluetoothService.g` CMD thread, `G()`, `c(int)`):
+
+1. `6f02` ← `00 00 00 00 <chunkCount LE16> 00` (announce).
+2. `6f02` ← `00 00 01 01 00 00` from the watch (ready).
+3. `6f02` ← `<index LE16> <chunk>` for index 1..N. Chunk data is `MTU - 5` bytes
+   (`k = MTU - 3`, data `k - 2`) and `chunkCount = ceil(length / (MTU - 5))`.
+4. `6f02` ← `00 00 01 03 00 00` from the watch (done); `01 02` means busy and `01 05 n`
+   asks for chunk `n` again.
+
+Inbound reply (`BluetoothService.i`, handler for `6f01`):
+
+1. `6f01` → phone: `00 00 00 00 <count LE16> 00` (announce).
+2. phone → `6f01`: `00 00 01 01 00 00`.
+3. `6f01` → phone: `<index LE16> <chunk>` × N.
+4. phone → `6f01`: `00 00 01 00 00 00`; the concatenated chunks are one `SEWear` protobuf.
+
+`16186f02` is both the write channel and the channel that carries the control frames; `6f03`–`6f05`
+use the same announce/chunk scheme for their own payloads. The first command after notifications
+is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+
+#### Account bind over SE (`SEFunctionId` + `SEBindAccount`)
+
+From `ControlBleTools` (`bindDevice`, `requestDeviceBindState`, `sendAppBindResult`,
+`verifyUserId`) and `BindAccountProtos`:
+
+| Id | Phone message | Watch reply |
+|---|---|---|
+| 0 | `SEWear{ble_connect_parmeter_config{}}` (`9A 06 00`) | link config / MTU ack |
+| 16 | `SEWear{id=16}` | `bind_account{request_binding_status}` |
+| 17 | `SEWear{id=17, bind_account{bind_check{device_verify:true}}}` | `bind_check{bind_check_result, mac, serial_number, device_number, firmware_version, device_name}` |
+| 18 | `SEWear{id=18, bind_account{bind_result{user_id:token}}}` | `bind_result{bind_result_type}` and/or `error_code` |
+| 19 | `SEWear{id=19, bind_account{verify_user_number:token}}` | `bind_account{verify_result{verify_result_type}}` |
+| 23 | `SEWear{id=23}` | unbind |
+
+`SEBindAccount` fields: `request_binding_status=1`, `bind_check=2`, `bind_result=3`,
+`inquiry_pairing_status=4`, `request_pairing_result=5`, `verify_user_number=6`,
+`verify_result=7`, `classic_bluetooth_status=8`.
+
+`SEBindCheck`: `device_verify=1`, `bind_random_key=2`, `bind_check_result=3`,
+`device_number=4`, `mac=5`, `serial_number=6`, `firmware_version=7`, `device_name=8`.
+
+`SEBindResult`: `bind_result_type=1`, `user_id=2`, `phone_type=3`.
+`SEBindResultType`/`SEBindCheckResult`: 0=SUCCESS, 1=REFUSE, 2=OVER_TIME,
+3=VERIFICATION_FAILED (the last only in `SEBindCheckResult`). `SEPhoneType`: ANDROID=0, IOS=1.
+
+NoiseFit on connect: id 16; if not bound → id 17 with `device_verify:true`; on
+`bind_check_result=SUCCESS` → id 18 with a random token; if already bound → id 19 with the token
+from its local database. OpenFit follows the same order and stores the token per watch address.
+
+### Berry SPP frame format (alternate transport)
 
 From `com.zhapp.ble.bean.berry.CmdDataBean#getCmdBytes` (multi-byte fields are
 **little-endian** because `BleUtils.int2Bytes(value, size, false)` uses `false` = LSB-first):
@@ -140,7 +211,7 @@ Type: OTHER=0 ACCOUNT=1 DEVICE=2 SYSTEM_TIME=3 USER_SETTINGS=4 SPORTING=5 FITNES
       NEW_WATCH_FACE=14 NEW_WEATHER=15 CHILDREN=16 AIFUNCTION=17 TVREMOTE=18
 ```
 
-### Bind (pairing) sequence, as implemented by NoiseFit
+### Berry SPP bind sequence (alternate transport)
 
 NoiseFit normally performs Android system bonding first (`BerryBluetoothService#checkBondByMac` →
 `createBond` → `BOND_STATE_CHANGED` receiver → connect) and then talks Berry over **classic
@@ -279,8 +350,11 @@ not yet decompiled.
    builders were read).
 4. Ryeex application handshake, opcodes and protobuf envelopes.
 5. ~~Whether `bindDevice` (private cmd 3) needs prior `UserIdBean`~~ — answered: yes. The order is
-   protocol (cmd 1) → user id (cmd 2) → bind (cmd 3, only if not bound) → confirm (cmd 4).
-6. Whether the ColorFit Ultra Buzz's `16186f00` GATT service implements the full Berry command
-   set, or only the Ryeex dual-mode firmware exposes it while real Berry traffic expects classic
-   SPP (`00001101`). If the GATT bind is silent, the next step is the vendor's system-bond + SPP
-   transport.
+   protocol (cmd 1) → user id (cmd 2) → bind (cmd 3, only if not bound) → confirm (cmd 4). This is
+   the classic-SPP alternate path, kept for a firmware that exposes SPP.
+6. ~~Whether `16186f00` speaks Berry frames or classic SPP~~ — answered on hardware: it answers a
+   Berry frame with the SE "busy" control frame. The service uses SE chunked protobuf; the Berry
+   SPP path remains documented for the alternate transport.
+7. Whether the watch accepts id 17 `bindCheck{deviceVerify:true}` from a non-vendor client and
+   returns `bindCheckResult=SUCCESS`, and whether it accepts the id-18 token produced by OpenFit.
+   This is the remaining physical-device test.

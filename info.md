@@ -10,10 +10,13 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 
 - Repository: `NullDonut/openfit` (remote `git@github.com:NullDonut/openfit.git`).
 - Feature branch: `feature/ble-connection-handling`.
-- Latest pushed commit: `4c3381e` — `Start NoiseFit watches with Android bonding`.
 - Existing PR: [#2, Improve BLE watch connection handling](https://github.com/NullDonut/openfit/pull/2), targeting `feat/openfit-android-starter`.
-- GitHub Actions for the latest PR head passed: 0 failing, 0 pending, 1 passed (release job is skipped/neutral).
-- Local worktree was clean after the commit. Local Gradle/Java/device tests were not run: `java`, `gradle`, and a configured Android SDK are unavailable; no physical watch is attached.
+- CI builds the debug APK; the latest green build before this SE change was
+  `openfit-debug-b982023`. CI on each push is green with 52 JVM unit tests.
+- The protocol layer is compiled and tested locally with `javac` + JUnit 4.13.2 against JDK 21,
+  and the whole app compiles against the API 35 `android.jar`. Local Gradle/Android SDK are
+  still unavailable, so packaging and installation go through GitHub Actions; no physical
+  watch is attached to the development host.
 
 ## Supplied NoiseFit package
 
