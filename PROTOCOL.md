@@ -1,7 +1,8 @@
 # OpenFit protocol notes (from NoiseFit 5.5.0 static analysis)
 
-Status: **static evidence only** — nothing here has been validated against a physical watch.
-Everything below was read out of the supplied package; no code was sent to a device.
+Status: **protocol recovered statically; Berry stack now confirmed on hardware.** The GATT
+layout and notification setup have been validated against a physical ColorFit Ultra Buzz, but no
+proprietary command (bind, HR control) has been sent to a watch yet.
 
 ## Provenance
 
@@ -15,14 +16,42 @@ Everything below was read out of the supplied package; no code was sent to a dev
 | Decompiler | JADX CLI 1.5.1 (Temurin JDK 21), per-DEX target decompilation |
 | Native | `libble-crypto.so` (10,896 bytes, stripped, NDK r24), read with `readelf`/`objdump` |
 
-The app contains **three** watch stacks. Which one the ColorFit Ultra Buzz uses is still
-unknown; OpenFit should select a profile by discovered GATT service, not by name.
+The app contains **three** watch stacks. A hardware GATT dump (see below) shows that the
+ColorFit Ultra Buzz exposes the Berry service, and also the Ryeex base service. OpenFit selects a
+profile by discovered GATT service, not by name; Berry wins when both are present.
 
 | Stack | Package | Transport | Cipher |
 |---|---|---|---|
 | Berry | `com.zhapp.ble`, `com.zjw.zhbraceletsdk` | GATT `16186f00-…` + optional SPP `00001101-…` | none observed |
 | Ryeex | `com.ryeex.ble`, `com.ryeex.common.ble.stack` | GATT `00000001-…` | RC4 variant in `libble-crypto.so` |
 | Realtek BBPro | `com.realsil.sdk.bbpro` | GATT (Realtek) | BBPro authentication (link keys) |
+
+## Hardware validation (ColorFit Ultra Buzz, 2026-11-17)
+
+First dump taken from the watch by OpenFit on Android 16 (API 36). The link was established
+connect-first: the watch showed as **not bonded** in Android while the GATT link was connected.
+
+| Service | Characteristics (properties) |
+|---|---|
+| `00001800-…` (GAP) | `2a00`, `2a01`, `2a04` (read) |
+| `00001801-…` (GATT) | — |
+| `0000aa01-…` | `aa02` (read/write), `aa03` (read/write/notify) |
+| `0000fee7-…` | `fea1` (read/write/notify), `fec9` (read) |
+| `16186f00-…-00807f9b34fb` (Berry) | `6f01`–`6f05`, all read/write-no-response + notify |
+| `00000001-…-00805f9b34fb` (Ryeex base) | `00000002` (read/write, write-no-response), `00000003` (read/write/notify) |
+
+Conclusions:
+
+- Berry is the active stack: its five characteristics match §GATT roles exactly, and OpenFit
+  enabled notifications on all five without encryption or a challenge.
+- The Ryeex base service is also exposed, so service presence alone does not identify the stack;
+  Berry is preferred, as implemented.
+- Android bonding is not required for the Berry GATT link (the watch was not bonded during the
+  whole successful connection), which supports OpenFit's connect-first ordering.
+- `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`); `0000fee7` does not
+  appear in the Berry or Ryeex sources and is not used.
+- No proprietary write has been sent to the watch yet.
+
 
 ## Berry profile (primary candidate)
 
@@ -178,8 +207,8 @@ not yet decompiled.
 
 ## Open questions
 
-1. Which profile the ColorFit Ultra Buzz exposes — needs one `adb`-captured GATT dump or the
-   app's own diagnostics screen against the real watch.
+1. ~~Which profile the ColorFit Ultra Buzz exposes~~ — answered by the hardware dump above:
+   Berry (and the Ryeex base service) are present; Berry is selected.
 2. Berry MTU/segmentation: whether a frame larger than the negotiated MTU is split by the
    stack or must be chunked by the caller (the large-file path uses `CHAR_PROTOBUF_UUID_03`).
 3. Exact `SEFitness`/`SESettingMenu` field numbers for HR responses (only command-side

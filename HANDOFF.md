@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-17
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: `abad148` (Berry protocol + frame/protobuf layer)
+Latest code commit at time of writing: `16d8bba` (buildable QR fix + on-device crash capture)
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -389,11 +389,12 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/BerryFrameTest.java` | 10 tests: golden bind bytes, round-trip, truncation rejection, serial wrap, nested payload |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK. `BerryProfile` is now used by
-`MainActivity` for profile detection; `BerryFrame`/`BerrySewear` are **not yet used** to send
-commands, and the protocol has **not been validated against hardware**.
+with `javac` + JUnit without Gradle or the Android SDK. `BerryProfile` is used by `MainActivity`
+for profile detection, and detection plus notification setup are confirmed on the physical watch.
+`BerryFrame`/`BerrySewear` are **not yet used** to send commands, so no frame has been sent to
+hardware.
 
-Connection layer added on 2026-11-17 (in `MainActivity`, not yet device-tested):
+Connection layer added on 2026-11-17 (successful on hardware; the watch stayed unbonded):
 
 - **Connect-first**: no `createBond()` precondition. The app calls `connectGatt(..., TRANSPORT_LE)`
   immediately, treats `STATE_CONNECTED` with a non-success status as a failure, and retries up
@@ -412,10 +413,23 @@ Connection layer added on 2026-11-17 (in `MainActivity`, not yet device-tested):
   pasted into the next session without adb.
 - **Rotation** no longer recreates `MainActivity` (`configChanges`), so an active GATT link is
   not torn down by an orientation change.
-- **QR crash fixed**: ZXing 4.3.0's POM omits `androidx.core`/`androidx.fragment` even though
-  its bytecode uses them; both are now explicit dependencies, and QR launch catches
-  `LinkageError`. Connection itself is confirmed on hardware (Android 16, ColorFit Ultra Buzz,
-  Berry service, 5 notifiable characteristics); QR still needs a physical retest.
+- **QR scanner:** ZXing 4.3.0's POM omits `androidx.core`/`androidx.fragment` even though its
+  bytecode uses them (`ContextCompat`, `ActivityCompat`, `Fragment`, `FragmentActivity`,
+  `ActivityResultContract`), so the first QR build crashed with `NoClassDefFoundError`. The
+  dependency-fix commit `1bb2036` **never produced an APK**: its CI build failed at
+  `:app:checkDebugDuplicateClasses` (`kotlin-stdlib-jdk8` 1.6.21 vs `kotlin-stdlib` 1.8.22 both
+  define `kotlin.collections.jdk8.CollectionsJDK8Kt`). The Kotlin 1.6 JDK7/JDK8 shim artifacts
+  are now excluded (their classes live in `kotlin-stdlib`), so a fixed APK can build.
+  `CaptureActivity` now keeps the library's own `zxing_CaptureTheme` (only the forced orientation
+  lock is overridden), and the app checks for a camera before launching. **QR still needs a
+  physical retest on a build after `16d8bba`.**
+- **On-device crash capture:** `OpenFitApp` installs an uncaught-exception handler that appends
+  the stack trace to `last-crash.txt` in app storage, and caught QR-launch failures are recorded
+  too. The diagnostics dialog shows a `LAST APP CRASH` section (with a Clear button) next to the
+  connection log, so the next failure can be reported by Copy without adb.
+- **Hardware evidence (2026-11-17):** the watch stayed `not bonded` while connected, exposed six
+  services (Berry `16186f00-…`, Ryeex base `00000001-…`, `1800`, `1801`, `aa01`, `fee7`), and all
+  five Berry characteristics accepted notification setup. Berry is therefore the active stack.
 
 Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
@@ -425,8 +439,9 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 
 ## 9. Open questions / next steps
 
-1. **Which stack does the watch expose?** One GATT service dump settles it. Look for
-   `16186f00-…` (Berry), `00000001-…` (Ryeex), or Realtek BBPro services.
+1. ~~**Which stack does the watch expose?**~~ **Answered 2026-11-17:** the physical ColorFit
+   Ultra Buzz exposes Berry `16186f00-…` (5 notifiable chars) *and* the Ryeex base service
+   `00000001-…`. Berry is selected; see the hardware table in `PROTOCOL.md`.
 2. **Berry MTU / segmentation:** whether frames larger than the negotiated MTU are split by the
    stack or must be chunked by the caller (large-file path uses `…6f03`).
 3. **Inner field numbers** of `SEFitness`, `SESettingMenu`, `SEFactory` HR messages — only the
@@ -437,18 +452,19 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 6. **Wiring (partly done):** `MainActivity` now performs connect → discovery → profile detection
    → notification setup. Still needed: send Berry bind (`private cmdId=3`, then optional
    `UserIdBean`/confirm) and the HR control message, then parse `…6f01`/`…6f02` notifications.
-7. **First phone test of the new connection layer:** install the CI APK, tap Connect (or scan the
-   QR), and if it does not reach "Connected", open the status line on Devices → **Copy** and
-   share the report. It contains the exact GATT status, bond state and discovered profile.
+7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
+   (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
+   after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
+   includes the last crash stack trace even though the scanner runs in its own activity.
 8. Do not send unvalidated writes to the watch; confirm each step with a device test. The Berry
-   bind frame is the next write and should be gated on the device test above.
+   bind frame is the next write and should be gated on the QR/device test above.
 
 ### Suggested order from here
 
 ```
-device test of connect-first flow  ->  read the copied diagnostics log
-    ->  if connected with Berry profile: send bind (private cmdId=3) and re-test
-    ->  extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
-    ->  wire HR control + parse incoming Berry frames
-    ->  device test, capture logs
+install the CI APK from 16d8bba or later
+    -> retest QR; if it fails, Copy diagnostics (LAST APP CRASH has the stack trace)
+    -> send Berry bind (private cmdId=3) and re-test
+    -> extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
+    -> wire HR control + parse incoming Berry frames
 ```
