@@ -1,6 +1,6 @@
 # OpenFit / NoiseFit BLE Research Notes
 
-Last updated: 2026-11-16
+Last updated: 2026-11-17
 
 ## User request and current status
 
@@ -43,8 +43,10 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 
 ### Still unknown / not implemented
 
-- Exact GATT service/characteristic UUID roles for the user’s watch.
-- Proprietary Ryeex/VeryFit application-level authentication handshake, cipher inputs/key derivation, protocol opcodes, protobuf envelopes, framing/checksums, notification sequence, and health/sleep transfer.
+- Which of the three shipped stacks (Berry, Ryeex, Realtek BBPro) the user's watch exposes; the
+  Berry profile is now fully documented in `PROTOCOL.md`, so a single GATT dump of the watch
+  would settle it.
+- Proprietary Ryeex/VeryFit application-level authentication handshake, cipher inputs/key derivation, protocol opcodes, protobuf envelopes, framing/checksums, notification sequence, and health/sleep transfer (the RC4 cipher itself is decoded; see `PROTOCOL.md`).
 - Whether a successful Android bond alone allows this particular watch to expose useful services/data.
 - Whether the standard Heart Rate Service is present on this specific model; if not, OpenFit currently cannot read watch heart rate.
 - Proprietary NoiseFit QR provisioning; OpenFit’s QR flow only extracts a Bluetooth MAC address.
@@ -75,6 +77,43 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 4. Configure a proper JADX Java runtime/provider (or use a machine with JADX/JEB) and decompile only the relevant `BerryBluetoothService`, Ryeex GATT stack, protocol parser/serializer, and `BleCipher` call sites. Inspect parameter provenance and call order; do not blindly transplant proprietary code.
 5. Implement independently only the verified protocol pieces; add parser/frame unit tests and rerun remote GitHub Actions after each push. Physical device validation remains necessary before calling it functional.
 
+## 2026-11-17 decompilation pass (new evidence)
+
+Tooling: no JVM existed on the host, and `doas` needs a password, so a Temurin JDK 21 and JADX
+CLI 1.5.1 were installed **without root** into `/tmp/opencode/tools` (tmpfs, lost on reboot;
+`REA_JADX_MCP_JAR` still cannot be set without restarting the MCP server, so the JADX provider
+was bypassed and the CLI used directly). Decompilation was done **one DEX at a time with
+`-j 1`** — a 4-thread full-APK run exhausted memory and disturbed the user's desktop session;
+do not repeat that.
+
+Artifacts: XAPK SHA-256 `cfda8cf…3adc7`, base APK SHA-256 `5ae827e…b4eae2`
+(`/tmp/noisefit-main.apk`, 18 DEX files).
+
+Verified in this pass (details and wire tables in `PROTOCOL.md`):
+
+- The app carries three independent watch stacks: Berry (`com.zhapp.ble`), Ryeex
+  (`com.ryeex.*`, RC4 cipher), and Realtek BBPro (`com.realsil.sdk.bbpro`).
+- Berry GATT profile: service `16186f00-0000-1000-8000-00807f9b34fb` (note vendor base
+  `00807f9b34fb`), chars `…6f01`…`…6f05`; writes go to `…6f02`, all five notify.
+- Berry frame: `head(4, LE) | serialNo(1) | event(1) | type(1) | len(2, LE) | payload`, with
+  magics `0x5A488888` (app→dev), `0x5A486666` (dev→app), `0x5A489999` (ack),
+  `0x5A481111` (large file); `event` 1=protobuf / 3=private, `type` 3=protobuf / 2=private.
+- `SEWear` protobuf schema (type=1, id=2, payload fields 3..21, error_code=100).
+- Bind sequence: private `cmdId=3` (bind), `cmdId=2` (user id), `cmdId=4` (bind result ± flag),
+  plus `SEWear{ACCOUNT,0}` bind-state query. **No encryption or challenge/response was found
+  on the Berry path** — the earlier assumption that a proprietary encrypted handshake blocks
+  pairing does not hold for this stack.
+- `libble-crypto.so` is fully decoded: `nativeEncrypt` is RC4 seeded with a fixed 256-byte
+  permutation from `.rodata`, keyed by the first array argument; `mixA`/`mixB` are byte
+  permutations of MAC + 16-bit pid; `regA/regB/logA/logB/logC` are hard-coded ints.
+- Implemented independently in `app/src/main/java/com/openfit/app/protocol/`
+  (`BerryFrame`, `BerrySewear`, `BerryProfile`) with `app/src/test/java/.../BerryFrameTest.java`;
+  verified locally with javac + JUnit 4.13.2 (10 tests green). Not yet wired into `MainActivity`
+  and not validated against a watch.
+
+Still open: which stack the ColorFit Ultra Buzz exposes; Berry MTU segmentation; inner field
+numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
+
 ## Project notes
 
-`CONTEXT.md` is the general project handoff. `README.md` describes user-facing features and limitations. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.
+`CONTEXT.md` is the general project handoff. `README.md` describes user-facing features and limitations. `PROTOCOL.md` holds the recovered wire protocol. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.

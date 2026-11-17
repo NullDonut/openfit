@@ -13,7 +13,7 @@ An independent, open-source Android starter for a simple watch companion. OpenFi
 - Editable manual sleep-duration entry in 15-minute increments, stored locally.
 - No account, analytics, network permission, or cloud sync.
 
-Static inspection of NoiseFit 5.5.0's supplied XAPK found a main APK and ARM64 split, the `libVeryFitMulti.so` and `libble-crypto.so` libraries, plus `com.zhapp.ble.BerryBluetoothService` methods/logs showing bond-state checks and Android `createBond()` before connecting. OpenFit now follows that observed system-bond-first flow and reconnects after Android confirms bonding. The APK also contains a JNI BLE cipher, but static evidence available here does not establish the proprietary encrypted application handshake or its keys. OpenFit does not send guessed auth/protocol bytes or copy NoiseFit code. The QR flow accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity. Successful ColorFit Ultra Buzz application-level authentication remains unverified and requires a user-authorized device test.
+Static inspection of NoiseFit 5.5.0's supplied XAPK found a main APK and ARM64 split, the `libVeryFitMulti.so` and `libble-crypto.so` libraries, plus `com.zhapp.ble.BerryBluetoothService` methods/logs showing bond-state checks and Android `createBond()` before connecting. OpenFit now follows that observed system-bond-first flow and reconnects after Android confirms bonding. A later decompilation pass recovered the watch's Berry GATT profile, frame layout, protobuf envelope and bind commands (see `PROTOCOL.md`); that profile uses no encryption or challenge-response, and an independent implementation of its frame/protobuf layer now lives in `app/src/main/java/com/openfit/app/protocol/` with unit tests. It is not yet enabled in the UI and is not validated on hardware. The APK also contains a JNI BLE cipher (RC4 variant, decoded) for a different watch family whose opcodes remain unknown. OpenFit does not copy NoiseFit code or send unvalidated writes. The QR flow accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity.
 
 ## Build
 
@@ -35,5 +35,6 @@ The current release does not estimate, infer, or import sleep stages, and does n
 
 - Package: com.openfit.app
 - Min SDK: 26
-- Unit tests cover the Bluetooth heart-rate measurement parser.
+- Unit tests cover the Bluetooth heart-rate measurement parser and the Berry protocol frame/protobuf layer (`app/src/main/java/com/openfit/app/protocol/`).
+- `PROTOCOL.md` documents the recovered watch protocol and its provenance.
 - License: MIT (see LICENSE).
