@@ -2,8 +2,8 @@
 
 Last updated: 2026-11-17
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: see `git log` (`feature/ble-connection-handling`, Berry bind
-handshake + frame reader + 28 unit tests)
+Latest code commit at time of writing: `bd80c98` (Berry bind handshake + frame reader + 28 unit
+tests); CI run **44058236613** passed and uploaded `openfit-debug-bd80c98`.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -205,8 +205,8 @@ rm -rf /tmp/opencode/build
 ```
 
 CI (`.github/workflows/android.yml`) runs `gradle :app:testDebugUnitTest :app:assembleDebug`,
-uploads the debug APK, and publishes release assets for `v*` tags. Run 44038772215 for
-`abad148` completed with `success`.
+uploads the debug APK, and publishes release assets for `v*` tags. Run **44058236613** for
+`bd80c98` completed with `success` (artifact `openfit-debug-bd80c98`).
 
 ---
 
