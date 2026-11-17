@@ -101,8 +101,10 @@ Type: OTHER=0 ACCOUNT=1 DEVICE=2 SYSTEM_TIME=3 USER_SETTINGS=4 SPORTING=5 FITNES
 
 ### Bind (pairing) sequence, as implemented by NoiseFit
 
-Android system bond comes first (`BerryBluetoothService#checkBondByMac` → `createBond` →
-`BOND_STATE_CHANGED` receiver → connect), which OpenFit already does. On top of that the
+NoiseFit performs Android system bonding first (`BerryBluetoothService#checkBondByMac` →
+`createBond` → `BOND_STATE_CHANGED` receiver → connect). OpenFit now connects first and keeps
+that bond flow as a fallback for GATT 5/15, so the sequence below is only reached once a watch
+actually accepts the link. On top of bonding the
 Berry protocol uses private commands (`event=3`, `type=2`, payload `cmdId:2 len:2 data`):
 
 | Step | Frame | Meaning |

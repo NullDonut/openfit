@@ -303,9 +303,11 @@ NEW_WATCH_FACE 14, NEW_WEATHER 15, CHILDREN 16, AIFUNCTION 17, TVREMOTE 18.
 
 ### 6.4 Bind (pairing) sequence
 
-Android system bond happens first (`checkBondByMac` → `createBond` → `BOND_STATE_CHANGED`
-receiver → connect); OpenFit already implements bond-before-connect. On top of that, Berry uses
-private commands (`event=3`, `type=2`, payload `cmdId:2 len:2 data`):
+Android system bond happens first in NoiseFit (`checkBondByMac` → `createBond` →
+`BOND_STATE_CHANGED` receiver → connect). OpenFit deliberately reversed that ordering on
+2026-11-17: it connects first, retries transient GATT failures, and starts the same bond flow
+only when the watch reports GATT 5/15 (see §8). On top of bonding, Berry uses private commands
+(`event=3`, `type=2`, payload `cmdId:2 len:2 data`):
 
 | Step | Frame | Meaning |
 |---|---|---|
@@ -390,10 +392,29 @@ The protocol package is deliberately **Android-free** (plain Java 11), so it com
 with `javac` + JUnit without Gradle or the Android SDK. It is **not yet wired into
 `MainActivity`** and has **not been validated against hardware**.
 
-Existing app behavior (unchanged by this work): local dashboard, BLE discovery by recognizable
-Noise/ColorFit names, saved-watch reconnect, Android system bonding before connect, QR scanning
-for a Bluetooth MAC, SIG heart-rate measurement parsing, manual sleep notes. No account,
-analytics, network permission or cloud sync.
+Connection layer added on 2026-11-17 (in `MainActivity`, not yet device-tested):
+
+- **Connect-first**: no `createBond()` precondition. The app calls `connectGatt(..., TRANSPORT_LE)`
+  immediately, treats `STATE_CONNECTED` with a non-success status as a failure, and retries up
+  to 4 times with a 1 s gap (handles the common GATT 133 right after pairing).
+- **On-demand bonding**: only GATT 5/15 (connection, discovery or descriptor write) triggers
+  `createBond()`; 45 s pairing timeout; reconnect through `BOND_STATE_CHANGED` on success. The
+  receiver is registered with `RECEIVER_EXPORTED` on Android 13+: the Bluetooth stack is a
+  privileged app under its own UID, so a `RECEIVER_NOT_EXPORTED` receiver can miss bond events
+  and leave the old pairing flow waiting forever. If all direct attempts fail on an unbonded
+  watch, the app falls back to the NoiseFit-style bond-then-connect path once.
+- **Service discovery** distinguishes Berry, SIG heart-rate, Ryeex and unknown profiles, then
+  enables every available notification/indication sequentially (5 s setup timeout).
+- **On-device log**: the status line on Devices opens diagnostics containing Android version,
+  watch address/bond state, profile, a timestamped connection log, and the GATT service dump.
+  A **Copy** button puts the whole report on the clipboard, so a failed phone test can be
+  pasted into the next session without adb.
+- **Rotation** no longer recreates `MainActivity` (`configChanges`), so an active GATT link is
+  not torn down by an orientation change.
+
+Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
+saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
+manual sleep notes. No account, analytics, network permission or cloud sync.
 
 ---
 
@@ -408,16 +429,21 @@ analytics, network permission or cloud sync.
    time).
 4. **Ryeex** application handshake, opcodes, protobuf envelopes.
 5. Whether private `cmdId=3` (bind) needs a prior `UserIdBean`, or the watch initiates bind.
-6. **Wiring:** once the profile is known, connect `BerryFrame` to `MainActivity` behind service
-   discovery — enable notifications on `…6f02`, send bind (`cmdId=3`), then the HR control
-   message — and validate on the real watch.
-7. Do not send unvalidated writes to the watch; confirm each step with a device test.
+6. **Wiring (partly done):** `MainActivity` now performs connect → discovery → profile detection
+   → notification setup. Still needed: send Berry bind (`private cmdId=3`, then optional
+   `UserIdBean`/confirm) and the HR control message, then parse `…6f01`/`…6f02` notifications.
+7. **First phone test of the new connection layer:** install the CI APK, tap Connect (or scan the
+   QR), and if it does not reach "Connected", open the status line on Devices → **Copy** and
+   share the report. It contains the exact GATT status, bond state and discovered profile.
+8. Do not send unvalidated writes to the watch; confirm each step with a device test. The Berry
+   bind frame is the next write and should be gated on the device test above.
 
 ### Suggested order from here
 
 ```
-GATT dump of the watch  ->  if Berry:
-    extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
-    wire BerryFrame into MainActivity (discovery -> notify -> bind -> HR)
-    device test, capture logs
+device test of connect-first flow  ->  read the copied diagnostics log
+    ->  if connected with Berry profile: send bind (private cmdId=3) and re-test
+    ->  extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
+    ->  wire HR control + parse incoming Berry frames
+    ->  device test, capture logs
 ```
