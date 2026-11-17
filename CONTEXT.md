@@ -1,5 +1,9 @@
 # OpenFit project context
 
+> **Machine and tooling state:** see `HANDOFF.md` for the current environment (JDK/JADX paths,
+> `~/.profile` exports, REA MCP registration), host RAM limits/crash history, decompile recipe,
+> and the exact next steps. This file covers project-level context.
+
 ## Purpose and current scope
 
 OpenFit is an independent Android watch-companion starter (`com.openfit.app`), not affiliated with Noise/NoiseFit. It has a local-only dashboard, BLE discovery for recognizable Noise/ColorFit names, saved-watch reconnect, Android system bonding before BLE connect (following the supplied NoiseFit APK's observed bond-check/createBond-before-connect behavior), QR scanning for QR contents that contain a Bluetooth MAC address, standard Bluetooth SIG heart-rate support, and manual local sleep-duration notes. It does not yet talk to the watch's vendor GATT profile; the recovered Berry profile (`PROTOCOL.md`) needs no application-level authentication, so the earlier "proprietary handshake blocks pairing" assumption no longer applies to that stack. There is no account, analytics, network permission, or cloud sync.

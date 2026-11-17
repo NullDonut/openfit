@@ -80,11 +80,14 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 ## 2026-11-17 decompilation pass (new evidence)
 
 Tooling: no JVM existed on the host, and `doas` needs a password, so a Temurin JDK 21 and JADX
-CLI 1.5.1 were installed **without root** into `/tmp/opencode/tools` (tmpfs, lost on reboot;
-`REA_JADX_MCP_JAR` still cannot be set without restarting the MCP server, so the JADX provider
-was bypassed and the CLI used directly). Decompilation was done **one DEX at a time with
-`-j 1`** — a 4-thread full-APK run exhausted memory and disturbed the user's desktop session;
-do not repeat that.
+CLI 1.5.1 were installed **without root** into `/tmp/opencode/tools` (tmpfs, lost on reboot).
+`REA_JADX_MCP_JAR` could not be set in the already-running MCP server, so the JADX provider was
+bypassed and the CLI used directly. This is now fixed persistently: `JAVA_HOME` and
+`REA_JADX_MCP_JAR` are exported from `~/.profile`/`~/.bashrc`, the JDK lives at
+`/home/shiv/.local/share/jadx-jdk/jdk-21.0.13+9`, and `~/.config/opencode/opencode.json` sets
+both in the `rea` server's `environment` block. See `HANDOFF.md`. Decompilation was done **one
+DEX at a time with `-j 1`** — a 4-thread full-APK run exhausted memory and disturbed the user's
+desktop session; do not repeat that.
 
 Artifacts: XAPK SHA-256 `cfda8cf…3adc7`, base APK SHA-256 `5ae827e…b4eae2`
 (`/tmp/noisefit-main.apk`, 18 DEX files).
@@ -116,4 +119,4 @@ numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
 
 ## Project notes
 
-`CONTEXT.md` is the general project handoff. `README.md` describes user-facing features and limitations. `PROTOCOL.md` holds the recovered wire protocol. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.
+`CONTEXT.md` is the general project handoff. `HANDOFF.md` is the current single-page handoff for machine setup, tooling paths, host limits and next steps. `README.md` describes user-facing features and limitations. `PROTOCOL.md` holds the recovered wire protocol. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.
