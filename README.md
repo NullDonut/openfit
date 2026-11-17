@@ -4,15 +4,16 @@ An independent, open-source Android starter for a simple watch companion. OpenFi
 
 ## Current scope
 
-- Dark, high-contrast dashboard with a watch pairing entry point.
-- Permission-aware Bluetooth LE discovery that surfaces recognizable Noise / ColorFit names rather than every nearby device, plus a manually triggered reconnect to the saved watch.
+- Dark, high-contrast dashboard with Home, Health, Devices, and Sleep tabs.
+- Permission-aware Bluetooth LE discovery for recognizable Noise / ColorFit names, saved-watch reconnect, and Android system bonding before the first BLE connection (matching the supplied NoiseFit app’s observed bond-check/create-bond-before-connect flow).
 - Pairing QR scanner accepts QR content containing a Bluetooth MAC address; proprietary NoiseFit QR payloads are not decoded.
 - Live heart rate only when a connected device exposes the Bluetooth SIG Heart Rate Service (0x180D) and a notifiable Heart Rate Measurement characteristic (0x2A37). Notification-write outcomes are reflected in the connection state.
+- Read-only GATT diagnostics list discovered service/characteristic UUIDs and properties. No proprietary command is sent.
 - Latest heart rate plus local daily min/max and minute-sample summary. This is a summary of received BLE notifications, not continuous monitoring.
 - Editable manual sleep-duration entry in 15-minute increments, stored locally.
 - No account, analytics, network permission, or cloud sync.
 
-The supplied NoiseFit package declares BLE scan/connect and Health Connect write permissions, and contains Ryeex/NoiseFit heart-rate and sleep model names. Those observations do **not** reveal the proprietary watch pairing, authentication, command, or sleep-transfer protocol. OpenFit does not decode proprietary NoiseFit QR codes; its QR flow currently accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity. OpenFit deliberately does not claim ColorFit Ultra Buzz interoperability until a user-authorized, safe protocol capture or direct hardware test validates it. Generic BLE scanning and the standard Heart Rate Service may not be enough for this watch.
+Static inspection of NoiseFit 5.5.0's supplied XAPK found a main APK and ARM64 split, the `libVeryFitMulti.so` and `libble-crypto.so` libraries, plus `com.zhapp.ble.BerryBluetoothService` methods/logs showing bond-state checks and Android `createBond()` before connecting. OpenFit now follows that observed system-bond-first flow and reconnects after Android confirms bonding. The APK also contains a JNI BLE cipher, but static evidence available here does not establish the proprietary encrypted application handshake or its keys. OpenFit does not send guessed auth/protocol bytes or copy NoiseFit code. The QR flow accepts a Bluetooth MAC address only. Device-name filtering is a convenience, not proof of identity. Successful ColorFit Ultra Buzz application-level authentication remains unverified and requires a user-authorized device test.
 
 ## Build
 
@@ -28,7 +29,7 @@ The GitHub Actions Android workflow runs unit tests and creates this debug APK f
 
 ## Health data and limitations
 
-The current release does not estimate, infer, or import sleep stages, and does not use Health Connect. The heart-rate history is an on-device, notification-derived daily summary and cannot promise continuous coverage. A manually logged sleep duration is a journal entry, not a medical measurement. Background synchronization, Health Connect integration, validated ColorFit Ultra Buzz pairing, and watch sleep-transfer support are future work.
+The current release does not estimate, infer, or import sleep stages, and does not use Health Connect. The heart-rate history is an on-device, notification-derived daily summary and cannot promise continuous coverage. A manually logged sleep duration is a journal entry, not a medical measurement. Background synchronization, Health Connect integration, the proprietary NoiseFit application-level authentication handshake, validated ColorFit Ultra Buzz pairing, and watch sleep-transfer support are future work.
 
 ## Development
 
