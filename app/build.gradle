@@ -4,6 +4,21 @@ android {
     namespace 'com.openfit.app'
     compileSdk 35
 
+    // A committed test keystore, so every CI build has the same signature. Without it each
+    // ubuntu-latest runner generates a fresh debug key, Android refuses to install over the
+    // previous APK, and the uninstall wipes the saved watch binding.
+    //
+    // This key is public on purpose and is for test builds only. Before any real distribution,
+    // replace it with a private release keystore; that switch needs one uninstall.
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('keystore/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     defaultConfig {
         applicationId 'com.openfit.app'
         minSdk 26

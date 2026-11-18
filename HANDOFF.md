@@ -564,7 +564,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 6 tests: golden bind frames, declared length, key-52 replies, split frames, resync |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (68 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (75 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -619,6 +619,24 @@ Connection layer added on 2026-11-17 (successful on hardware; the watch stayed u
 Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
 manual sleep notes. No account, analytics, network permission or cloud sync.
+
+### 8.1 Build and install workflow
+
+`app/build.gradle` signs debug builds with the committed `keystore/debug.keystore`
+(alias `androiddebugkey`, password `android`). This exists because `ubuntu-latest` runners otherwise
+generate a fresh debug key per build: Android then refuses to install the new APK over the old one,
+and the forced uninstall deletes the app prefs (`watch_bound_<ADDRESS>`, `watch_token_<ADDRESS>`),
+which costs the ZhBracelet fast path and the SE reconnect token.
+
+With the stable key, a new CI artifact installs over the previous build and keeps both prefs. The
+watch does not need a factory reset between builds. Two one-time exceptions remain:
+
+- Switching from a build signed by a runner-generated key to this one needs one uninstall.
+- Before any real distribution, replace this key with a private release keystore. That switch also
+  needs one uninstall.
+
+The key is public in this repository on purpose and only identifies test builds; do not treat it as
+a secret.
 
 ---
 
