@@ -1008,8 +1008,12 @@ public final class MainActivity extends Activity {
         if (berry != null) {
             watchProfile = "Noise";
             seWriteChar = berry.getCharacteristic(BerryProfile.CHAR_WRITE);
-            for (BluetoothGattCharacteristic characteristic : berry.getCharacteristics()) {
-                if (isNotifiable(characteristic)
+            // Only 6f01 (inbound transfer/ACks) and 6f02 (control) carry the SE exchange. The
+            // other three (large data, side/Alexa) are not used, and every CCCD write is slow on
+            // this watch, so skipping them shortens the link setup.
+            for (UUID uuid : new UUID[] {BerryProfile.CHAR_BULK, BerryProfile.CHAR_WRITE}) {
+                BluetoothGattCharacteristic characteristic = berry.getCharacteristic(uuid);
+                if (characteristic != null && isNotifiable(characteristic)
                         && characteristic.getDescriptor(CLIENT_CONFIGURATION) != null) {
                     notificationQueue.add(characteristic);
                 }
@@ -1821,9 +1825,16 @@ public final class MainActivity extends Activity {
             if (info == null) {
                 ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);
                 if (ack != null) {
-                    logPairing("ZhBracelet ack · " + ack.describe()
-                            + (zhLastTxKey < 0 ? ""
-                            : " · last sent " + ZhBraceletBinding.keyLabel(zhLastTxKey)));
+                    String context = ack.key == ZhBraceletBinding.KEY_COMMAND_ACK || zhLastTxKey < 0
+                            ? "" : " · last sent " + ZhBraceletBinding.keyLabel(zhLastTxKey);
+                    logPairing("ZhBracelet ack · " + ack.describe() + context);
+                    if (ack.key == ZhBraceletBinding.KEY_COMMAND_ACK && ack.success) {
+                        if (ack.refersTo == ZhBraceletBinding.KEY_TIME_SYNC) {
+                            logBle("Clock sync acknowledged by the watch");
+                        } else if (ack.refersTo == ZhBraceletBinding.KEY_USER_INFO) {
+                            logBle("User info acknowledged by the watch");
+                        }
+                    }
                 } else {
                     int key = frame.length > 10 ? frame[10] & 0xFF : -1;
                     logPairing("ZhBracelet frame · " + ZhBraceletBinding.keyLabel(key) + " ignored");

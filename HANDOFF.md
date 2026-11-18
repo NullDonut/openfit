@@ -42,6 +42,15 @@ does not hold, `failZh` runs the SE exchange and then Berry, so the fallback ord
 The pairing log also names Zh reply keys and attributes a generic status ack to the last sent
 command, which is what the next device run needs to show whether the clock sync (key 1) and user
 info (key 4) were accepted.
+
+The 2026-11-18 17:45 run confirmed the post-bind frames: the Buzz answers them with key `0x42`
+(payload `[key] 00 [result]`), not the `0x0F`/`0xAC` shapes the SDK's setter path uses. Both the
+clock sync (`AB 00 00 08 97 00 00 4E 03 00 42 00 03 01 00 01`) and the user info
+(`… 42 00 03 04 00 01`) came back with result 1, and the app now logs "Clock sync acknowledged by
+the watch" / "User info acknowledged by the watch" and recognises the `0x42` ack. The same run
+also captured the watch's unsolicited post-bind burst (keys `0x31`, `0x02`, `0x37`, `0x0D`,
+`0x27`, `0x38`, `0x08`, `0x09`); `0x09` returns the raw MAC and `0x0D` is a 292-byte frame, so
+those are the first targets for health/device data.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,

@@ -33,6 +33,11 @@ public final class ZhBraceletBinding {
     public static final int KEY_TIME_SYNC = 0x01;
     public static final int KEY_USER_INFO = 0x04;
     public static final int KEY_STATUS = 0x0F;
+    /**
+     * Command acknowledgement: payload {@code [command key] 00 [result]}. Observed on the
+     * ColorFit Ultra Buzz answering the clock sync (key 1) and user info (key 4) after a bind.
+     */
+    public static final int KEY_COMMAND_ACK = 0x42;
     public static final int KEY_DEVICE_ANSWER = 0xAC;
     public static final int KEY_UNBIND = 0x33;
 
@@ -110,6 +115,10 @@ public final class ZhBraceletBinding {
         if (key == KEY_STATUS) {
             return new Ack(key, -1, (frame[13] & 0xFF) == 1);
         }
+        if (key == KEY_COMMAND_ACK && frame.length >= 16) {
+            // Payload: the acknowledged command key, one reserved byte, then the result.
+            return new Ack(key, frame[13] & 0xFF, (frame[15] & 0xFF) == 1);
+        }
         if (key == KEY_DEVICE_ANSWER && frame.length >= 15) {
             return new Ack(key, frame[13] & 0xFF, (frame[14] & 0xFF) == 1);
         }
@@ -181,6 +190,7 @@ public final class ZhBraceletBinding {
             case KEY_UNBIND: return "unbind";
             case KEY_BIND_INFO: return "bind info";
             case KEY_BIND: return "bind";
+            case KEY_COMMAND_ACK: return "command ack";
             case KEY_DEVICE_ANSWER: return "device answer";
             default:
                 return String.format(java.util.Locale.US, "key 0x%02X", key & 0xFF);
@@ -205,6 +215,10 @@ public final class ZhBraceletBinding {
         }
 
         public String describe() {
+            if (key == KEY_COMMAND_ACK) {
+                return "command ack · " + ZhBraceletBinding.keyLabel(refersTo)
+                        + " · " + (success ? "ok" : "refused");
+            }
             String name = key == KEY_STATUS ? "status" : "device answer";
             String target = refersTo < 0 ? "" : " for key " + refersTo;
             return name + target + " · " + (success ? "ok" : "refused");

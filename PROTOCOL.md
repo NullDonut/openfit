@@ -586,10 +586,27 @@ q1 = height in cm
 q2 = weight in kg
 ```
 
-`h.setUserInfo` clamps height and weight to 1..255 before building the frame. Replies are either
-key `0x0F` ("send status", payload byte 13 = 1 for success) or key `0xAC` ("device answer", byte 13
-echoes the original key, byte 14 is the status). OpenFit recognises both and logs them as
-`ZhBracelet ack · status · ok` / `device answer for key N · ok`.
+`h.setUserInfo` clamps height and weight to 1..255 before building the frame. Replies use three
+shapes: key `0x0F` ("send status", payload byte 13 = 1 for success), key `0xAC` ("device answer",
+byte 13 echoes the original key, byte 14 is the status), and key `0x42` (command acknowledgement,
+payload `[key] 00 [result]`). OpenFit recognises all three and logs them as
+`ZhBracelet ack · status · ok`, `device answer for key N · ok` and `command ack · time sync · ok`.
+
+The `0x42` form is what the Buzz actually sends after the bind: at 17:45:39 it answered the clock
+sync with `AB 00 00 08 97 00 00 4E 03 00 42 00 03 01 00 01` and the user info with
+`… 42 00 03 04 00 01`, i.e. both accepted (`result=1`). The app now reports these as
+"Clock sync acknowledged by the watch" / "User info acknowledged by the watch".
+
+### Post-bind push burst (2026-11-18 17:45)
+
+Once the bind is accepted the watch pushes a burst on `00000003` with no request from the phone:
+key `0x31` (payload `00 F7 00 3F 01 FC`; the same frame also arrives on connect before the bind),
+`0x02` (52 bytes, mostly zero), `0x37` (28 bytes), `0x0D` (292 bytes, spread over several
+notifications), `0x27` and `0x38` (3 bytes each), `0x08` (22 bytes), `0x09` (6 bytes containing
+the raw watch MAC `D4 27 1D 30 44 9B`), then the key-4 echo and the two key-0x42 acks. The frames
+are plaintext and may be an initial health/status sync, but their payload layout is not decoded
+yet; OpenFit logs and ignores them. The `0x09` MAC reply and the 292-byte `0x0D` frame are the
+most promising next targets.
 
 ### Validated on hardware (2026-11-18 11:49, build `b701e4a`)
 

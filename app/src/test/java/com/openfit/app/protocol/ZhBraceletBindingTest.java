@@ -140,11 +140,30 @@ public class ZhBraceletBindingTest {
         assertEquals(255, high[15] & 0xFF);
     }
 
+    @Test public void parseAckReadsTheBuzzCommandAcks() {
+        // 2026-11-18 17:45:39, ColorFit Ultra Buzz: key 0x42 answers the clock sync (1) and the
+        // user-info profile (4) with payload [command key] 00 01.
+        ZhBraceletBinding.Ack timeSync = ZhBraceletBinding.parseAck(
+                hex("AB0000089700004E0300420003010001"));
+        assertNotNull(timeSync);
+        assertEquals(ZhBraceletBinding.KEY_COMMAND_ACK, timeSync.key);
+        assertEquals(ZhBraceletBinding.KEY_TIME_SYNC, timeSync.refersTo);
+        assertTrue(timeSync.success);
+        assertTrue(timeSync.describe().contains("time sync"));
+
+        ZhBraceletBinding.Ack userInfo = ZhBraceletBinding.parseAck(
+                hex("AB0000089700004E0300420003040001"));
+        assertNotNull(userInfo);
+        assertEquals(ZhBraceletBinding.KEY_USER_INFO, userInfo.refersTo);
+        assertTrue(userInfo.success);
+    }
+
     @Test public void keyLabelsNameTheRecoveredCommands() {
         assertEquals("time sync", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_TIME_SYNC));
         assertEquals("user info", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_USER_INFO));
         assertEquals("status", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_STATUS));
         assertEquals("bind info", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_BIND_INFO));
+        assertEquals("command ack", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_COMMAND_ACK));
         assertEquals("key 0x08", ZhBraceletBinding.keyLabel(0x08));
     }
 
@@ -168,5 +187,13 @@ public class ZhBraceletBindingTest {
         assertEquals(ZhBraceletBinding.KEY_TIME_SYNC, answerAck.refersTo);
 
         assertNull(ZhBraceletBinding.parseAck(BIND_TYPE_0)); // phone-to-watch echo
+    }
+
+    private static byte[] hex(String value) {
+        byte[] out = new byte[value.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
     }
 }
