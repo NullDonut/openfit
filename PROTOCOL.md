@@ -517,9 +517,44 @@ The watch answers with key `0x34` (52), payload `TT RR`:
 the account token used by Berry/SE never appears. `ZhBraceletService.beBind()` only parses an
 advertising service-data blob (`09 16 68 FE …`), not a GATT frame.
 
-Order of commands on connect (from `h.onServicesDiscovered`): bind first, then `Q()` (time sync,
-key 1) and 50 ms later `setUserInfo`. A bind therefore does not depend on time sync or profile
-data.
+Order of commands on connect (from `h.onServicesDiscovered`): when notification setup completes the
+SDK calls `Q()` (time sync, key 1) and 50 ms later `setUserInfo`; the bind is requested separately
+from `ConnectorListener.onConnect`. A bind therefore does not depend on time sync or profile data.
+OpenFit defers both follow-ups until the bind succeeds, so they never run on an unbound watch.
+
+### Post-bind commands
+
+`c.Q()` → `a.B()` sends the clock, key 1, payload length 4:
+
+```
+AB 00 00 09 00 00 00 00 01 00 01 00 04 p0 p1 p2 p3
+```
+
+with `yyyyMMddHHmmss` split as `yy MM dd HH mm ss`:
+
+```
+p0 = yy << 2 | MM >> 2
+p1 = dd << 1 | (MM & 3) << 6 | HH >> 4
+p2 = (HH & 15) << 4 | mm >> 2
+p3 = (mm & 3) << 6 | ss
+```
+
+`c.setUserInfo()` → `a.a(UserInfo)` sends the profile, key 4, payload length 4:
+
+```
+AB 00 00 09 00 00 00 00 01 00 04 00 04 q0 q1 q2 00
+```
+
+```
+q0 = (!getSex() ? 1 : 0) << 7 | age     (bit 7 set for female, low bits age)
+q1 = height in cm
+q2 = weight in kg
+```
+
+`h.setUserInfo` clamps height and weight to 1..255 before building the frame. Replies are either
+key `0x0F` ("send status", payload byte 13 = 1 for success) or key `0xAC` ("device answer", byte 13
+echoes the original key, byte 14 is the status). OpenFit recognises both and logs them as
+`ZhBracelet ack · status · ok` / `device answer for key N · ok`.
 
 ### Validated on hardware (2026-11-18 11:49, build `b701e4a`)
 
@@ -535,6 +570,20 @@ data.
 The watch left pairing mode and showed its home screen. The reply's bytes 4..7 are not zero
 (`97 00 00 4E`); they are not a standard CRC32 of the payload or of the frame, and the vendor
 parser ignores them for key 52. Treat them as session data. Requests still send zeros there.
+
+Reconnect was validated on build `91777d7` at 12:07–12:09: the saved binding makes OpenFit send the
+vendor's type-1 inquiry, and the watch answered `type=1 result=1` on two consecutive connections:
+
+```
+12:09:02  saved binding found · checking it (type 1)
+12:09:02  TX zh-bind type 1 · AB0000060000000001006C000101
+12:09:02  RX 00000003 · AB0000074400004E03003400020101
+12:09:02  ZhBracelet bind info · type=1 result=1
+12:09:02  PAIRED  ZhBracelet bind accepted (type 1)
+```
+
+Only the session bytes and the echoed type differ from the first bind, so the binding survives an
+app restart and a GATT reconnect.
 
 The RC4/"Ryeex" cipher documented below belongs to a different bundled SDK (`com.ryeex…`) that
 shares the same base UUIDs but is not the stack used for Ultra Buzz. The zhbraceletsdk frames are
@@ -610,5 +659,7 @@ not yet decompiled.
 9. ~~Which Berry bearer this watch actually uses~~ — answered: neither. `aa01` is present but
    silent, and the watch is LE-only (`device type 2`, `SDP records none`), so classic SPP cannot
    work. The Berry code remains as an alternate and is tried after ZhBracelet.
-10. Time sync (ZhBracelet key 1), user info and device-info commands after a successful bind; and
-    whether a reconnect makes the type-1 inquiry answer `result=1` (binding persisted).
+10. ~~Whether a reconnect makes the type-1 inquiry answer `result=1`~~ — **answered 2026-11-18:**
+    yes, twice in a row (`AB0000074400004E03003400020101`). The binding persists. Time sync
+    (key 1) and user info (key 4) are now implemented and sent 50 ms apart after the bind; their
+    on-device acknowledgement and the device-info command (key 8) are the next protocol steps.

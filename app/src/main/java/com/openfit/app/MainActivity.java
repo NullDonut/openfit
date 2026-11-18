@@ -53,6 +53,7 @@ import com.openfit.app.protocol.ZhFrameReader;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -101,6 +102,20 @@ public final class MainActivity extends Activity {
      * first request gets a longer window than the SE steps.
      */
     private static final long ZH_STEP_TIMEOUT_MS = 15_000L;
+    /**
+     * The vendor sends the time sync and then its user-info frame 50 ms later
+     * ({@code h.i.onDescriptorWrite}: {@code Q()} → {@code postDelayed(new b(), 50L)}).
+     */
+    private static final long ZH_POST_BIND_GAP_MS = 50L;
+    /**
+     * The watch computes calories and distance from the profile the phone announces. OpenFit has
+     * no profile screen yet, so it sends a neutral default instead of zeros (the vendor clamps
+     * 0 cm / 0 kg to 1). The log names the values so the next run is unambiguous.
+     */
+    private static final int DEFAULT_USER_AGE = 30;
+    private static final int DEFAULT_USER_HEIGHT_CM = 170;
+    private static final int DEFAULT_USER_WEIGHT_KG = 70;
+    private static final boolean DEFAULT_USER_MALE = true;
     /** A write-no-response chunk can complete without an onCharacteristicWrite callback on some
      *  stacks; the watchdog keeps the queue moving instead of stalling the bind. */
     private static final long BERRY_WRITE_TIMEOUT_MS = 1_500L;
@@ -203,6 +218,7 @@ public final class MainActivity extends Activity {
     private boolean zhRebindTried;
     private int zhLastType = -1;
     private Runnable zhStepTimeout;
+    private Runnable zhPostBindTask;
 
     // Berry pairing. NoiseFit has two Berry transports for the account exchange and both carry
     // exactly the same private 2/3/4 frames: a BLE channel on the aa01 service (its "Berry-Test"
@@ -1648,6 +1664,54 @@ public final class MainActivity extends Activity {
         scheduleZhTimeout();
     }
 
+    /** Post-bind step 1: the clock sync the vendor sends as soon as the link is ready. */
+    private void sendZhTimeSync() {
+        zhPostBindTask = null;
+        if (zhWriteChar == null || gatt == null) return;
+        Calendar now = Calendar.getInstance();
+        int year = now.get(Calendar.YEAR);
+        int month = now.get(Calendar.MONTH) + 1;
+        int day = now.get(Calendar.DAY_OF_MONTH);
+        int hour = now.get(Calendar.HOUR_OF_DAY);
+        int minute = now.get(Calendar.MINUTE);
+        int second = now.get(Calendar.SECOND);
+        byte[] frame = ZhBraceletBinding.timeSyncFrame(year, month, day, hour, minute, second);
+        logPairing(String.format(Locale.US,
+                "TX zh-time-sync · %s · %04d-%02d-%02d %02d:%02d:%02d",
+                hex(frame), year, month, day, hour, minute, second));
+        if (!writeZh(frame)) {
+            logPairing("zh-time-sync write rejected by the Bluetooth stack");
+        }
+        scheduleZhPostBind(this::sendZhUserInfo, ZH_POST_BIND_GAP_MS);
+    }
+
+    /** Post-bind step 2: the profile the watch uses for calories and distance. */
+    private void sendZhUserInfo() {
+        zhPostBindTask = null;
+        if (zhWriteChar == null || gatt == null) return;
+        byte[] frame = ZhBraceletBinding.userInfoFrame(DEFAULT_USER_AGE,
+                DEFAULT_USER_HEIGHT_CM, DEFAULT_USER_WEIGHT_KG, DEFAULT_USER_MALE);
+        logPairing("TX zh-user-info · " + hex(frame) + " · default profile age "
+                + DEFAULT_USER_AGE + ", " + DEFAULT_USER_HEIGHT_CM + " cm, "
+                + DEFAULT_USER_WEIGHT_KG + " kg, " + (DEFAULT_USER_MALE ? "male" : "female"));
+        if (!writeZh(frame)) {
+            logPairing("zh-user-info write rejected by the Bluetooth stack");
+        }
+    }
+
+    private void scheduleZhPostBind(Runnable task, long delayMs) {
+        cancelZhPostBind();
+        zhPostBindTask = task;
+        handler.postDelayed(task, delayMs);
+    }
+
+    private void cancelZhPostBind() {
+        if (zhPostBindTask != null) {
+            handler.removeCallbacks(zhPostBindTask);
+            zhPostBindTask = null;
+        }
+    }
+
     @SuppressWarnings("MissingPermission")
     private boolean writeZh(byte[] value) {
         BluetoothGatt source = gatt;
@@ -1716,8 +1780,13 @@ public final class MainActivity extends Activity {
         for (byte[] frame : zhReader.append(value)) {
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
             if (info == null) {
-                int key = frame.length > 10 ? frame[10] & 0xFF : -1;
-                logPairing("ZhBracelet frame · key " + key + " ignored");
+                ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);
+                if (ack != null) {
+                    logPairing("ZhBracelet ack · " + ack.describe());
+                } else {
+                    int key = frame.length > 10 ? frame[10] & 0xFF : -1;
+                    logPairing("ZhBracelet frame · key " + key + " ignored");
+                }
                 continue;
             }
             logPairing("ZhBracelet bind info · type=" + info.type + " result=" + info.result);
@@ -1728,6 +1797,7 @@ public final class MainActivity extends Activity {
                 cancelZhTimeout();
                 zhFinished = true;
                 reportPairing(true, "ZhBracelet bind accepted (type " + info.type + ")");
+                scheduleZhPostBind(this::sendZhTimeSync, ZH_POST_BIND_GAP_MS);
                 return;
             }
             if (info.type == ZhBraceletBinding.TYPE_BIND && !zhRebindTried) {
@@ -2319,6 +2389,7 @@ public final class MainActivity extends Activity {
         seStep = "idle";
         seState = "not started";
         cancelZhTimeout();
+        cancelZhPostBind();
         zhReader.reset();
         zhWriteChar = null;
         zhNotifyChar = null;

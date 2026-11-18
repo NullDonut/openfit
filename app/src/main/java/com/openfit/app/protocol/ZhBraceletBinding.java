@@ -30,6 +30,12 @@ public final class ZhBraceletBinding {
     public static final int DIRECTION_PHONE = 1;
     public static final int DIRECTION_WATCH = 3;
 
+    public static final int KEY_TIME_SYNC = 0x01;
+    public static final int KEY_USER_INFO = 0x04;
+    public static final int KEY_STATUS = 0x0F;
+    public static final int KEY_DEVICE_ANSWER = 0xAC;
+    public static final int KEY_UNBIND = 0x33;
+
     public static final int KEY_BIND = 0x6C;
     public static final int KEY_BIND_INFO = 0x34;
 
@@ -43,6 +49,71 @@ public final class ZhBraceletBinding {
     /** Builds the bind/inquiry request the vendor SDK sends from {@code bindDevice(type)}. */
     public static byte[] bindRequest(int type) {
         return frame(KEY_BIND, new byte[] {(byte) type});
+    }
+
+    /**
+     * Builds the time-sync frame the vendor sends first after the notifications are enabled
+     * ({@code com.zjw.zhbraceletsdk.service.c.Q()} → {@code a.B()}). The payload packs the local
+     * clock into four bytes:
+     *
+     * <pre>
+     * p0 = yy &lt;&lt; 2 | MM &gt;&gt; 2
+     * p1 = dd &lt;&lt; 1 | (MM &amp; 3) &lt;&lt; 6 | HH &gt;&gt; 4
+     * p2 = (HH &amp; 15) &lt;&lt; 4 | mm &gt;&gt; 2
+     * p3 = (mm &amp; 3) &lt;&lt; 6 | ss
+     * </pre>
+     */
+    public static byte[] timeSyncFrame(int year, int month, int day,
+                                       int hour, int minute, int second) {
+        if (month < 1 || month > 12 || day < 1 || day > 31
+                || hour < 0 || hour > 23 || minute < 0 || minute > 59
+                || second < 0 || second > 59) {
+            throw new IllegalArgumentException("invalid clock fields");
+        }
+        int yy = year % 100;
+        byte[] payload = {
+            (byte) ((yy << 2) | (month >> 2)),
+            (byte) ((day << 1) | ((month & 3) << 6) | (hour >> 4)),
+            (byte) (((hour & 15) << 4) | (minute >> 2)),
+            (byte) (((minute & 3) << 6) | second)
+        };
+        return frame(KEY_TIME_SYNC, payload);
+    }
+
+    /**
+     * Builds the user-info frame the vendor sends 50 ms after the time sync
+     * ({@code c.setUserInfo} → {@code a.a(UserInfo)}). Bit 7 of the first payload byte is set for
+     * a female profile ({@code !getSex()}), the low seven bits carry the age; height and weight
+     * are one byte each in centimetres/kilograms, clamped to 1..255 like {@code h.setUserInfo}.
+     */
+    public static byte[] userInfoFrame(int age, int heightCm, int weightKg, boolean male) {
+        byte[] payload = {
+            (byte) (((male ? 0 : 1) << 7) | (age & 0x7F)),
+            (byte) clampByte(heightCm),
+            (byte) clampByte(weightKg),
+            0
+        };
+        return frame(KEY_USER_INFO, payload);
+    }
+
+    private static int clampByte(int value) {
+        if (value < 1) return 1;
+        return Math.min(value, 255);
+    }
+
+    /** Parses one acknowledgement reply, or returns {@code null} for any other frame. */
+    public static Ack parseAck(byte[] frame) {
+        if (frame == null || frame.length < 14) return null;
+        if ((frame[0] & 0xFF) != MAGIC) return null;
+        if ((frame[8] & 0xFF) != DIRECTION_WATCH) return null;
+        int key = frame[10] & 0xFF;
+        if (key == KEY_STATUS) {
+            return new Ack(key, -1, (frame[13] & 0xFF) == 1);
+        }
+        if (key == KEY_DEVICE_ANSWER && frame.length >= 15) {
+            return new Ack(key, frame[13] & 0xFF, (frame[14] & 0xFF) == 1);
+        }
+        return null;
     }
 
     /** Builds one phone-to-watch frame with the vendor's header layout. */
@@ -98,6 +169,30 @@ public final class ZhBraceletBinding {
 
         @Override public String toString() {
             return "BindInfo{type=" + type + ", result=" + result + '}';
+        }
+    }
+
+    /**
+     * A generic acknowledgement: {@code KEY_STATUS} (0x0F) answers any set command, while
+     * {@code KEY_DEVICE_ANSWER} (0xAC) echoes the original command key and its own status byte.
+     */
+    public static final class Ack {
+        /** The reply key: {@link #KEY_STATUS} or {@link #KEY_DEVICE_ANSWER}. */
+        public final int key;
+        /** Original command key for {@code KEY_DEVICE_ANSWER}, else {@code -1}. */
+        public final int refersTo;
+        public final boolean success;
+
+        public Ack(int key, int refersTo, boolean success) {
+            this.key = key;
+            this.refersTo = refersTo;
+            this.success = success;
+        }
+
+        public String describe() {
+            String name = key == KEY_STATUS ? "status" : "device answer";
+            String target = refersTo < 0 ? "" : " for key " + refersTo;
+            return name + target + " · " + (success ? "ok" : "refused");
         }
     }
 }

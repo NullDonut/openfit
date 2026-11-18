@@ -359,11 +359,13 @@ The watch left pairing mode and reached its home screen/clock. The reply carries
 header bytes 4..7 (not a standard CRC32 of the payload or frame; the vendor parser ignores it for
 key 52). This is the first confirmed vendor-level pairing. OpenFit now persists the result per
 watch address and uses the vendor's reconnect form: type 1 (inquiry) after a saved bind, type 0
-for a first pairing, with a one-time rebind if the inquiry says unbound. SE still answers
-`NOT_SUPPORT` on the same link, so the SE prober can eventually be demoted or skipped for this
-model to save ~20 s. Still pending: confirming that the binding survives a reconnect (type 1 should
-then answer `result=1`) and implementing the post-bind Zh commands (time sync, user info, device
-info).
+for a first pairing, with a one-time rebind if the inquiry says unbound. Reconnect was confirmed on
+2026-11-18 12:07–12:09 (build `91777d7`): both type-1 inquiries answered `result=1`, so the binding
+survives an app restart. The vendor's post-bind sequence is now implemented too — the clock sync
+(key 1) and, 50 ms later, the user-info profile (key 4), with the exact `a.B()` / `a.a(UserInfo)`
+packing. SE still answers `NOT_SUPPORT` on the same link, so the SE prober can eventually be
+demoted or skipped for this model to save ~20 s. Still pending: the on-device acknowledgement of
+those two frames and the device-info command (key 8).
 
 ## Project notes
 

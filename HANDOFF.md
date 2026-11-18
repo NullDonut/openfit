@@ -610,9 +610,9 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 5. ~~Whether private `cmdId=3` (bind) needs a prior `UserIdBean`~~ **Answered:** yes — protocol
    (cmd 1), user id (cmd 2), bind (cmd 3, only if unbound), confirm (cmd 4).
 6. **Post-bind wiring:** `MainActivity` performs connect → discovery → profile detection →
-   notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind. The pairing path is done.
-   Next: send the ZhBracelet time sync and user info after a successful bind, and implement device
-   info/health commands.
+   notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind → time sync (key 1) →
+   user info (key 4, 50 ms later). The pairing and the vendor's two follow-up frames are
+   implemented. Next: device info (key 8) and parsing the health/data channels.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
@@ -629,17 +629,18 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 
    The watch left pairing mode and showed its home screen. The app now persists that result and
    follows the vendor's reconnect form: type 1 (inquiry) when a saved binding exists, type 0 for a
-   first pairing, with one rebind if the inquiry reports unbound. Verify that a reconnect gets
-   `type=1 result=1`. SE still answers `NOT_SUPPORT`, so its ~20 s probe can be demoted for this
-   model later.
+   first pairing, with one rebind if the inquiry reports unbound. Reconnect was validated on
+   2026-11-18 12:07–12:09 (build `91777d7`): both inquiries returned `type=1 result=1`. After the
+   bind the app now sends the vendor's clock sync (key 1) and, 50 ms later, the user-info profile
+   (key 4). SE still answers `NOT_SUPPORT`, so its ~20 s probe can be demoted for this model later.
 
 ### Suggested order from here
 
 ```
 pair on the watch (done, build b701e4a)
-    -> reconnect and check type 1 answers result=1 (binding persisted)
-    -> decompile the ZhBracelet time-sync (key 1) and user-info commands
-    -> wire post-bind sync: time, user info, device info
+    -> reconnect and check type 1 answers result=1 (done, build 91777d7)
+    -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
+    -> verify their acks on the watch, then add device info (key 8)
     -> parse device data on 16186f00 for health screens
 ```
 
