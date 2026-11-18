@@ -794,6 +794,12 @@ public final class MainActivity extends Activity {
     @SuppressWarnings("MissingPermission")
     private void connect(BluetoothDevice device) {
         if (device == null) return;
+        if (connectionTimeout != null) {
+            // Repeated taps used to open one GATT client per tap (six were once logged in two
+            // seconds). The running attempt finishes or times out on its own.
+            logBle("Connect request ignored · an attempt is already running");
+            return;
+        }
         stopScan();
         connectAttempt = 0;
         connectionReady = false;
@@ -2389,7 +2395,7 @@ public final class MainActivity extends Activity {
     private void logPairing(String message) {
         String time = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
         pairingLog.add(time + "  " + message);
-        while (pairingLog.size() > 60) pairingLog.remove(0);
+        while (pairingLog.size() > 200) pairingLog.remove(0);
     }
 
     private static String hex(byte[] data) {
@@ -2884,7 +2890,7 @@ public final class MainActivity extends Activity {
     private void logBle(String message) {
         String time = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
         connectionLog.add(time + "  " + message);
-        while (connectionLog.size() > 60) connectionLog.remove(0);
+        while (connectionLog.size() > 200) connectionLog.remove(0);
     }
 
     private static String shortUuid(UUID uuid) {
