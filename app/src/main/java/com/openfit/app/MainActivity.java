@@ -1364,13 +1364,20 @@ public final class MainActivity extends Activity {
         seStepTimeout = () -> {
             seStepTimeout = null;
             if (sePairFinished) return;
-            if (seStepAttempts < 2) {
+            boolean configProbePending = "binding-status".equals(seStep) && seStepAttempts < 3;
+            if (seStepAttempts < 2 || configProbePending) {
                 seStepAttempts++;
-                if ("binding-status".equals(seStep)) {
+                if ("binding-status".equals(seStep) && seStepAttempts == 2) {
                     // Some firmware needs the account submessage to be present before it
                     // answers; the vendor client sends the bare id.
                     logPairing("no reply for binding-status · probing the explicit form");
                     sendSe(SePairing.bindingStatusRequestExplicit(), "binding-status (explicit)");
+                } else if ("binding-status".equals(seStep)) {
+                    // The empty id-0 config was rejected; try the populated form the vendor app
+                    // sends once it knows the MTU, then repeat the bind probe.
+                    logPairing("no reply for binding-status · sending the MTU config, then the probe");
+                    sendSe(SePairing.connectParameterConfig(seMtu), "connect-params");
+                    sendSe(SePairing.bindingStatusRequest(), "binding-status");
                 } else if ("bind-check".equals(seStep)) {
                     logPairing("no reply for bind-check · retrying");
                     sendSe(SePairing.bindCheckRequest(), "bind-check");

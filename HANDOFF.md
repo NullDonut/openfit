@@ -3,7 +3,7 @@
 Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
 Latest code commit at time of writing: this commit (SE/Apricot transport, BLE `SEWear` envelope,
-account probes without the rejected id-0 greeting, 59 unit tests). Build `975af4a` produced the
+account probes without the rejected id-0 greeting, 60 unit tests). Build `975af4a` produced the
 watch's first real SE reply: `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`, an answer to
 the id-0 MTU config rather than to the bind. This build drops that greeting and sends the id-16
 probe first, then escalates to the explicit probe and to id 17.
@@ -19,7 +19,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 59 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 60 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
 
 ---
 
@@ -479,7 +479,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (59 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (60 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -526,8 +526,8 @@ Connection layer added on 2026-11-17 (successful on hardware; the watch stayed u
   bytes per chunk, answers inbound announces, reassembles replies, and runs id 16 (binding
   status) → id 17 (`bind_check{device_verify:true}`) → id 18 (`bind_result{user_id}`), or id 19
   (verify the saved token) when the watch is already bound. There is no id-0 greeting, and if
-  id 16 stays unanswered the app probes the explicit `request_binding_status:true` form and then
-  sends id 17 directly. The token is stored as
+  id 16 stays unanswered the app probes the explicit `request_binding_status:true` form, then
+  the populated id-0 MTU config, then sends id 17 directly. The token is stored as
   `watch_token_<ADDRESS>`; a connection retry restarts pairing but keeps that token. Diagnostics
   gained a `PAIRING LOG` with TX/RX hex, chunk counts and the bind step/state.
 
@@ -560,7 +560,8 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    includes the last crash stack trace even though the scanner runs in its own activity.
 8. **Validate the SE bind on hardware.** `975af4a` produced the watch's first SE reply, but it was
    the id-0 MTU config's `NOT_SUPPORT`, not a bind reply. This build removes the greeting and
-   sends `08 10` first, then `08 10 1A 02 08 01`, then `08 11 1A 04 12 02 08 01`. Watch the
+   sends `08 10` first, then `08 10 1A 02 08 01`, then `9A 06 03 08 F7 01` plus `08 10`, then
+   `08 11 1A 04 12 02 08 01`. Watch the
    `PAIRING LOG` for which probe is answered. If all three are silent the link needs something
    beyond the SE account commands (system bond, or the CRP/SPP path used by other Noise models);
    do not add further write types until one probe is confirmed.

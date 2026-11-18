@@ -17,6 +17,13 @@ public class SePairingTest {
                 SePairing.connectParameterConfig());
     }
 
+    @Test public void populatedConnectConfigCarriesTheMtu() {
+        assertArrayEquals(new byte[] {
+                (byte) 0x9A, 0x06, 0x03, // ble_connect_parmeter_config (99), 3 bytes
+                0x08, (byte) 0xF7, 0x01  // config_change_mtu = 247
+        }, SePairing.connectParameterConfig(247));
+    }
+
     @Test public void bindingStatusRequestUsesSewearIdOne() {
         // SEWear.id is field 1 in the SE schema; the old Berry encoding (10 10) was change_mtu=16.
         assertArrayEquals(new byte[] {0x08, 0x10}, SePairing.bindingStatusRequest());

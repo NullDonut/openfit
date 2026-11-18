@@ -67,6 +67,19 @@ public final class SePairing {
         return SeWear.connectParameterConfig();
     }
 
+    /**
+     * {@code SEWear{id=0, ble_connect_parmeter_config{config_change_mtu:mtu}}} — the populated
+     * form the vendor app sends when it has negotiated an MTU. For 247 this is
+     * {@code 9A 06 03 08 F7 01}. Sent only as a probe: the watch answers the empty form with
+     * {@code NOT_SUPPORT}.
+     */
+    public static byte[] connectParameterConfig(int mtu) {
+        ByteArrayOutputStream config = new ByteArrayOutputStream();
+        if (mtu > 0) SeWear.writeVarintField(config, 1, mtu);
+        return SeWear.wearMessage(0, SeWear.FIELD_BLE_CONNECT_PARAMETER_CONFIG,
+                config.toByteArray());
+    }
+
     /** {@code SEWear{id=16}} = {@code 08 10}: is the watch already bound to an account? */
     public static byte[] bindingStatusRequest() {
         return SeWear.wear(FUNCTION_INQUIRY_BINDING_STATUS);

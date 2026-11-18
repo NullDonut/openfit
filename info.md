@@ -12,7 +12,7 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 - Feature branch: `feature/ble-connection-handling`.
 - Existing PR: [#2, Improve BLE watch connection handling](https://github.com/NullDonut/openfit/pull/2), targeting `feat/openfit-android-starter`.
 - CI builds the debug APK; the latest green build before this SE change was
-  `openfit-debug-b982023`. CI on each push is green with 59 JVM unit tests.
+  `openfit-debug-b982023`. CI on each push is green with 60 JVM unit tests.
 - The protocol layer is compiled and tested locally with `javac` + JUnit 4.13.2 against JDK 21,
   and the whole app compiles against the API 35 `android.jar`. Local Gradle/Android SDK are
   still unavailable, so packaging and installation go through GitHub Actions; no physical
@@ -178,8 +178,8 @@ the transport ack (`01 00`) and no `SEWear` reply.
 
 The next build removes the id-0 greeting, waits 400 ms after notification setup, sends the id-16
 probe first (as the vendor SDK does), then if it is unanswered sends
-`08 10 1A 02 08 01` (`request_binding_status:true`) and finally id 17
-`bindCheck{deviceVerify:true}`. That distinguishes "the watch ignores the bare probe" from
+`08 10 1A 02 08 01` (`request_binding_status:true`), then the populated id-0 MTU config
+(`9A 06 03 08 F7 01`, MTU 247) plus id 16, and finally id 17 `bindCheck{deviceVerify:true}`. That distinguishes "the watch ignores the bare probe" from
 "the watch refuses to answer account commands at all".
 
 `fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry

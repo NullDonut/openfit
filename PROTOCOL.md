@@ -230,7 +230,8 @@ does the same.
   GATT MTU exchange itself succeeds (247).
 - Id 16 still produced no reply after the greeting error. The current build therefore stops
   sending the greeting, sends the id-16 probe first (as `ZhConnectHandler` does), and escalates:
-  bare id 16 → id 16 with `request_binding_status:true` → id 17 `bindCheck{deviceVerify:true}`.
+  bare id 16 → id 16 with `request_binding_status:true` → the populated id-0 config
+  (`9A 06 03 08 F7 01`, MTU 247) followed by id 16 again → id 17 `bindCheck{deviceVerify:true}`.
 
 The remaining question is whether any of those account probes is answered, and with what.
 
