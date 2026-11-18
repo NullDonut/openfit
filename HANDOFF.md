@@ -2,10 +2,11 @@
 
 Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (SE/Apricot transport with the correct
-`com.zh.ble.wear.protobuf.SEWear` envelope + id 16/17/18/19 account bind + 57 unit tests).
-Build `cd68343` is the one that proved the transport end to end on the watch: announce → `01 01`
-ready, chunks → `01 00` received. It also exposed the envelope-schema mix-up that is fixed here.
+Latest code commit at time of writing: this commit (SE/Apricot transport, BLE `SEWear` envelope,
+account probes without the rejected id-0 greeting, 59 unit tests). Build `975af4a` produced the
+watch's first real SE reply: `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`, an answer to
+the id-0 MTU config rather than to the bind. This build drops that greeting and sends the id-16
+probe first, then escalates to the explicit probe and to id 17.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -18,7 +19,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 57 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 59 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
 
 ---
 
@@ -361,7 +362,11 @@ Outbound: announce `00 00 00 00 <count LE16>` on `6f02` → wait for ready → `
 `00 00 01 01 00 00` on `6f01` → indexed chunks → phone answers `00 00 01 00 00 00` and parses the
 concatenation as one `SEWear`. Chunk data is `MTU - 5` bytes; count is `ceil(length / (MTU - 5))`.
 
-The first command after notifications is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+The vendor SDK's first command on connect is `SEWear{id=16}` (`ZhConnectHandler.onConnectState`
+→ `requestDeviceBindState` → `a.L0(16)`). The id-0 `SEWear{ble_connect_parmeter_config{}}`
+(`9A 06 00`) is app-level MTU setup, sent fire-and-forget. On this watch it is answered with
+`08 00 10 00 A0 06 01` = `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`, so OpenFit no
+longer sends it.
 
 **Two different `SEWear` schemas exist.** The BLE service uses
 `com.zh.ble.wear.protobuf.SEWear`: `id=1`, `change_mtu=2`, `bind_account=3`, payloads 4..17,
@@ -474,7 +479,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (57 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (59 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -518,9 +523,11 @@ Connection layer added on 2026-11-17 (successful on hardware; the watch stayed u
 - **SE pairing on connect (new, awaits hardware test):** the first build's Berry-frame writes were
   answered with `00 00 01 02 00 00` (SE busy), proving `16186f00` uses the SE transport. The app
   now requests MTU 247 (falling back to 23), announces and chunks commands with `MTU - 5` data
-  bytes per chunk, answers inbound announces, reassembles replies, and runs id 0 (link greeting) →
-  id 16 (binding status) → id 17 (`bind_check{device_verify:true}`) → id 18 (`bind_result{user_id}`),
-  or id 19 (verify the saved token) when the watch is already bound. The token is stored as
+  bytes per chunk, answers inbound announces, reassembles replies, and runs id 16 (binding
+  status) → id 17 (`bind_check{device_verify:true}`) → id 18 (`bind_result{user_id}`), or id 19
+  (verify the saved token) when the watch is already bound. There is no id-0 greeting, and if
+  id 16 stays unanswered the app probes the explicit `request_binding_status:true` form and then
+  sends id 17 directly. The token is stored as
   `watch_token_<ADDRESS>`; a connection retry restarts pairing but keeps that token. Diagnostics
   gained a `PAIRING LOG` with TX/RX hex, chunk counts and the bind step/state.
 
@@ -551,12 +558,12 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the SE bind on hardware.** Build `cd68343` proved the transport but encoded id 16
-   with the Berry `sa_wear` field numbers (`10 10` = `change_mtu=16`). This APK sends the correct
-   `08 10` (and `08 11 ...` / `08 12 ...`). Watch the `PAIRING LOG` for `TX binding-status · 0810`,
-   then `inbound transfer`, `control ready`, `bind check`, `bind result`. If the reply never
-   arrives, try `bindCheckKeyRequest`; if no announce appears at all, the account path needs the
-   vendor's classic bond + SPP. Do not add further write types until each step is confirmed.
+8. **Validate the SE bind on hardware.** `975af4a` produced the watch's first SE reply, but it was
+   the id-0 MTU config's `NOT_SUPPORT`, not a bind reply. This build removes the greeting and
+   sends `08 10` first, then `08 10 1A 02 08 01`, then `08 11 1A 04 12 02 08 01`. Watch the
+   `PAIRING LOG` for which probe is answered. If all three are silent the link needs something
+   beyond the SE account commands (system bond, or the CRP/SPP path used by other Noise models);
+   do not add further write types until one probe is confirmed.
 
 ### Suggested order from here
 

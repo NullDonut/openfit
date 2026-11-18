@@ -23,6 +23,18 @@ public class SePairingTest {
         assertEquals(16, SeWear.readId(SePairing.bindingStatusRequest()));
     }
 
+    @Test public void explicitBindingStatusProbeCarriesTheFlag() {
+        // A bool field is a varint, not a nested message: 08 01 inside bind_account.
+        assertArrayEquals(new byte[] {
+                0x08, 0x10,             // SEWear.id = 16
+                0x1A, 0x02,             // bind_account (3), 2 bytes
+                0x08, 0x01              // request_binding_status = true
+        }, SePairing.bindingStatusRequestExplicit());
+        assertEquals(Boolean.TRUE, SePairing.bindingStatus(
+                SeWear.wearMessage(16, SeWear.FIELD_BIND_ACCOUNT,
+                        new byte[] {0x08, 0x01})));
+    }
+
     @Test public void bindCheckRequestAsksTheWatchToVerifyThisPhone() {
         assertArrayEquals(new byte[] {
                 0x08, 0x11,             // SEWear.id = 17

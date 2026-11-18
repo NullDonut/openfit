@@ -86,6 +86,7 @@ public final class MainActivity extends Activity {
     private static final long PAIRING_MTU_TIMEOUT_MS = 3_000L;
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
     private static final long SE_STEP_TIMEOUT_MS = 8_000L;
+    private static final long SE_FIRST_COMMAND_DELAY_MS = 400L;
     private static final long SE_CHUNK_GAP_MS = 15L;
     private static final long SE_BUSY_DELAY_MS = 300L;
     private static final String PREFS = "openfit_local";
@@ -1100,9 +1101,12 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Opens the account exchange exactly as the vendor client does: the id-0 connect-parameter
-     * greeting first, then the id-16 "are you already bound?" probe. Each command travels through
-     * the announce/ready/chunk transport in {@link SeGatt}.
+     * Opens the account exchange the way the vendor SDK does on connect: the id-16 "are you
+     * already bound?" probe first. The id-0 {@code ble_connect_parmeter_config} greeting is
+     * deliberately not sent: the watch answers it with {@code error_code=NOT_SUPPORT}
+     * ({@code 08 00 10 00 A0 06 01}), so this firmware does not implement MTU change over
+     * protobuf. Each command still travels through the announce/ready/chunk transport in
+     * {@link SeGatt}.
      */
     private void startSePairing() {
         if (sePairStarted || sePairFinished) return;
@@ -1113,14 +1117,17 @@ public final class MainActivity extends Activity {
         cancelSeMtuTimeout();
         sePairStarted = true;
         seStepAttempts = 1;
-        seStep = "connect-params";
-        seState = "configuring command channel";
-        connectionStatus.setText("Pairing · opening " + connectedDeviceName + " command channel…");
-        scanStatus.setText("●  PAIRING / MTU");
-        sendSe(SePairing.connectParameterConfig(), "connect-params");
         seStep = "binding-status";
-        sendSe(SePairing.bindingStatusRequest(), "binding-status");
-        scheduleSeStepTimeout();
+        seState = "asking the watch for its bind state";
+        connectionStatus.setText("Pairing · opening " + connectedDeviceName + " command channel…");
+        scanStatus.setText("●  PAIRING / BIND STATE");
+        // The vendor stack's first command is the binding-status probe, and it tolerates the
+        // short settling time between notification setup and the first announce.
+        handler.postDelayed(() -> {
+            if (sePairFinished || !sePairStarted) return;
+            sendSe(SePairing.bindingStatusRequest(), "binding-status");
+            scheduleSeStepTimeout();
+        }, SE_FIRST_COMMAND_DELAY_MS);
     }
 
     private void sendSe(byte[] payload, String label) {
@@ -1238,7 +1245,10 @@ public final class MainActivity extends Activity {
         int id = SeWear.readId(message);
         logPairing("SEWear · " + SePairing.describe(message) + " · " + hex(message));
         int error = SeWear.readErrorCode(message);
-        if (error != 0) logBle("Watch reported error " + error + " for command " + id);
+        if (error != 0) {
+            logPairing("watch error for command " + id + " · " + SeWear.errorLabel(error));
+            logBle("Watch reported " + SeWear.errorLabel(error) + " for command " + id);
+        }
         if (id == SePairing.FUNCTION_MTU) return; // id-0 greeting reply, not part of the bind
         if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS) {
             onSeBindingStatus(message);
@@ -1356,17 +1366,36 @@ public final class MainActivity extends Activity {
             if (sePairFinished) return;
             if (seStepAttempts < 2) {
                 seStepAttempts++;
-                logPairing("no reply for " + seStep + " · retrying");
                 if ("binding-status".equals(seStep)) {
-                    sendSe(SePairing.bindingStatusRequest(), "binding-status");
+                    // Some firmware needs the account submessage to be present before it
+                    // answers; the vendor client sends the bare id.
+                    logPairing("no reply for binding-status · probing the explicit form");
+                    sendSe(SePairing.bindingStatusRequestExplicit(), "binding-status (explicit)");
                 } else if ("bind-check".equals(seStep)) {
+                    logPairing("no reply for bind-check · retrying");
                     sendSe(SePairing.bindCheckRequest(), "bind-check");
                 } else if ("bind-result".equals(seStep)) {
+                    logPairing("no reply for bind-result · retrying");
                     sendSe(SePairing.bindResult(openFitToken(lastConnectAddress)), "bind-result");
                 } else if ("verify-user".equals(seStep)) {
+                    logPairing("no reply for verify-user · retrying");
                     String token = storedToken(lastConnectAddress);
                     if (token != null) sendSe(SePairing.verifyUserNumber(token), "verify-user");
                 }
+                scheduleSeStepTimeout();
+                return;
+            }
+            if ("binding-status".equals(seStep)) {
+                // The watch never reported its bind state. Try the bind-check directly: this
+                // is what the vendor's "bind this phone" action sends, and on many firmwares it
+                // is the command that makes the watch display its confirmation prompt.
+                logPairing("no binding-status reply · trying the bind-check directly");
+                seStep = "bind-check";
+                seStepAttempts = 1;
+                seState = "requesting bind";
+                connectionStatus.setText("Pairing · asking " + connectedDeviceName + " to confirm…");
+                scanStatus.setText("●  PAIRING / BIND REQUEST");
+                sendSe(SePairing.bindCheckRequest(), "bind-check");
                 scheduleSeStepTimeout();
                 return;
             }

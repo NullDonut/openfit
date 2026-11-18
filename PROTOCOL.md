@@ -53,8 +53,10 @@ Conclusions:
   Berry is preferred, as implemented.
 - Android bonding is not required for the Berry GATT link (the watch was not bonded during the
   whole successful connection), which supports OpenFit's connect-first ordering.
-- `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`); `0000fee7` does not
-  appear in the Berry or Ryeex sources and is not used.
+- `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`). `0000fee7` does not
+  appear in the Berry or Ryeex sources; the only bundled match is the CRP stack
+  (`com.crrepa.ble`, `fee7`/`fee9`), which is used by other Noise models. It is not touched by
+  OpenFit and the watch's SE service works without it.
 - No proprietary write was sent during the GATT dump above. A later write attempt proved that
   `16186f00` speaks the SE chunked-protobuf transport, not the Berry SPP frames. OpenFit now
   implements the SE transport and the id 16/17/18 account bind on this service.
@@ -62,7 +64,9 @@ Conclusions:
   answered the announce with `01 01` (ready), accepted the chunk with `01 00` (received), and
   produced `01 02` (busy) when the next command was announced too early. The first request used
   the Berry SPP field numbers (`10 10`), which the watch read as `change_mtu=16`; the corrected
-  BLE envelope (`08 10`) is in the current build. The account reply itself is still unobserved.
+  BLE envelope (`08 10`) is in the current build. Build `975af4a` then produced the first real
+  reply, `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`, i.e. the watch rejects the id-0
+  MTU config; id 16 itself is still unanswered. See the on-device status note below.
 
 
 ## Berry profile (primary candidate)
@@ -130,8 +134,12 @@ Inbound reply (`BluetoothService.i`, handler for `6f01`):
 4. phone → `6f01`: `00 00 01 00 00 00`; the concatenated chunks are one `SEWear` protobuf.
 
 `16186f02` is both the write channel and the channel that carries the control frames; `6f03`–`6f05`
-use the same announce/chunk scheme for their own payloads. The first command after notifications
-is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+use the same announce/chunk scheme for their own payloads.
+
+The vendor SDK's first SE command after connection is the account probe, **not** the id-0 link
+config: `ZhConnectHandler.onConnectState` → `ControlBleTools.requestDeviceBindState` →
+`a.L0(16)`. The id-0 `SEWear{ble_connect_parmeter_config{}}` (`9A 06 00`) greeting belongs to the
+app layer's MTU setup and is fire-and-forget; see the hardware note below.
 
 #### SE `SEWear` envelope (different schema from the Berry SPP one)
 
@@ -176,7 +184,7 @@ From `ControlBleTools` (`bindDevice`, `requestDeviceBindState`, `sendAppBindResu
 
 | Id | Phone message | Watch reply |
 |---|---|---|
-| 0 | `SEWear{ble_connect_parmeter_config{}}` (`9A 06 00`) | link config / MTU ack |
+| 0 | `SEWear{ble_connect_parmeter_config{}}` (`9A 06 00`) | `SEWear{id=0, change_mtu, error_code}`; this watch answers `NOT_SUPPORT` |
 | 16 | `SEWear{id=16}` | `bind_account{request_binding_status}` |
 | 17 | `SEWear{id=17, bind_account{bind_check{device_verify:true}}}` | `bind_check{bind_check_result, mac, serial_number, device_number, firmware_version, device_name}` |
 | 18 | `SEWear{id=18, bind_account{bind_result{user_id:token}}}` | `bind_result{bind_result_type}` and/or `error_code` |
@@ -209,10 +217,22 @@ uses the same shape with a local placeholder user id and stores it per watch add
 The vendor requires `device_verify:true` in the id-17 reply before it sends id 18; OpenFit now
 does the same.
 
-**On-device status (2026-11-17, build `cd68343`):** the watch acknowledged the SE transport
-(announce → `01 01` ready, chunks → `01 00` received) but did not answer id 16 because the request
-was encoded with the `sa_wear` field numbers. That encoding bug is fixed; the next build tests
-whether the watch answers `08 10` with `bind_account{request_binding_status}`.
+**On-device status.** The transport has been confirmed repeatedly on the ColorFit Ultra Buzz
+(announce → `01 01` ready, chunks → `01 00` received, inbound announce → chunk → `0100` ack).
+
+- Build `cd68343` sent id 16 as `10 10` (the `sa_wear` field numbers); the watch read that as
+  `change_mtu=16` and stayed silent.
+- Build `975af4a` sent `08 10` and the watch finally replied to the first command:
+  `08 00 10 00 A0 06 01` = `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`. Note that this
+  is the **id-0 greeting's** reply, not a bind reply: the phone had sent
+  `SEWear{id=0, ble_connect_parmeter_config{}}` immediately before id 16. `change_mtu=0` and
+  `NOT_SUPPORT` mean this firmware does not implement MTU change over protobuf, even though the
+  GATT MTU exchange itself succeeds (247).
+- Id 16 still produced no reply after the greeting error. The current build therefore stops
+  sending the greeting, sends the id-16 probe first (as `ZhConnectHandler` does), and escalates:
+  bare id 16 → id 16 with `request_binding_status:true` → id 17 `bindCheck{deviceVerify:true}`.
+
+The remaining question is whether any of those account probes is answered, and with what.
 
 ### Berry SPP frame format (alternate transport)
 

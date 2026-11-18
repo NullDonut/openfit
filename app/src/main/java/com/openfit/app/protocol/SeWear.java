@@ -89,6 +89,19 @@ public final class SeWear {
         return value < 0 ? 0 : (int) value;
     }
 
+    /** Human-readable {@code CommonProtos.SEErrorCode} label. */
+    public static String errorLabel(int code) {
+        switch (code) {
+            case 0: return "no error";
+            case 1: return "not supported";
+            case 2: return "dependency not ready";
+            case 3: return "set failed";
+            case 4: return "parameter error";
+            case 255: return "unknown error";
+            default: return "error " + code;
+        }
+    }
+
     /**
      * Returns a top-level length-delimited field (a nested message) as a byte slice, or
      * {@code null} when the field is absent or the buffer is malformed.

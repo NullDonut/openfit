@@ -12,7 +12,7 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 - Feature branch: `feature/ble-connection-handling`.
 - Existing PR: [#2, Improve BLE watch connection handling](https://github.com/NullDonut/openfit/pull/2), targeting `feat/openfit-android-starter`.
 - CI builds the debug APK; the latest green build before this SE change was
-  `openfit-debug-b982023`. CI on each push is green with 57 JVM unit tests.
+  `openfit-debug-b982023`. CI on each push is green with 59 JVM unit tests.
 - The protocol layer is compiled and tested locally with `javac` + JUnit 4.13.2 against JDK 21,
   and the whole app compiles against the API 35 `android.jar`. Local Gradle/Android SDK are
   still unavailable, so packaging and installation go through GitHub Actions; no physical
@@ -144,7 +144,9 @@ The first `16186f00` write attempt (build `b982023`) answered a Berry frame with
   chunk data `MTU - 5` bytes (`k = MTU - 3`).
 - Inbound announce on `6f01`, phone replies `00 00 01 01 00 00`, then indexed chunks, then
   `00 00 01 00 00 00`.
-- The first command is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+- The vendor SDK's first command on connect is `SEWear{id=16}` (`ZhConnectHandler.onConnectState`
+  → `ControlBleTools.requestDeviceBindState` → `a.L0(16)`). The id-0
+  `SEWear{ble_connect_parmeter_config{}}` (`9A 06 00`) is app-level MTU setup.
 
 Account bind ids (`SEFunctionId`): 16 binding status, 17 `bind_check{device_verify:true}`,
 18 `bind_result{user_id}`, 19 `verify_user_number`, 23 unbind. The vendor sends id 16 on connect,
@@ -159,11 +161,29 @@ schemas. The BLE one is `com.zh.ble.wear.protobuf.SEWear` (`id=1`, `change_mtu=2
 `bind_account=3`, `ble_connect_parmeter_config=99`, `error_code=100`, no type). The Berry SPP one
 is `com.zh.ble.sa_wear.protobuf.SEWear` (`type=1`, `id=2`, `bind_account=4`). OpenFit had encoded
 id 16 with the SPP numbers (`10 10`), which the watch read as `change_mtu=16`; the correct bytes
-are `08 10`. The two codecs are now separate (`BerrySewear` for SPP, `SeWear` for BLE), with 57
+are `08 10`. The two codecs are now separate (`BerrySewear` for SPP, `SeWear` for BLE), with 59
 protocol unit tests (all passing locally) and a successful full-app compile against API 35.
 
-The `PAIRING LOG` on device now shows the exact TX/RX frames, so the next run will distinguish
-"watch did not answer" from "watch refused the account" directly.
+Device test of build `975af4a` (same phone/watch): the watch finally answered the first command:
+
+```
+RX 16186f01 · 010008001000A00601     (index 1, data 08 00 10 00 A0 06 01)
+SEWear · SEWear{id=0, error=1}
+```
+
+Decoded: `SEWear{id=0, change_mtu=0, error_code=1}` = `MTU_REQUEST_CHANGE`, MTU 0,
+`NOT_SUPPORT`. That is the reply to the id-0 greeting the app sent immediately before id 16, not
+a bind reply. It also proves the envelope encoding is now correct. Id 16 itself still got only
+the transport ack (`01 00`) and no `SEWear` reply.
+
+The next build removes the id-0 greeting, waits 400 ms after notification setup, sends the id-16
+probe first (as the vendor SDK does), then if it is unanswered sends
+`08 10 1A 02 08 01` (`request_binding_status:true`) and finally id 17
+`bindCheck{deviceVerify:true}`. That distinguishes "the watch ignores the bare probe" from
+"the watch refuses to answer account commands at all".
+
+`fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry
+SDK does not use it, and the SE channel works without it.
 
 ## Project notes
 

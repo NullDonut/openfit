@@ -73,6 +73,18 @@ public final class SePairing {
     }
 
     /**
+     * {@code SEWear{id=16, bind_account{request_binding_status:true}}} = {@code 08 10 1A 02 08
+     * 01}. The vendor client sends the bare message; this variant is a probe for firmware that
+     * requires the account submessage to be present before it answers.
+     */
+    public static byte[] bindingStatusRequestExplicit() {
+        ByteArrayOutputStream account = new ByteArrayOutputStream();
+        SeWear.writeVarintField(account, ACCOUNT_REQUEST_BINDING_STATUS, 1);
+        return SeWear.wearMessage(FUNCTION_INQUIRY_BINDING_STATUS,
+                SeWear.FIELD_BIND_ACCOUNT, account.toByteArray());
+    }
+
+    /**
      * {@code SEWear{id=17, bindAccount{bindCheck{deviceVerify:true}}}} = {@code 08 11 1A 04 12 02
      * 08 01}: the exact command the vendor app sends on a first connection.
      */

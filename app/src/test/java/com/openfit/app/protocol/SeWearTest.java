@@ -33,6 +33,14 @@ public class SeWearTest {
         assertEquals(0, SeWear.readErrorCode(new byte[] {0x08, 0x10}));
     }
 
+    @Test public void errorCodesHaveLabels() {
+        assertEquals("no error", SeWear.errorLabel(0));
+        assertEquals("not supported", SeWear.errorLabel(1));
+        assertEquals("dependency not ready", SeWear.errorLabel(2));
+        assertEquals("unknown error", SeWear.errorLabel(255));
+        assertEquals("error 9", SeWear.errorLabel(9));
+    }
+
     @Test public void emptyFieldIsNotEmittedUnlessRequested() {
         assertArrayEquals(new byte[] {0x08, 0x10},
                 SeWear.wear(16, SeWear.FIELD_BIND_ACCOUNT, new byte[0]));
