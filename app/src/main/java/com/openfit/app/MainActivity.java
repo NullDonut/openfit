@@ -87,7 +87,9 @@ public final class MainActivity extends Activity {
     private static final long DISCOVERY_TIMEOUT_MS = 10_000L;
     private static final long RETRY_DELAY_MS = 1_000L;
     private static final long PAIRING_TIMEOUT_MS = 45_000L;
-    private static final long NOTIFICATION_TIMEOUT_MS = 15_000L;
+    // The first CCCD write on this watch has taken 11 s, and the queue now has seven descriptors
+    // (five SE + aa03 + 00000003); a 15 s budget could expire before the Zh channel is ready.
+    private static final long NOTIFICATION_TIMEOUT_MS = 30_000L;
     private static final int PAIRING_MTU_REQUEST = 247;
     private static final long PAIRING_MTU_TIMEOUT_MS = 3_000L;
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
