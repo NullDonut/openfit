@@ -12,7 +12,7 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 - Feature branch: `feature/ble-connection-handling`.
 - Existing PR: [#2, Improve BLE watch connection handling](https://github.com/NullDonut/openfit/pull/2), targeting `feat/openfit-android-starter`.
 - CI builds the debug APK; the latest green build before this SE change was
-  `openfit-debug-b982023`. CI on each push is green with 60 JVM unit tests.
+  `openfit-debug-b982023`. CI on each push is green with 61 JVM unit tests.
 - The protocol layer is compiled and tested locally with `javac` + JUnit 4.13.2 against JDK 21,
   and the whole app compiles against the API 35 `android.jar`. Local Gradle/Android SDK are
   still unavailable, so packaging and installation go through GitHub Actions; no physical
@@ -176,11 +176,34 @@ Decoded: `SEWear{id=0, change_mtu=0, error_code=1}` = `MTU_REQUEST_CHANGE`, MTU 
 a bind reply. It also proves the envelope encoding is now correct. Id 16 itself still got only
 the transport ack (`01 00`) and no `SEWear` reply.
 
-The next build removes the id-0 greeting, waits 400 ms after notification setup, sends the id-16
-probe first (as the vendor SDK does), then if it is unanswered sends
-`08 10 1A 02 08 01` (`request_binding_status:true`), then the populated id-0 MTU config
-(`9A 06 03 08 F7 01`, MTU 247) plus id 16, and finally id 17 `bindCheck{deviceVerify:true}`. That distinguishes "the watch ignores the bare probe" from
-"the watch refuses to answer account commands at all".
+The next build removed the id-0 greeting, waited 400 ms after notification setup, sent the id-16
+probe first (as the vendor SDK does), then the explicit form (`08 10 1A 02 08 01`), then the
+populated id-0 MTU config (`9A 06 03 08 F7 01`, MTU 247) plus id 16, and finally id 17
+`bindCheck{deviceVerify:true}`.
+
+Device test of build `fef5963` (2026-11-18 09:45) answered the question. Both account probes came
+back as a bare error:
+
+```
+RX 16186f01 · 010008101000A00601   SEWear · SEWear{id=16, error=1}
+RX 16186f01 · 010008111000A00601   SEWear · SEWear{id=17, error=1}
+```
+
+`SEWear{id=16, error_code=NOT_SUPPORT}` and `SEWear{id=17, error_code=NOT_SUPPORT}`. So the SE
+transport, the BLE `SEWear` envelope and the `SEFunctionId` numbering are all correct, and this
+firmware does not implement the account bind on the SE channel at all.
+
+NoiseFit's other pairing stack explains it. `BluetoothService.connect(name, address, protocol)`
+routes `DEVICE_PROTOCOL_BERRY` to `BerryBluetoothService` — a **bonded classic RFCOMM socket on
+the standard SPP UUID** — and `ZhConnectHandler.onConnectState` then calls
+`setUserIdByBerryProtocol(token, model, version)` instead of `requestDeviceBindState`. That is the
+private Berry command exchange (`private cmd 2` with `UserIdBean`, then `3`, then `4`), which
+OpenFit already implements in `BerryBinding`; only the socket was missing.
+
+OpenFit now treats a refused SE account exchange as "Berry model": it asks Android to bond, opens
+the SPP socket (`BerrySpp`), and runs the private 2/3/4 exchange with the stored token. It also
+sends the read-only id-32 `GET_DEVICE_INFO` probe next to id 17 so a `SEWear{id=32, …}` reply
+would prove the SE command set works while the bind alone is unsupported.
 
 `fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry
 SDK does not use it, and the SE channel works without it.

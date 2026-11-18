@@ -17,6 +17,12 @@ public class SePairingTest {
                 SePairing.connectParameterConfig());
     }
 
+    @Test public void deviceInfoProbeUsesId32() {
+        // 0x20 = 32, a varint in field 1: 08 20.
+        assertArrayEquals(new byte[] {0x08, 0x20}, SePairing.deviceInfoRequest());
+        assertEquals(32, SeWear.readId(SePairing.deviceInfoRequest()));
+    }
+
     @Test public void populatedConnectConfigCarriesTheMtu() {
         assertArrayEquals(new byte[] {
                 (byte) 0x9A, 0x06, 0x03, // ble_connect_parmeter_config (99), 3 bytes

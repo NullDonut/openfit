@@ -2,11 +2,12 @@
 
 Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (SE/Apricot transport, BLE `SEWear` envelope,
-account probes without the rejected id-0 greeting, 60 unit tests). Build `975af4a` produced the
-watch's first real SE reply: `SEWear{id=0, change_mtu=0, error_code=NOT_SUPPORT}`, an answer to
-the id-0 MTU config rather than to the bind. This build drops that greeting and sends the id-16
-probe first, then escalates to the explicit probe and to id 17.
+Latest code commit at time of writing: this commit (SE probes now fail fast, classic SPP Berry
+fallback, id-32 diagnostic, 61 unit tests). The 2026-11-18 09:45 device run answered both account
+probes with `NOT_SUPPORT`: `08 10 10 00 A0 06 01` for id 16 and `08 11 10 00 A0 06 01` for id 17.
+That settles the protocol question — the SE transport, envelope and id numbering are right, and
+this firmware does not implement the account bind there. NoiseFit binds its `Berry` models over a
+bonded classic SPP socket instead, so OpenFit now falls back to that path.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -19,7 +20,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 60 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 61 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
 
 ---
 
@@ -464,6 +465,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | File | Purpose |
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
+| `app/src/main/java/com/openfit/app/BerrySpp.java` | Classic RFCOMM link on the SPP UUID: background connect, read loop, queued writes, logged failures |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
 | `app/src/main/java/com/openfit/app/protocol/BerryFrameReader.java` | Reassembles frames from split notifications, skips noise, consumes 8-byte acks |
 | `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Proto3 codec for the Berry SPP `sa_wear.SEWear` envelope (`type=1`, `id=2`) |
@@ -479,7 +481,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (60 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (61 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -558,13 +560,14 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the SE bind on hardware.** `975af4a` produced the watch's first SE reply, but it was
-   the id-0 MTU config's `NOT_SUPPORT`, not a bind reply. This build removes the greeting and
-   sends `08 10` first, then `08 10 1A 02 08 01`, then `9A 06 03 08 F7 01` plus `08 10`, then
-   `08 11 1A 04 12 02 08 01`. Watch the
-   `PAIRING LOG` for which probe is answered. If all three are silent the link needs something
-   beyond the SE account commands (system bond, or the CRP/SPP path used by other Noise models);
-   do not add further write types until one probe is confirmed.
+8. **Validate the classic Berry bind on hardware.** The 2026-11-18 run settled the SE question:
+   ids 16 and 17 both come back as `SEWear{id=N, error_code=NOT_SUPPORT}`, so the account bind is
+   not on the SE channel for this model. This build therefore falls back automatically: bond the
+   watch with Android, open the SPP socket (`BerrySpp`), and run private cmd 2 → 3 → 4 with the
+   stored token. Watch the `PAIRING LOG` for `bond state`, `SPP socket connected`, `TX user-id`,
+   `watch info …` and the final `bind status`. A failure at `createRfcommSocketToServiceRecord`
+   with no SDP record would mean the watch does not offer SPP either; the logged exception text
+   is the evidence to collect next. Do not add further write types until one step is confirmed.
 
 ### Suggested order from here
 

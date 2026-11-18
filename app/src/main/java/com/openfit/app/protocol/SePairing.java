@@ -27,6 +27,10 @@ public final class SePairing {
     public static final int FUNCTION_BINDING_RESULT = 18;
     public static final int FUNCTION_VERIFY_USER_NUMBER = 19;
     public static final int FUNCTION_UNBIND_REQUEST = 23;
+    /** Read-only probe: returns the watch model/firmware. Used to test the SE command set. */
+    public static final int FUNCTION_GET_DEVICE_INFO = 32;
+    /** Read-only probe: returns the battery level. */
+    public static final int FUNCTION_GET_DEVICE_BATTERY_STATUS = 33;
 
     // SEBindAccount fields.
     public static final int ACCOUNT_REQUEST_BINDING_STATUS = 1;
@@ -83,6 +87,14 @@ public final class SePairing {
     /** {@code SEWear{id=16}} = {@code 08 10}: is the watch already bound to an account? */
     public static byte[] bindingStatusRequest() {
         return SeWear.wear(FUNCTION_INQUIRY_BINDING_STATUS);
+    }
+
+    /**
+     * {@code SEWear{id=32}} = {@code 08 20}: ask for the device info. Not part of the bind; it
+     * only checks whether this watch implements the SE command set at all.
+     */
+    public static byte[] deviceInfoRequest() {
+        return SeWear.wear(FUNCTION_GET_DEVICE_INFO);
     }
 
     /**

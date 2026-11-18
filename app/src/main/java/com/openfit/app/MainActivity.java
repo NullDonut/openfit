@@ -40,7 +40,11 @@ import android.widget.Toast;
 import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.journeyapps.barcodescanner.CaptureActivity;
+import com.openfit.app.protocol.BerryBinding;
+import com.openfit.app.protocol.BerryFrame;
+import com.openfit.app.protocol.BerryFrameReader;
 import com.openfit.app.protocol.BerryProfile;
+import com.openfit.app.protocol.BerrySewear;
 import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SePairing;
@@ -87,6 +91,8 @@ public final class MainActivity extends Activity {
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
     private static final long SE_STEP_TIMEOUT_MS = 8_000L;
     private static final long SE_FIRST_COMMAND_DELAY_MS = 400L;
+    private static final long CLASSIC_BOND_TIMEOUT_MS = 40_000L;
+    private static final long BERRY_STEP_TIMEOUT_MS = 8_000L;
     private static final long SE_CHUNK_GAP_MS = 15L;
     private static final long SE_BUSY_DELAY_MS = 300L;
     private static final String PREFS = "openfit_local";
@@ -170,6 +176,19 @@ public final class MainActivity extends Activity {
     private Runnable seAckTimeout;
     private byte[] seLastPayload;
     private String seLastLabel;
+
+    // Classic (SPP) Berry pairing. The vendor uses this transport, and not the BLE protobuf
+    // channel, for the account bind on Berry models. OpenFit only tries it when the watch has
+    // refused or ignored the SE account commands.
+    private BerrySpp berrySpp;
+    private final BerryFrameReader berryReader = new BerryFrameReader();
+    private boolean classicAttempted;
+    private boolean classicPhase;
+    private boolean classicFinished;
+    private int berrySerial;
+    private String berryStep = "idle";
+    private int berryStepAttempts;
+    private Runnable berryStepTimeout;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -836,6 +855,13 @@ public final class MainActivity extends Activity {
         if (newState == BluetoothProfile.STATE_DISCONNECTED) {
             cancelConnectionTimeout();
             logBle("Disconnected · GATT status " + status);
+            if (classicPhase) {
+                // The classic link is a separate transport, so a GATT drop during the SPP bind
+                // must not tear down the pairing UI.
+                logBle("GATT link closed · classic pairing continues");
+                closeGatt();
+                return;
+            }
             if (status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
                     || status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION) {
                 if (handleGattSecurityFailure(source.getDevice(), status)) return;
@@ -1248,6 +1274,7 @@ public final class MainActivity extends Activity {
         if (error != 0) {
             logPairing("watch error for command " + id + " · " + SeWear.errorLabel(error));
             logBle("Watch reported " + SeWear.errorLabel(error) + " for command " + id);
+            if (onSeRefusal(id, error)) return;
         }
         if (id == SePairing.FUNCTION_MTU) return; // id-0 greeting reply, not part of the bind
         if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS) {
@@ -1259,7 +1286,7 @@ public final class MainActivity extends Activity {
         } else if (id == SePairing.FUNCTION_VERIFY_USER_NUMBER) {
             onSeVerifyUser(message);
         } else {
-            logPairing("ignoring command id " + id);
+            logPairing("SE reply id " + id + " · " + SeWear.errorLabel(error) + " · " + hex(message));
         }
     }
 
@@ -1294,6 +1321,11 @@ public final class MainActivity extends Activity {
         connectionStatus.setText("Pairing · asking the watch to bind…");
         scanStatus.setText("●  PAIRING / BIND REQUEST");
         sendSe(SePairing.bindCheckRequest(), "bind-check");
+        // Diagnostic only: a plain read-only request outside the account group. If the watch
+        // answers this but not the account commands, the SE channel works and only the bind is
+        // unimplemented; if it also answers NOT_SUPPORT, this watch does not use the SE command
+        // set at all (the classic Berry path is then the right one).
+        sendSe(SePairing.deviceInfoRequest(), "device-info");
         scheduleSeStepTimeout();
     }
 
@@ -1359,26 +1391,82 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /**
+     * An {@code error_code} is the watch's authoritative answer, so it is handled here instead of
+     * falling through to the payload parsers (which would report a refusal as "unreadable").
+     * Returns true when the reply was fully handled.
+     */
+    private boolean onSeRefusal(int id, int error) {
+        if (sePairFinished) return true;
+        String label = SeWear.errorLabel(error);
+        if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS && "binding-status".equals(seStep)) {
+            // Escalate now rather than waiting out the step timeout.
+            advanceBindingStatusProbe();
+            return true;
+        }
+        if (id == SePairing.FUNCTION_BINDING_CHECK && "bind-check".equals(seStep)) {
+            finishPairing(false, "the watch refused the bind request · " + label);
+            return true;
+        }
+        if (id == SePairing.FUNCTION_BINDING_RESULT && "bind-result".equals(seStep)) {
+            clearStoredToken(lastConnectAddress);
+            finishPairing(false, "the watch refused the bind result · " + label);
+            return true;
+        }
+        if (id == SePairing.FUNCTION_VERIFY_USER_NUMBER && "verify-user".equals(seStep)) {
+            finishPairing(false, "the watch refused the saved account · " + label);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Moves the id-16 probe through its variants. The watch answers each one with an error code
+     * on this firmware, so both the refusal path and the step timeout land here; after the last
+     * variant the bind check is sent directly.
+     */
+    private void advanceBindingStatusProbe() {
+        if (sePairFinished) return;
+        cancelSeStepTimeout();
+        if (seStepAttempts < 2) {
+            // Some firmware needs the account submessage to be present before it answers; the
+            // vendor client sends the bare id.
+            seStepAttempts = 2;
+            logPairing("probing the explicit binding-status form");
+            sendSe(SePairing.bindingStatusRequestExplicit(), "binding-status (explicit)");
+            scheduleSeStepTimeout();
+            return;
+        }
+        if (seStepAttempts < 3) {
+            // The empty id-0 config was rejected; try the populated form the vendor app sends
+            // once it knows the MTU, then repeat the bind probe.
+            seStepAttempts = 3;
+            logPairing("sending the MTU config, then binding-status again");
+            sendSe(SePairing.connectParameterConfig(seMtu), "connect-params");
+            sendSe(SePairing.bindingStatusRequest(), "binding-status");
+            scheduleSeStepTimeout();
+            return;
+        }
+        // The watch never reported its bind state. Try the bind check directly: this is what the
+        // vendor's "bind this phone" action sends, and on many firmwares it is the command that
+        // makes the watch display its confirmation prompt.
+        logPairing("binding-status unanswered · trying the bind-check directly");
+        requestSeBindCheck();
+    }
+
     private void scheduleSeStepTimeout() {
         cancelSeStepTimeout();
         seStepTimeout = () -> {
             seStepTimeout = null;
             if (sePairFinished) return;
-            boolean configProbePending = "binding-status".equals(seStep) && seStepAttempts < 3;
-            if (seStepAttempts < 2 || configProbePending) {
+            if ("binding-status".equals(seStep)) {
+                logPairing("no reply for binding-status (" + seStepAttempts + "/3)");
+                advanceBindingStatusProbe();
+                return;
+            }
+            if (seStepAttempts < 2) {
                 seStepAttempts++;
-                if ("binding-status".equals(seStep) && seStepAttempts == 2) {
-                    // Some firmware needs the account submessage to be present before it
-                    // answers; the vendor client sends the bare id.
-                    logPairing("no reply for binding-status · probing the explicit form");
-                    sendSe(SePairing.bindingStatusRequestExplicit(), "binding-status (explicit)");
-                } else if ("binding-status".equals(seStep)) {
-                    // The empty id-0 config was rejected; try the populated form the vendor app
-                    // sends once it knows the MTU, then repeat the bind probe.
-                    logPairing("no reply for binding-status · sending the MTU config, then the probe");
-                    sendSe(SePairing.connectParameterConfig(seMtu), "connect-params");
-                    sendSe(SePairing.bindingStatusRequest(), "binding-status");
-                } else if ("bind-check".equals(seStep)) {
+                if ("bind-check".equals(seStep)) {
                     logPairing("no reply for bind-check · retrying");
                     sendSe(SePairing.bindCheckRequest(), "bind-check");
                 } else if ("bind-result".equals(seStep)) {
@@ -1392,20 +1480,6 @@ public final class MainActivity extends Activity {
                 scheduleSeStepTimeout();
                 return;
             }
-            if ("binding-status".equals(seStep)) {
-                // The watch never reported its bind state. Try the bind-check directly: this
-                // is what the vendor's "bind this phone" action sends, and on many firmwares it
-                // is the command that makes the watch display its confirmation prompt.
-                logPairing("no binding-status reply · trying the bind-check directly");
-                seStep = "bind-check";
-                seStepAttempts = 1;
-                seState = "requesting bind";
-                connectionStatus.setText("Pairing · asking " + connectedDeviceName + " to confirm…");
-                scanStatus.setText("●  PAIRING / BIND REQUEST");
-                sendSe(SePairing.bindCheckRequest(), "bind-check");
-                scheduleSeStepTimeout();
-                return;
-            }
             finishPairing(false, "no reply from the watch for " + seStep);
         };
         handler.postDelayed(seStepTimeout, SE_STEP_TIMEOUT_MS);
@@ -1414,12 +1488,20 @@ public final class MainActivity extends Activity {
     private void finishPairing(boolean success, String detail) {
         if (sePairFinished) return;
         sePairFinished = true;
-        seState = success ? "paired" : "failed";
         cancelSeTimeouts();
         seWriteQueue.clear();
         seCurrentWrite = null;
         seAwaitingReady = false;
         seTransfer.reset();
+        // A watch that answers the SE account commands with NOT_SUPPORT, or not at all, is
+        // almost certainly a Berry model: the vendor binds those over a bonded classic SPP
+        // link. Try that once before reporting a failure.
+        if (!success && startClassicFallback(detail)) return;
+        reportPairing(success, detail);
+    }
+
+    private void reportPairing(boolean success, String detail) {
+        seState = success ? "paired" : "failed";
         logPairing((success ? "PAIRED  " : "FAILED  ") + detail);
         logBle("Vendor pairing " + (success ? "succeeded" : "failed") + " · " + detail);
         if (success) {
@@ -1429,6 +1511,296 @@ public final class MainActivity extends Activity {
             connectionStatus.setText("Connected · pairing failed · " + detail);
             scanStatus.setText("●  CONNECTED / PAIRING FAILED · TAP FOR DIAGNOSTICS");
         }
+    }
+
+    /**
+     * Switches to the classic Berry bind: Android bonding first (the vendor refuses to open the
+     * RFCOMM socket before that), then the SPP socket and the private 2/3/4 account exchange.
+     * Returns false when the fallback cannot run, so the caller reports the SE failure instead.
+     */
+    private boolean startClassicFallback(String reason) {
+        if (classicAttempted || bluetoothAdapter == null) return false;
+        String address = lastConnectAddress;
+        if (address == null) return false;
+        classicAttempted = true;
+        classicPhase = true;
+        berryReader.reset();
+        logPairing("SE account exchange failed · " + reason);
+        logPairing("falling back to the classic (SPP) Berry pairing");
+        scanStatus.setText("●  PAIRING / CLASSIC LINK");
+        connectionStatus.setText("Pairing · opening the Bluetooth link to " + connectedDeviceName + "…");
+        BluetoothDevice device;
+        try {
+            device = bluetoothAdapter.getRemoteDevice(address);
+        } catch (IllegalArgumentException e) {
+            finishClassic(false, "the saved watch address is not valid");
+            return true;
+        }
+        int bondState;
+        try {
+            bondState = device.getBondState();
+        } catch (SecurityException e) {
+            finishClassic(false, "Bluetooth permission is needed to pair");
+            return true;
+        }
+        logPairing("bond state " + bondLabel(bondState));
+        if (bondState == BluetoothDevice.BOND_BONDED) {
+            openBerrySpp(device);
+        } else if (bondState == BluetoothDevice.BOND_BONDING) {
+            // Something else already started pairing; just wait for it to finish.
+            pendingBondDevice = device;
+            bondInProgress = true;
+            bondRequestedByApp = false;
+            scheduleClassicBondTimeout();
+        } else {
+            requestClassicBond(device);
+        }
+        return true;
+    }
+
+    private static String bondLabel(int state) {
+        switch (state) {
+            case BluetoothDevice.BOND_NONE: return "not bonded";
+            case BluetoothDevice.BOND_BONDING: return "bonding";
+            case BluetoothDevice.BOND_BONDED: return "bonded";
+            default: return "state " + state;
+        }
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void requestClassicBond(BluetoothDevice device) {
+        pendingBondDevice = device;
+        bondInProgress = true;
+        bondRequestedByApp = false;
+        try {
+            boolean accepted = device.createBond();
+            logPairing("createBond accepted=" + accepted);
+            if (!accepted) {
+                finishClassic(false, "Android refused to start Bluetooth pairing");
+                return;
+            }
+        } catch (SecurityException e) {
+            finishClassic(false, "Bluetooth permission is needed to pair");
+            return;
+        }
+        cancelPairingTimeout();
+        pairingTimeout = () -> {
+            pairingTimeout = null;
+            if (!bondInProgress) return;
+            clearBondState();
+            finishClassic(false, "Bluetooth pairing timed out · accept the prompt on both devices");
+        };
+        handler.postDelayed(pairingTimeout, CLASSIC_BOND_TIMEOUT_MS);
+    }
+
+    private void scheduleClassicBondTimeout() {
+        cancelPairingTimeout();
+        pairingTimeout = () -> {
+            pairingTimeout = null;
+            if (!bondInProgress) return;
+            clearBondState();
+            finishClassic(false, "Bluetooth pairing timed out · accept the prompt on both devices");
+        };
+        handler.postDelayed(pairingTimeout, CLASSIC_BOND_TIMEOUT_MS);
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void openBerrySpp(BluetoothDevice device) {
+        if (classicFinished) return;
+        berryReader.reset();
+        berryStep = "spp-connect";
+        berryStepAttempts = 1;
+        logPairing("opening the classic SPP socket");
+        scanStatus.setText("●  PAIRING / CLASSIC LINK");
+        connectionStatus.setText("Pairing · connecting over Bluetooth to " + connectedDeviceName + "…");
+        scheduleBerryStepTimeout("classic link setup");
+        BerrySpp.Listener listener = new BerrySpp.Listener() {
+            @Override public void onLog(String message) {
+                runOnUiThread(() -> logPairing(message));
+            }
+
+            @Override public void onConnected() {
+                runOnUiThread(() -> {
+                    cancelBerryStepTimeout();
+                    startBerryBind();
+                });
+            }
+
+            @Override public void onData(byte[] chunk) {
+                runOnUiThread(() -> handleBerryChunk(chunk));
+            }
+
+            @Override public void onFailed(String reason) {
+                runOnUiThread(() -> finishClassic(false, reason));
+            }
+        };
+        berrySpp = new BerrySpp(bluetoothAdapter, device, listener);
+        berrySpp.connect();
+    }
+
+    /** Private cmd 2: the same token the SE path would have used. */
+    private void startBerryBind() {
+        if (classicFinished) return;
+        berryStep = "user-id";
+        berryStepAttempts = 1;
+        connectionStatus.setText("Pairing · identifying this phone to " + connectedDeviceName + "…");
+        scanStatus.setText("●  PAIRING / ACCOUNT");
+        String token = openFitToken(lastConnectAddress);
+        logPairing("account token " + token);
+        sendBerry(BerryBinding.userIdFrame(berrySerial,
+                token, phoneName(), Build.VERSION.RELEASE), "user-id");
+        scheduleBerryStepTimeout("account identification");
+    }
+
+    /** The vendor sends {@code Build.MODEL} with its whitespace removed, then the OS release. */
+    private static String phoneName() {
+        String model = Build.MODEL == null ? "" : Build.MODEL;
+        return model.replaceAll("\\s+", "");
+    }
+
+    private void handleBerryChunk(byte[] chunk) {
+        if (chunk == null || chunk.length == 0) return;
+        logPairing("RX classic · " + BerryBinding.hex(chunk));
+        for (BerryFrame frame : berryReader.append(chunk)) handleBerryFrame(frame);
+    }
+
+    private void handleBerryFrame(BerryFrame frame) {
+        logPairing("RX frame · " + BerryBinding.hex(frame.toBytes()));
+        if (!frame.isPrivate()) {
+            if (frame.isProtobuf()) {
+                logPairing("SEWear (SPP) · type " + BerrySewear.readType(frame.payload())
+                        + " id " + BerrySewear.readId(frame.payload())
+                        + " · " + BerryBinding.hex(frame.payload()));
+            } else {
+                logPairing("ignoring Berry event " + frame.event() + " type " + frame.type());
+            }
+            return;
+        }
+        int cmdId = frame.privateCmdId();
+        byte[] data = frame.privateData();
+        if (cmdId == BerrySewear.PRIVATE_CMD_USER_ID) {
+            onBerryDeviceInfo(data);
+        } else if (cmdId == BerrySewear.PRIVATE_CMD_BIND) {
+            onBerryBindStatus(data);
+        } else if (cmdId == BerrySewear.PRIVATE_CMD_BIND_RESULT) {
+            onBerryBindResult(data);
+        } else {
+            logPairing("private cmd " + cmdId + " · " + BerryBinding.hex(data));
+        }
+    }
+
+    private void onBerryDeviceInfo(byte[] data) {
+        if (classicFinished || !"user-id".equals(berryStep)) return;
+        cancelBerryStepTimeout();
+        BerryBinding.DeviceInfo info = BerryBinding.DeviceInfo.parse(data);
+        logPairing("watch info · " + info);
+        if (info == null) {
+            finishClassic(false, "the watch sent an unreadable account reply");
+            return;
+        }
+        if (info.isBind && !info.isSameUser) {
+            finishClassic(false, "the watch is bound to another account · unbind it in the watch settings");
+            return;
+        }
+        if (info.isBind) {
+            finishClassic(true, "the watch is already bound to this account");
+            return;
+        }
+        berryStep = "bind";
+        berryStepAttempts = 1;
+        connectionStatus.setText("Pairing · asking " + connectedDeviceName + " to confirm…");
+        scanStatus.setText("●  PAIRING / BIND REQUEST");
+        sendBerry(BerryBinding.bindFrame(berrySerial), "bind-request");
+        scheduleBerryStepTimeout("bind request");
+    }
+
+    private void onBerryBindStatus(byte[] data) {
+        if (classicFinished || !"bind".equals(berryStep)) return;
+        cancelBerryStepTimeout();
+        int status = data.length == 0 ? -1 : data[0] & 0xff;
+        logPairing("bind status · " + BerryBinding.bindStatusLabel(status));
+        if (status != BerryBinding.BIND_OK) {
+            finishClassic(false, BerryBinding.bindStatusLabel(status));
+            return;
+        }
+        berryStep = "bind-result";
+        berryStepAttempts = 1;
+        connectionStatus.setText("Pairing · confirming with " + connectedDeviceName + "…");
+        scanStatus.setText("●  PAIRING / CONFIRM");
+        sendBerry(BerryBinding.bindResultFrame(berrySerial, true), "bind-confirm");
+        scheduleBerryStepTimeout("bind confirmation");
+    }
+
+    private void onBerryBindResult(byte[] data) {
+        if (classicFinished || !"bind-result".equals(berryStep)) return;
+        cancelBerryStepTimeout();
+        int status = data.length == 0 ? -1 : data[0] & 0xff;
+        logPairing("bind confirmation · " + BerryBinding.bindResultLabel(status));
+        if (status == 0) {
+            finishClassic(true, "classic Berry bind confirmed");
+        } else {
+            clearStoredToken(lastConnectAddress);
+            finishClassic(false, BerryBinding.bindResultLabel(status));
+        }
+    }
+
+    private void sendBerry(byte[] frame, String label) {
+        if (berrySpp == null) {
+            finishClassic(false, "the classic link is gone");
+            return;
+        }
+        logPairing("TX " + label + " · " + BerryBinding.hex(frame));
+        berrySpp.send(frame);
+        berrySerial = BerryFrame.nextSerial(berrySerial);
+    }
+
+    private void scheduleBerryStepTimeout(String what) {
+        cancelBerryStepTimeout();
+        berryStepTimeout = () -> {
+            berryStepTimeout = null;
+            if (classicFinished) return;
+            if (berryStepAttempts < 2) {
+                berryStepAttempts++;
+                logPairing("no reply for " + what + " · retrying");
+                resendBerryStep();
+                scheduleBerryStepTimeout(what);
+                return;
+            }
+            finishClassic(false, "no reply from the watch for " + what);
+        };
+        handler.postDelayed(berryStepTimeout, BERRY_STEP_TIMEOUT_MS);
+    }
+
+    private void resendBerryStep() {
+        if ("user-id".equals(berryStep)) {
+            sendBerry(BerryBinding.userIdFrame(berrySerial,
+                    openFitToken(lastConnectAddress), phoneName(), Build.VERSION.RELEASE), "user-id");
+        } else if ("bind".equals(berryStep)) {
+            sendBerry(BerryBinding.bindFrame(berrySerial), "bind-request");
+        } else if ("bind-result".equals(berryStep)) {
+            sendBerry(BerryBinding.bindResultFrame(berrySerial, true), "bind-confirm");
+        }
+    }
+
+    private void cancelBerryStepTimeout() {
+        if (berryStepTimeout != null) {
+            handler.removeCallbacks(berryStepTimeout);
+            berryStepTimeout = null;
+        }
+    }
+
+    private void finishClassic(boolean success, String detail) {
+        if (classicFinished) return;
+        classicFinished = true;
+        classicPhase = false;
+        cancelBerryStepTimeout();
+        cancelPairingTimeout();
+        if (bondInProgress) clearBondState();
+        if (!success && berrySpp != null) {
+            berrySpp.close();
+            berrySpp = null;
+        }
+        reportPairing(success, detail);
     }
 
     /**
@@ -1595,6 +1967,17 @@ public final class MainActivity extends Activity {
         seStepAttempts = 0;
         seStep = "idle";
         seState = "not started";
+        cancelBerryStepTimeout();
+        berryReader.reset();
+        berryStep = "idle";
+        berryStepAttempts = 0;
+        classicAttempted = false;
+        classicPhase = false;
+        classicFinished = false;
+        if (berrySpp != null) {
+            berrySpp.close();
+            berrySpp = null;
+        }
     }
 
     private void cancelSeMtuTimeout() {
@@ -1712,6 +2095,12 @@ public final class MainActivity extends Activity {
                 int previousState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
                 logBle("Bond state " + previousState + " -> " + state);
                 if (state == BluetoothDevice.BOND_BONDED) {
+                    if (classicPhase) {
+                        clearBondState();
+                        logPairing("bonded · opening the classic link");
+                        openBerrySpp(device);
+                        return;
+                    }
                     boolean shouldReconnect = bondRequestedByApp;
                     clearBondState();
                     if (shouldReconnect) {
@@ -1728,6 +2117,11 @@ public final class MainActivity extends Activity {
                         }, 500L);
                     }
                 } else if (state == BluetoothDevice.BOND_NONE && previousState == BluetoothDevice.BOND_BONDING) {
+                    if (classicPhase) {
+                        clearBondState();
+                        finishClassic(false, "the watch rejected the Bluetooth pairing");
+                        return;
+                    }
                     boolean retryPairing = bondRequestedByApp;
                     clearBondState();
                     if (retryPairing) {
@@ -2041,6 +2435,11 @@ public final class MainActivity extends Activity {
         retryConnection = null;
         stopScan();
         closeGatt();
+        if (berrySpp != null) {
+            berrySpp.close();
+            berrySpp = null;
+        }
+        classicPhase = false;
         clearBondState();
         if (bondReceiverRegistered) {
             unregisterReceiver(bondReceiver);

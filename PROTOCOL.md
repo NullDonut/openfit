@@ -228,10 +228,30 @@ does the same.
   `SEWear{id=0, ble_connect_parmeter_config{}}` immediately before id 16. `change_mtu=0` and
   `NOT_SUPPORT` mean this firmware does not implement MTU change over protobuf, even though the
   GATT MTU exchange itself succeeds (247).
-- Id 16 still produced no reply after the greeting error. The current build therefore stops
-  sending the greeting, sends the id-16 probe first (as `ZhConnectHandler` does), and escalates:
+- Id 16 still produced no reply after the greeting error, so the next build stopped sending the
+  greeting, sent the id-16 probe first (as `ZhConnectHandler` does), and escalated:
   bare id 16 → id 16 with `request_binding_status:true` → the populated id-0 config
   (`9A 06 03 08 F7 01`, MTU 247) followed by id 16 again → id 17 `bindCheck{deviceVerify:true}`.
+- Build `fef5963` (2026-11-18 09:45) answered the question: the watch replies to **both** account
+  commands with a bare error, `08 10 10 00 A0 06 01` (`SEWear{id=16, error_code=NOT_SUPPORT}`) and
+  `08 11 10 00 A0 06 01` (`id=17, NOT_SUPPORT`). One run therefore proves three things: the SE
+  transport, the BLE `SEWear` envelope and the `SEFunctionId` numbering are all correct, and this
+  firmware simply does not implement the account bind on the SE channel.
+
+**Conclusion for this watch.** A device that parses the SE envelope correctly but refuses the
+account function group is not an Apricot-bind device. NoiseFit's other pairing stack — `Berry` —
+does not use GATT for the account at all: `BluetoothService.connect(...)` routes
+`DEVICE_PROTOCOL_BERRY` to `BerryBluetoothService`, i.e. a bonded classic RFCOMM socket on the
+standard SPP UUID `00001101-0000-1000-8000-00805F9B34FB`, and `ZhConnectHandler.onConnectState`
+then calls `setUserIdByBerryProtocol(token, model, version)` instead of `requestDeviceBindState`.
+That path is the private Berry command exchange (`private cmd 2 → 3 → 4`), which OpenFit already
+encodes in `BerryBinding`.
+
+OpenFit therefore treats a refused/ignored SE account exchange as "this is a Berry model":
+it asks Android to bond the watch, opens the SPP socket, and runs the private 2/3/4 bind. The
+build also sends the read-only id-32 `GET_DEVICE_INFO` probe alongside id 17, so a
+`SEWear{id=32, …}` reply would show that the SE command set works and only the bind is missing,
+while `NOT_SUPPORT` there confirms the protocol conclusion.
 
 The remaining question is whether any of those account probes is answered, and with what.
 
