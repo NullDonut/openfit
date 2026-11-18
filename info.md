@@ -113,8 +113,10 @@ Verified in this pass (details and wire tables in `PROTOCOL.md`):
 - Berry GATT profile: service `16186f00-0000-1000-8000-00807f9b34fb` (note vendor base
   `00807f9b34fb`), chars `…6f01`…`…6f05`; writes go to `…6f02`, all five notify.
 - Berry frame: `head(4, LE) | serialNo(1) | event(1) | type(1) | len(2, LE) | payload`, with
-  magics `0x5A488888` (app→dev), `0x5A486666` (dev→app), `0x5A489999` (ack),
+  magics `0x5A486666` (app→dev), `0x5A488888` (dev→app), `0x5A489999` (ack),
   `0x5A481111` (large file); `event` 1=protobuf / 3=private, `type` 3=protobuf / 2=private.
+  *(Corrected 2026-11-18: this pass originally had the two direction magics the wrong way round;
+  see the 2026-11-18 entry below.)*
 - `SEWear` protobuf schema (type=1, id=2, payload fields 3..21, error_code=100).
 - Bind sequence: private `cmdId=1` (protocol description) → `cmdId=2` (`UserIdBean` account
   identity) → `cmdId=3` (bind request, only if not already bound) → `cmdId=4` (confirmation
@@ -204,6 +206,53 @@ OpenFit now treats a refused SE account exchange as "Berry model": it asks Andro
 the SPP socket (`BerrySpp`), and runs the private 2/3/4 exchange with the stored token. It also
 sends the read-only id-32 `GET_DEVICE_INFO` probe next to id 17 so a `SEWear{id=32, …}` reply
 would prove the SE command set works while the bind alone is unsupported.
+
+`fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry
+SDK does not use it, and the SE channel works without it.
+
+## 2026-11-18 10:10 — bonded, but no RFCOMM (build `bd6110e`)
+
+The same phone/watch pair, with the classic fallback from that build. The bond was acquired
+(`Bond state 10 -> 11`, then `11 -> 12`), so the system-pairing prompt is not the blocker. The
+socket still failed, twice, about 7-13 s after it was opened:
+
+```
+bonded · opening the classic link
+opening the classic SPP socket
+IOException · read failed, socket might closed or timeout, read ret: -1
+```
+
+Android reports that text when the remote end has no RFCOMM listener. The watch was found by a BLE
+scan and bonded as an LE device, so the most likely explanation is simply that it has no classic
+radio to listen on. The build now logs `BluetoothDevice.getType()` and `getUuids()` (the cached SDP
+records) at the start of the Berry phase so the next report settles it: `DEVICE_TYPE_LE` with no
+SDP records makes SPP impossible and the step can be deleted.
+
+### Three Berry bugs found while tracing it
+
+Re-reading the vendor Berry code against OpenFit turned up three defects, two of which would have
+made any Berry watch ignore the bind regardless of the bearer:
+
+1. **Swapped head magics.** `BERRY_APP_REQ_DEV_HEAD_VALUE` is `0x5A486666`, i.e. the phone sends
+   `66 66 48 5A`; `BERRY_DEV_REQ_APP_HEAD_VALUE` is `0x5A488888`, the watch's own magic
+   (`BERRY_APP_REQ_DEV_HEAD = {102, 102, 72, 90}` confirms the byte order). OpenFit had the two
+   constants exchanged, so every command carried the watch's magic in the wrong direction and was
+   dropped without any error frame.
+2. **Missing inbound ack.** Both Berry services call `replyAsk(cmdDataBean.getAskCmd(0))` *before*
+   parsing each received frame: a bare 8-byte `99 99 48 5A <serial> 00 00 00`. The exchange is
+   stop-and-wait, so a phone that never acks gets one frame and then silence. OpenFit now acks
+   every inbound Berry command frame.
+3. **No BLE bearer at all.** `Berry` is not the only Berry transport. `BluetoothService.connect`
+   routes `DEVICE_PROTOCOL_BERRY_TEST` and `DEVICE_PROTOCOL_BERRY_RING` to `BerryRingService`,
+   which is a plain `BluetoothGatt` client; `writeBerryCmd` pushes the *same* `CmdDataBean` frames.
+   Berry-Test uses service `aa01` (write `aa02`, data on `aa05`, log on `aa03`) and Berry-Ring uses
+   `00006666` (write `0000005f`, read `0000005e`).
+
+The watch exposes `aa01` with `aa02` (read/write) and `aa03` (read/write/notify) — the Berry-Test
+shape minus `aa05`. So the fallback now tries, in order: BLE Berry on `aa01` (private cmd 2, then
+an `SEWear{type=ACCOUNT}` account query if that is silent), then the classic bond + SPP path. The
+SE `id-32` probe was dropped from the hot path: sending it back-to-back with id 17 produced
+`control resend 1` and no reply, which only added noise to an already settled conclusion.
 
 `fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry
 SDK does not use it, and the SE channel works without it.

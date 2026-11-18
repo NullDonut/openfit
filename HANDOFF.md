@@ -2,12 +2,20 @@
 
 Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (SE probes now fail fast, classic SPP Berry
-fallback, id-32 diagnostic, 61 unit tests). The 2026-11-18 09:45 device run answered both account
-probes with `NOT_SUPPORT`: `08 10 10 00 A0 06 01` for id 16 and `08 11 10 00 A0 06 01` for id 17.
-That settles the protocol question — the SE transport, envelope and id numbering are right, and
-this firmware does not implement the account bind there. NoiseFit binds its `Berry` models over a
-bonded classic SPP socket instead, so OpenFit now falls back to that path.
+Latest code commit at time of writing: this commit (Berry-over-BLE fallback on `aa01`, corrected
+Berry frame magics, inbound acks, link-capability diagnostics, 62 unit tests).
+
+The 2026-11-18 09:45 device run answered both SE account probes with `NOT_SUPPORT`
+(`08 10 10 00 A0 06 01` and `08 11 10 00 A0 06 01`), which settles the SE question: the transport,
+envelope and id numbering are right and this firmware does not implement the account bind there.
+
+The 10:10 run of `bd6110e` bonded the watch (`10 -> 11 -> 12`) but the classic SPP socket failed
+twice with `IOException · read failed, socket might closed or timeout, read ret: -1`. That is the
+signature of a remote with no RFCOMM listener, and the bond came from an LE scan, so the watch is
+most likely LE-only. While tracing that, two genuine Berry bugs surfaced: the phone→watch and
+watch→phone head magics were swapped (every command was silently ignored), and the phone never
+acknowledged inbound frames although the exchange is stop-and-wait. Both are fixed, and the
+fallback now goes BLE-first (`aa01`: write `aa02`, notify `aa03`) before trying classic SPP.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -275,13 +283,13 @@ Head magics (`BleCommonAttributes`; bytes shown as they appear on the wire):
 
 | Constant | Value | Wire bytes | Direction |
 |---|---|---|---|
-| `BERRY_APP_REQ_DEV_HEAD_VALUE` | `0x5A488888` | `88 88 48 5A` | phone → watch |
-| `BERRY_DEV_REQ_APP_HEAD_VALUE` | `0x5A486666` | `66 66 48 5A` | watch → phone |
+| `BERRY_APP_REQ_DEV_HEAD_VALUE` | `0x5A486666` | `66 66 48 5A` | phone → watch |
+| `BERRY_DEV_REQ_APP_HEAD_VALUE` | `0x5A488888` | `88 88 48 5A` | watch → phone |
 | `BERRY_ASK_HEAD_VALUE` | `0x5A489999` | `99 99 48 5A` | ack / ask |
 | `BERRY_DEV_LARGE_FILES_HEAD_VALUE` | `0x5A481111` | `11 11 48 5A` | large files |
 
 Ack frame (`CmdAskBean`): head `0x5A489999`, same serialNo, one `error` byte plus two zero
-placeholders (9-byte frame, empty payload).
+placeholders (8-byte frame, no length field, empty payload).
 
 Large-file chunks use an extra wrapper (`BluetoothService#a(byte[])`):
 `[1][len+4 hi][len+4 lo][payload…][CRC32 of preceding bytes]`.
@@ -309,14 +317,21 @@ message SEWear {
 GNSS 7, MICRO_FUNCTION 8, NOTIFICATION 9, MUSIC 10, SETTING_MENU 11, FACTORY 12, ALEAX 13,
 NEW_WATCH_FACE 14, NEW_WEATHER 15, CHILDREN 16, AIFUNCTION 17, TVREMOTE 18.
 
-### 6.4 Berry SPP bind sequence (alternate transport)
+### 6.4 Berry bind sequence (two bearers)
 
-Android system bond happens first in NoiseFit (`checkBondByMac` → `createBond` →
-`BOND_STATE_CHANGED` receiver → connect), and the full Berry stack then uses **classic SPP**
-(`00001101-…`). OpenFit deliberately connects over **BLE GATT** first, retries transient GATT
-failures, and starts the same bond flow only when the watch reports GATT 5/15 (see §8). The
-account bind is the same either way and uses private commands (`event=3`, `type=2`, payload
-`cmdId:2 len:2 data`):
+NoiseFit's Berry stack has **two bearers**, chosen by the device protocol the server returns:
+
+| Protocol | Bearer | Service / socket | Phone writes | Phone reads |
+|---|---|---|---|---|
+| `Berry` | classic SPP after a system bond | `00001101-…` | socket | socket |
+| `Berry-Test` | GATT (`BerryRingService`) | `aa01`, write `aa02` | `aa02` | `aa05` (data) / `aa03` (log) |
+| `Berry-Ring` | GATT (`BerryRingService`) | `00006666`, write `0000005f` | `0000005f` | `0000005e` |
+
+For `Berry`, `BerryBluetoothService#checkBondByMac` → `createBond` → `BOND_STATE_CHANGED` →
+connect. For the GATT variants there is no bond step at all: discovery enables notifications and
+`writeBerryCmd` pushes frames to the write characteristic. The account bind is byte-identical on
+all three because both services end up in the shared `BerryParsing`. It uses private commands
+(`event=3`, `type=2`, payload `cmdId:2 len:2 data`):
 
 | Step | Frame | Meaning |
 |---|---|---|
@@ -378,7 +393,14 @@ The first device build sent the `sa_wear` byte sequence `10 10` for id 16. The w
 `change_mtu=16`, acked with `01 00` and did nothing, which looked like a silent account refusal.
 The corrected id-16 request is `08 10`; id 17 is `08 11 1A 04 12 02 08 01`; id 18 is
 `08 12 1A <len> 1A <len> 12 <len> <user id>`; id 19 is `08 13 1A <len> 32 <len> <token>`.
-The two codecs are kept apart in `BerrySewear` (SPP) and `SeWear` (BLE).
+The two codecs are kept apart in `BerrySewear` (Berry) and `SeWear` (`16186f00` / Apricot).
+
+**Frame magics (corrected 2026-11-18).** `BERRY_APP_REQ_DEV_HEAD_VALUE = 0x5A486666` → the phone
+sends `66 66 48 5A`; `BERRY_DEV_REQ_APP_HEAD_VALUE = 0x5A488888` → the watch sends `88 88 48 5A`.
+OpenFit had these swapped, so every Berry command went out under the watch's own magic and was
+ignored. The vendor also answers each inbound frame with a bare 8-byte
+`99 99 48 5A <serial> 00 00 00` ack before parsing it (`replyAsk(getAskCmd(0))`); OpenFit now does
+the same. Without the ack the watch stops after the first reply.
 
 Account bind ids (`SEFunctionId`) and bodies (`BindAccountProtos`):
 
@@ -466,6 +488,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
 | `app/src/main/java/com/openfit/app/BerrySpp.java` | Classic RFCOMM link on the SPP UUID: background connect, read loop, queued writes, logged failures |
+| `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. the `aa01` Berry-over-BLE service (`aa02` write, `aa03`/`aa05` notify) |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
 | `app/src/main/java/com/openfit/app/protocol/BerryFrameReader.java` | Reassembles frames from split notifications, skips noise, consumes 8-byte acks |
 | `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Proto3 codec for the Berry SPP `sa_wear.SEWear` envelope (`type=1`, `id=2`) |
@@ -560,22 +583,34 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the classic Berry bind on hardware.** The 2026-11-18 run settled the SE question:
-   ids 16 and 17 both come back as `SEWear{id=N, error_code=NOT_SUPPORT}`, so the account bind is
-   not on the SE channel for this model. This build therefore falls back automatically: bond the
-   watch with Android, open the SPP socket (`BerrySpp`), and run private cmd 2 → 3 → 4 with the
-   stored token. Watch the `PAIRING LOG` for `bond state`, `SPP socket connected`, `TX user-id`,
-   `watch info …` and the final `bind status`. A failure at `createRfcommSocketToServiceRecord`
-   with no SDP record would mean the watch does not offer SPP either; the logged exception text
-   is the evidence to collect next. Do not add further write types until one step is confirmed.
+8. **Validate the Berry bind on hardware.** The SE question is closed (ids 16/17 →
+   `NOT_SUPPORT`). The build now falls back automatically and in this order:
+   `aa01` BLE Berry (write `aa02`, notify `aa03`, private cmd 2 → 3 → 4 with the stored token)
+   → a `SEWear{type=ACCOUNT}` account query if the private command is silent
+   → classic bond + SPP, only if the BLE channel stays silent.
+
+   Watch the `PAIRING LOG` for these lines first, because they decide everything else:
+
+   ```
+   device type … (2 = LE only, 3 = dual)
+   SDP records none | <uuid, …>
+   Berry-over-BLE channel: aa02 write, N notify characteristic(s)
+   trying the BLE Berry channel · write aa02, notify N char(s)
+   TX user-id · 66 66 48 5A …
+   ```
+
+   A reply appears as `RX aa03 · …` followed by `RX frame · 88 88 48 5A …` and
+   `watch info · type=…, isBind=…, isSameUser=…`; from there the 3/4 exchange continues on its own
+   and ends with `PAIRED  Berry bind confirmed`. `device type 2` plus `SDP records none` settles
+   that RFCOMM is impossible, so the SPP step can then be deleted rather than retried.
 
 ### Suggested order from here
 
 ```
-install the SE pairing APK from CI
-    -> connect; read the PAIRING LOG and status line
-    -> if the watch announces replies but refuses id 17, try bindCheckKeyRequest
-    -> if nothing at all is announced, fall back to classic bond + SPP
+install the Berry APK from CI
+    -> connect; read the PAIRING LOG and the device-type / SDP lines
+    -> if aa03 answers, the 2/3/4 bind completes on its own
+    -> if aa03 is silent, read the SDP result before touching SPP again
     -> extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
     -> wire HR control + parse incoming SE replies
 ```

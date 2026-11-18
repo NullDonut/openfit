@@ -98,7 +98,7 @@ Other services the stack knows (all SIG base `0000805f9b34fb` unless noted):
 
 ### Transport on `16186f00`: SE ("Apricot") chunked protobuf
 
-**Hardware result, 2026-11-17:** this service does not accept Berry `88 88 48 5A` frames.
+**Hardware result, 2026-11-17:** this service does not accept Berry `66 66 48 5A` frames.
 OpenFit's first attempt put a Berry frame on `6f02`; the watch read the first two bytes as packet
 number `0x8888` and answered `00 00 01 02 00 00`, the SE stack's "busy" control frame. The vendor
 app routes `16186f00` through `com.zhapp.ble.BluetoothService` (protocol string `Apricot`); the
@@ -274,10 +274,17 @@ Head magics (`BleCommonAttributes`, written LE so the bytes on the wire are reve
 
 | Constant | int | wire bytes | direction |
 |---|---|---|---|
-| `BERRY_APP_REQ_DEV_HEAD_VALUE` | `0x5A488888` | `88 88 48 5A` | phone → watch |
-| `BERRY_DEV_REQ_APP_HEAD_VALUE` | `0x5A486666` | `66 66 48 5A` | watch → phone |
+| `BERRY_APP_REQ_DEV_HEAD_VALUE` | `0x5A486666` | `66 66 48 5A` | phone → watch |
+| `BERRY_DEV_REQ_APP_HEAD_VALUE` | `0x5A488888` | `88 88 48 5A` | watch → phone |
 | `BERRY_ASK_HEAD_VALUE` | `0x5A489999` | `99 99 48 5A` | ack/ask |
 | `BERRY_DEV_LARGE_FILES_HEAD_VALUE` | `0x5A481111` | `11 11 48 5A` | large files |
+
+Cross-check: `BERRY_APP_REQ_DEV_HEAD_VALUE = 1514694246 = 0x5A486666` and
+`BERRY_APP_REQ_DEV_HEAD = {102, 102, 72, 90}` = `66 66 48 5A`; `BERRY_DEV_REQ_APP_HEAD_VALUE =
+1514702984 = 0x5A488888` and `BERRY_DEV_REQ_APP_HEAD = {-120, -120, 72, 90}` = `88 88 48 5A`.
+Every outbound builder (`CmdDataBean.getCmdDataBean(BERRY_APP_REQ_DEV_HEAD_VALUE, …)`) therefore
+puts `66 66 48 5A` on the wire. **OpenFit had these two heads swapped until 2026-11-18**, which
+would make any Berry watch ignore every command without any error — see the device notes below.
 
 Ack frame (`CmdAskBean`, answering a request): `head(4) 0x5A489999`, the **same serialNo**,
 `error` byte, two zero placeholders. It is a bare 8-byte control frame — unlike command frames
@@ -287,9 +294,11 @@ it has **no event/type/length header**:
 99 99 48 5A  <serialNo>  <error>  00 00
 ```
 
-The watch sends one ack for every command frame the phone sends; OpenFit also acks every
-`66 66 48 5A` frame it receives. `error` is the index of the sub-request being acknowledged
-(0 for a single command).
+The exchange is stop-and-wait in both directions. `BerryBluetoothService#processingData` (and
+the BLE twin `BerryRingService`) call `replyAsk(cmdDataBean.getAskCmd(0))` **before** parsing each
+inbound frame, so the phone acks every command frame it receives, reusing that frame's serial.
+`error` is the index of the sub-request being acknowledged (0 for a single command). OpenFit now
+acks every inbound Berry command frame — omitting it makes the watch stop after the first reply.
 
 Large-file chunks use a second wrapper (`BluetoothService#a(byte[])`):
 `[1][len+4 hi][len+4 lo][payload…][CRC32 of the preceding bytes]`.
@@ -383,6 +392,57 @@ No encryption, no challenge/response and no key material were observed on the Be
 the private/protobuf payloads are sent in clear inside the frame above. This is why the Berry
 profile is implementable without copying any proprietary secret.
 
+### Berry over BLE (`aa01`) — the second Berry bearer
+
+The Berry account exchange is not tied to SPP. `BluetoothService.connect` routes
+`DEVICE_PROTOCOL_BERRY_TEST` and `DEVICE_PROTOCOL_BERRY_RING` to `BerryRingService`, which is a
+**GATT** client, and `BluetoothService.writeBerryCmd` sends the *same* `CmdDataBean` frames through
+it. Only the bearer changes:
+
+| Protocol | Service | Phone writes | Phone reads replies | Notes |
+|---|---|---|---|---|
+| `Berry-Ring` (`BPC1.241120.001`) | `00006666-…` | `0000005f-…` | `0000005e-…` | reads `00000050-…` once after discovery; `DEF_MTU = 517` |
+| `Berry-Test` (`BPB1.240915.001`) | `0000aa01-…` | `0000aa02-…` | `0000aa05-…` (data), `0000aa03-…` (log) | no handshake; `setUserIdByBerryProtocol` writes private cmd 2 here |
+| `Berry` (`BPA1.240915.001`) | — | SPP `00001101-…` | SPP | bonded classic socket |
+
+`setUserIdByBerryProtocol` (in `ControlBleTools`) builds the account frame with
+`a.C0001a.a(token, model, version)` — private `cmdId=2` carrying `UserIdBean`, head
+`BERRY_APP_REQ_DEV_HEAD_VALUE`, `event=3`, `type=2`. The rest of the 2/3/4 exchange is identical
+because it is parsed by the shared `BerryParsing`, which handles both the private commands and
+`BindAccountProtos.SEWear` account messages.
+
+The ColorFit Ultra Buzz tested here exposes **`aa01` with `aa02` (read/write) and `aa03`
+(read/write/notify)** — the Berry-Test shape minus `aa05` — so OpenFit treats `aa02` as the write
+channel and `aa03` as the reply channel. It also exposes `00000001/00000002/00000003`, the base
+service used by the alternate (Ryeex) family, and `fee7`, which belongs to the bundled CRP stack;
+neither is used by the zhapp Berry/Apricot code.
+
+### Device status, 2026-11-18 (build `bd6110e`)
+
+The watch is now **bonded** (Android reported `10 -> 11 -> 12`), so pairing at the OS level works.
+The classic socket still failed on every attempt:
+
+```
+bond state bonded
+opening the classic SPP socket
+IOException · read failed, socket might closed or timeout, read ret: -1
+```
+
+That message is what Android reports when the remote end has no RFCOMM/SPP listener, and the bond
+was obtained over LE from a BLE scan. Two conclusions:
+
+1. The bond is not the problem; the transport is. A watch that answers no SDP/SPP request is
+   effectively LE-only for us, and no amount of bonding makes an RFCOMM socket appear. The build
+   now logs `BluetoothDevice.getType()` and the cached SDP UUID list at the start of the Berry
+   phase so the next report settles this instead of guessing.
+2. The Berry implementation could not have worked even over a healthy socket: the two head
+   magics were swapped (see the frame-format table) and the phone never acknowledged inbound
+   frames (see the ack note). Both are fixed.
+
+The read-only id-32 `SEWear{id=32}` probe is no longer sent alongside id 17 — the two transmits
+overlapped, the watch answered `control resend 1`, and the probe muddied the log. The SE
+`SEWear{id=16|17, error_code=NOT_SUPPORT}` result is established twice and does not need repeating.
+
 ### Heart rate and keepalive
 
 | Purpose | Command |
@@ -456,10 +516,12 @@ not yet decompiled.
 6. ~~Whether `16186f00` speaks Berry frames or classic SPP~~ — answered on hardware: it answers a
    Berry frame with the SE "busy" control frame. The service uses SE chunked protobuf; the Berry
    SPP path remains documented for the alternate transport.
-7. Whether the watch accepts id 17 `bindCheck{deviceVerify:true}` from a non-vendor client and
-   returns `bindCheckResult=SUCCESS`, and whether it accepts the id-18 token produced by OpenFit.
-   The transport and the correct envelope are confirmed; this account reply is the remaining
-   physical-device test.
-8. Whether the watch requires an Android system bond for account commands. The vendor's SE code
-   path contains no bond check, while its Berry classic-SPP path does, so OpenFit keeps bonding as
-   an on-demand fallback.
+7. ~~Whether the watch answers id 17 `bindCheck`~~ — answered: it answers `NOT_SUPPORT`, on a
+   bonded and an unbonded link, so the SE account group is not implemented on this firmware.
+8. ~~Whether account commands need an Android system bond~~ — answered for SE: no. The bond was
+   obtained and the SE account commands still answered `NOT_SUPPORT`, while the classic socket
+   stayed unusable, which points at an LE-only link rather than a permission problem.
+9. Which Berry bearer this watch actually uses. `aa01` (aa02 write / aa03 notify) is present and is
+   the Berry-Test shape minus aa05, so the build now writes the private cmd 2 there and accepts
+   replies on aa03. The `device type` and `SDP records` lines decide whether the classic socket is
+   even possible; a `DEVICE_TYPE_LE` watch with no SDP records rules SPP out permanently.

@@ -36,7 +36,7 @@ public class BerryBindingTest {
 
     @Test public void protocolRequestIsPrivateCommandOneWithEmptyBody() {
         assertArrayEquals(new byte[] {
-            (byte) 0x88, (byte) 0x88, 0x48, 0x5A,
+            (byte) 0x66, (byte) 0x66, 0x48, 0x5A,
             0x0B, 0x03, 0x02, 0x04, 0x00,
             0x01, 0x00, 0x00, 0x00
         }, BerryBinding.protocolFrame(11));
@@ -73,13 +73,13 @@ public class BerryBindingTest {
 
     @Test public void bindFramesUsePrivateCommandsThreeAndFour() {
         assertArrayEquals(new byte[] {
-            (byte) 0x88, (byte) 0x88, 0x48, 0x5A,
+            (byte) 0x66, (byte) 0x66, 0x48, 0x5A,
             0x09, 0x03, 0x02, 0x04, 0x00,
             0x03, 0x00, 0x00, 0x00
         }, BerryBinding.bindFrame(9));
 
         assertArrayEquals(new byte[] {
-            (byte) 0x88, (byte) 0x88, 0x48, 0x5A,
+            (byte) 0x66, (byte) 0x66, 0x48, 0x5A,
             0x0A, 0x03, 0x02, 0x05, 0x00,
             0x04, 0x00, 0x01, 0x00, 0x01
         }, BerryBinding.bindResultFrame(10, true));

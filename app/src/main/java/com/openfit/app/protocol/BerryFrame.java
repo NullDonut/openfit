@@ -3,8 +3,10 @@ package com.openfit.app.protocol;
 import java.util.Arrays;
 
 /**
- * Berry protocol frame used by Noise/ColorFit watches on the
- * 16186f00-0000-1000-8000-00807f9b34fb GATT service.
+ * Berry protocol frame used by Noise/ColorFit watches. The same frame travels over the classic
+ * SPP socket ({@code Berry}) and over the {@code aa01} GATT service ({@code Berry-Test}); only the
+ * bearer differs. It is <em>not</em> the frame used on {@code 16186f00}, which speaks the SE
+ * ("Apricot") chunked protobuf transport instead.
  *
  * <pre>
  * offset size field
@@ -19,8 +21,14 @@ import java.util.Arrays;
  * Static description only: see PROTOCOL.md for provenance and open questions.
  */
 public final class BerryFrame {
-    public static final int HEAD_APP_REQ_DEV = 0x5A488888;
-    public static final int HEAD_DEV_REQ_APP = 0x5A486666;
+    /**
+     * {@code BERRY_APP_REQ_DEV_HEAD = {102, 102, 72, 90}} in the vendor constants: the phone
+     * addresses the watch with {@code 66 66 48 5A}. Getting these two heads the wrong way round
+     * means the watch silently ignores every command, so they are stated once here.
+     */
+    public static final int HEAD_APP_REQ_DEV = 0x5A486666;
+    /** {@code BERRY_DEV_REQ_APP_HEAD = {-120, -120, 72, 90}} — the watch's own requests. */
+    public static final int HEAD_DEV_REQ_APP = 0x5A488888;
     public static final int HEAD_ASK = 0x5A489999;
     public static final int HEAD_DEV_LARGE_FILES = 0x5A481111;
 

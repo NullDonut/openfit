@@ -10,13 +10,26 @@ import static org.junit.Assert.fail;
 
 public class BerryFrameTest {
     private static final byte[] BIND_REQUEST = {
-        (byte) 0x88, (byte) 0x88, 0x48, 0x5A, // 0x5A488888 little-endian
+        // BERRY_APP_REQ_DEV_HEAD = {102, 102, 72, 90}: the head the phone must use.
+        (byte) 0x66, (byte) 0x66, 0x48, 0x5A,
         0x00,                                  // serial
         0x03,                                  // event: private
         0x02,                                  // type: private
         0x04, 0x00,                            // payload length
         0x03, 0x00, 0x00, 0x00                 // cmdId 3 (bind), empty body
     };
+
+    @Test public void phoneFramesUseTheAppToDeviceMagic() {
+        // BERRY_APP_REQ_DEV_HEAD = {102, 102, 72, 90}: a swapped head makes the watch drop the
+        // frame silently, which is indistinguishable from a wrong command.
+        assertEquals(0x5A486666, BerryFrame.HEAD_APP_REQ_DEV);
+        byte[] raw = BerryFrame.privateCommand(0, 3, null).toBytes();
+        assertEquals((byte) 0x66, raw[0]);
+        assertEquals((byte) 0x66, raw[1]);
+        assertEquals((byte) 0x48, raw[2]);
+        assertEquals((byte) 0x5A, raw[3]);
+        assertEquals(0x5A488888, BerryFrame.HEAD_DEV_REQ_APP);
+    }
 
     @Test public void privateBindFrameMatchesObservedLayout() {
         assertArrayEquals(BIND_REQUEST, BerryFrame.privateCommand(0, BerrySewear.PRIVATE_CMD_BIND, null).toBytes());
