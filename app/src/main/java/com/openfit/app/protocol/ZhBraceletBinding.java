@@ -172,6 +172,21 @@ public final class ZhBraceletBinding {
         }
     }
 
+    /** Human-readable name for a command key, for the on-device log. */
+    public static String keyLabel(int key) {
+        switch (key) {
+            case KEY_TIME_SYNC: return "time sync";
+            case KEY_USER_INFO: return "user info";
+            case KEY_STATUS: return "status";
+            case KEY_UNBIND: return "unbind";
+            case KEY_BIND_INFO: return "bind info";
+            case KEY_BIND: return "bind";
+            case KEY_DEVICE_ANSWER: return "device answer";
+            default:
+                return String.format(java.util.Locale.US, "key 0x%02X", key & 0xFF);
+        }
+    }
+
     /**
      * A generic acknowledgement: {@code KEY_STATUS} (0x0F) answers any set command, while
      * {@code KEY_DEVICE_ANSWER} (0xAC) echoes the original command key and its own status byte.

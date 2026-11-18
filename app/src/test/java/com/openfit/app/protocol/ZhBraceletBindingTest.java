@@ -140,6 +140,14 @@ public class ZhBraceletBindingTest {
         assertEquals(255, high[15] & 0xFF);
     }
 
+    @Test public void keyLabelsNameTheRecoveredCommands() {
+        assertEquals("time sync", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_TIME_SYNC));
+        assertEquals("user info", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_USER_INFO));
+        assertEquals("status", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_STATUS));
+        assertEquals("bind info", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_BIND_INFO));
+        assertEquals("key 0x08", ZhBraceletBinding.keyLabel(0x08));
+    }
+
     @Test public void parseAckReadsStatusAndDeviceAnswerFrames() {
         byte[] status = {
             (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,

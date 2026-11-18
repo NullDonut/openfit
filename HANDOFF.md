@@ -4,7 +4,7 @@ Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
 Latest code commit at time of writing: this commit (ZhBracelet/NavPlus bind on `00000002`,
 Berry-over-BLE fallback on `aa01`, corrected Berry frame magics, inbound acks, link-capability
-diagnostics, classic SPP removed, 73 unit tests).
+diagnostics, classic SPP removed, unit tests).
 
 The 2026-11-18 09:45 device run answered both SE account probes with `NOT_SUPPORT`
 (`08 10 10 00 A0 06 01` and `08 11 10 00 A0 06 01`), which settles the SE question: the transport,
@@ -35,6 +35,13 @@ now continues to the id-18 `bind_result` regardless of `device_verify`
 (`SePairing.allowsBindResult`), with a regression test built from the captured reply. The
 ColorFit Ultra Buzz path is untouched because its SE account group answers `NOT_SUPPORT` and never
 reaches that branch.
+
+The Buzz reconnect path is now fast: when a binding is saved for the watch, `onConnectionReady`
+sends the ZhBracelet type-1 inquiry first instead of running the ~20 s SE probe. If that inquiry
+does not hold, `failZh` runs the SE exchange and then Berry, so the fallback order is preserved.
+The pairing log also names Zh reply keys and attributes a generic status ack to the last sent
+command, which is what the next device run needs to show whether the clock sync (key 1) and user
+info (key 4) were accepted.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -47,7 +54,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 73 JUnit tests for the Berry frames, SE transport/envelope, ZhBracelet bind frames and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | JUnit tests for the Berry frames, SE transport/envelope, ZhBracelet bind frames and reassembly |
 
 ---
 

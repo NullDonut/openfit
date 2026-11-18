@@ -217,6 +217,8 @@ public final class MainActivity extends Activity {
     private int zhWriteRetries;
     private boolean zhRebindTried;
     private int zhLastType = -1;
+    /** Key of the last phone-to-watch frame, so a generic status ack can be attributed in the log. */
+    private int zhLastTxKey = -1;
     private Runnable zhStepTimeout;
     private Runnable zhPostBindTask;
 
@@ -1187,6 +1189,14 @@ public final class MainActivity extends Activity {
             // over the GATT link we already have, instead of leaving the watch merely connected.
             connectionStatus.setText("Connected · noise watch · pairing…");
             scanStatus.setText("●  CONNECTED / PAIRING");
+            // A watch this app has bound before answers the ZhBracelet inquiry in well under a
+            // second, while the SE probe costs ~20 s on a Buzz that answers NOT_SUPPORT. Ask for
+            // the saved binding first; failZh() runs the SE exchange if it does not hold.
+            if (zhWriteChar != null && zhNotifyChar != null
+                    && isWatchBound(lastConnectAddress)
+                    && startZhPairing("saved ZhBracelet binding")) {
+                return;
+            }
             beginVendorPairing(source);
         }
     }
@@ -1607,7 +1617,7 @@ public final class MainActivity extends Activity {
         // When the SE account commands come back NOT_SUPPORT (or not at all) the watch belongs to
         // another vendor stack. Try the ZhBracelet script channel first: that is what NoiseFit
         // uses for ColorFit Ultra Buzz, Vision Buzz and Ultra 2. Berry stays as the last resort.
-        if (!success && startZhFallback(detail)) return;
+        if (!success && startZhPairing(detail)) return;
         if (!success && startBerryFallback(detail)) return;
         reportPairing(success, detail);
     }
@@ -1626,15 +1636,20 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Starts the ZhBracelet bind, the stack NoiseFit's {@code NavPlusConnectHandler} uses for
-     * ColorFit Ultra Buzz / Vision Buzz / Ultra 2. Returns false when this watch does not expose
-     * the script channel, so the caller can try Berry instead.
+     * Starts the ZhBracelet bind/inquiry, the stack NoiseFit's {@code NavPlusConnectHandler} uses
+     * for ColorFit Ultra Buzz / Vision Buzz / Ultra 2. It runs first when this app already has a
+     * saved binding for the watch, and as the SE fallback otherwise. Returns false when the watch
+     * does not expose the script channel, so the caller can try Berry instead.
      */
-    private boolean startZhFallback(String reason) {
+    private boolean startZhPairing(String reason) {
         if (zhStarted || zhFinished || zhWriteChar == null || zhNotifyChar == null) return false;
         zhStarted = true;
-        logPairing("SE account exchange failed · " + reason);
-        logDeviceCapabilities();
+        if (seSetupStarted || sePairStarted) {
+            logPairing("SE account exchange failed · " + reason);
+            logDeviceCapabilities();
+        } else {
+            logPairing("saved ZhBracelet binding · checking it before the SE probe");
+        }
         logPairing("trying the ZhBracelet bind channel · write 00000002, notify 00000003");
         scanStatus.setText("●  PAIRING / WATCH LINK");
         connectionStatus.setText("Pairing · binding to " + connectedDeviceName + "…");
@@ -1655,6 +1670,7 @@ public final class MainActivity extends Activity {
         if (zhFinished || zhWriteChar == null) return;
         zhAttempts++;
         zhLastType = type;
+        zhLastTxKey = ZhBraceletBinding.KEY_BIND;
         byte[] frame = ZhBraceletBinding.bindRequest(type);
         logPairing("TX zh-bind type " + type + " · " + hex(frame));
         if (!writeZh(frame)) {
@@ -1684,6 +1700,7 @@ public final class MainActivity extends Activity {
         int minute = now.get(Calendar.MINUTE);
         int second = now.get(Calendar.SECOND);
         byte[] frame = ZhBraceletBinding.timeSyncFrame(year, month, day, hour, minute, second);
+        zhLastTxKey = ZhBraceletBinding.KEY_TIME_SYNC;
         logPairing(String.format(Locale.US,
                 "TX zh-time-sync · %s · %04d-%02d-%02d %02d:%02d:%02d",
                 hex(frame), year, month, day, hour, minute, second));
@@ -1699,6 +1716,7 @@ public final class MainActivity extends Activity {
         if (zhWriteChar == null || gatt == null) return;
         byte[] frame = ZhBraceletBinding.userInfoFrame(DEFAULT_USER_AGE,
                 DEFAULT_USER_HEIGHT_CM, DEFAULT_USER_WEIGHT_KG, DEFAULT_USER_MALE);
+        zhLastTxKey = ZhBraceletBinding.KEY_USER_INFO;
         logPairing("TX zh-user-info · " + hex(frame) + " · default profile age "
                 + DEFAULT_USER_AGE + ", " + DEFAULT_USER_HEIGHT_CM + " cm, "
                 + DEFAULT_USER_WEIGHT_KG + " kg, " + (DEFAULT_USER_MALE ? "male" : "female"));
@@ -1773,11 +1791,18 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /** Ends the ZhBracelet attempt and moves on to Berry (or reports failure). */
+    /** Ends the ZhBracelet attempt and moves on to the SE exchange or Berry. */
     private void failZh(String detail) {
         if (zhFinished) return;
         zhFinished = true;
         cancelZhTimeout();
+        // The saved-binding fast path never ran the SE exchange. Run it now, before Berry, so a
+        // watch whose Zh binding went stale still gets a chance on its native stack.
+        if (!seSetupStarted && !sePairStarted && !sePairFinished && gatt != null) {
+            logPairing("ZhBracelet bind unavailable · trying the SE account exchange");
+            beginVendorPairing(gatt);
+            return;
+        }
         if (!startBerryFallback(detail)) reportPairing(false, detail);
     }
 
@@ -1790,10 +1815,12 @@ public final class MainActivity extends Activity {
             if (info == null) {
                 ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);
                 if (ack != null) {
-                    logPairing("ZhBracelet ack · " + ack.describe());
+                    logPairing("ZhBracelet ack · " + ack.describe()
+                            + (zhLastTxKey < 0 ? ""
+                            : " · last sent " + ZhBraceletBinding.keyLabel(zhLastTxKey)));
                 } else {
                     int key = frame.length > 10 ? frame[10] & 0xFF : -1;
-                    logPairing("ZhBracelet frame · key " + key + " ignored");
+                    logPairing("ZhBracelet frame · " + ZhBraceletBinding.keyLabel(key) + " ignored");
                 }
                 continue;
             }
@@ -2407,6 +2434,7 @@ public final class MainActivity extends Activity {
         zhWriteRetries = 0;
         zhRebindTried = false;
         zhLastType = -1;
+        zhLastTxKey = -1;
         cancelBerryStepTimeout();
         berryReader.reset();
         berryStep = "idle";
