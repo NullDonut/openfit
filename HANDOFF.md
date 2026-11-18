@@ -4,7 +4,7 @@ Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
 Latest code commit at time of writing: this commit (ZhBracelet/NavPlus bind on `00000002`,
 Berry-over-BLE fallback on `aa01`, corrected Berry frame magics, inbound acks, link-capability
-diagnostics, classic SPP removed, 68 unit tests).
+diagnostics, classic SPP removed, 73 unit tests).
 
 The 2026-11-18 09:45 device run answered both SE account probes with `NOT_SUPPORT`
 (`08 10 10 00 A0 06 01` and `08 11 10 00 A0 06 01`), which settles the SE question: the transport,
@@ -23,6 +23,18 @@ for ids 16/0/17, and BLE Berry stayed silent. The vendor APK explains why: `NavP
 binds ColorFit Ultra Buzz through the bundled `com.zjw.zhbraceletsdk` on the `00000001` service
 (write `00000002`, notify `00000003`) with a plaintext key-108 bind frame. OpenFit now tries that
 ZhBracelet bind first, then `aa01` BLE Berry.
+
+A second physical device, a **Noise Watch Beat** (`00:00:00:7A:55:0F`, firmware 1.1.8), was tried on
+2026-11-18 with the same build and failed at the end of the SE exchange. The log shows why: this
+watch *answers* the SE account group (id 16 → not bound, id 17 → `bind_check_result=SUCCESS` with
+`device_verify` clear, name "NoiseFit Crew_550F", serial 10005), but the app treated the clear
+`device_verify` flag as a refusal and jumped to Berry, which is silent on this model too. The Beat
+exposes no `00000001` service, so it has no ZhBracelet path; it also adds a `000077d0` channel
+(`77d1` write / `77d2` notify) that is not decoded. The fix is in `onSeBindCheck`: a SUCCESS result
+now continues to the id-18 `bind_result` regardless of `device_verify`
+(`SePairing.allowsBindResult`), with a regression test built from the captured reply. The
+ColorFit Ultra Buzz path is untouched because its SE account group answers `NOT_SUPPORT` and never
+reaches that branch.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -35,7 +47,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 68 JUnit tests for the Berry frames, SE transport/envelope, ZhBracelet bind frames and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 73 JUnit tests for the Berry frames, SE transport/envelope, ZhBracelet bind frames and reassembly |
 
 ---
 
@@ -634,6 +646,13 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    bind the app now sends the vendor's clock sync (key 1) and, 50 ms later, the user-info profile
    (key 4). SE still answers `NOT_SUPPORT`, so its ~20 s probe can be demoted for this model later.
 
+9. **Retest the Noise Watch Beat SE bind on hardware.** The build with
+   `SePairing.allowsBindResult` should log `bind check accepted without device verification ·
+   continuing`, then `TX bind-result`, then `PAIRED vendor bind confirmed`. If the watch stays
+   silent on id 18, the next probe is the `000077d0` channel (`77d1`/`77d2`), whose frames are not
+   recovered yet. On reconnect the same watch should answer id 16 with `bound=true` and take the
+   id-19 `verify_user_number` path with the stored token.
+
 ### Suggested order from here
 
 ```
@@ -642,6 +661,7 @@ pair on the watch (done, build b701e4a)
     -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
     -> verify their acks on the watch, then add device info (key 8)
     -> parse device data on 16186f00 for health screens
+    -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```
 
 The QR result-to-connection gap and QR on-device retest remain separate, lower-priority items.

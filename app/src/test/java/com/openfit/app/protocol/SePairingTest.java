@@ -143,6 +143,29 @@ public class SePairingTest {
         assertNull(SePairing.verifyResult(new byte[] {0x08, 0x13}));
     }
 
+    @Test public void refusedBindCheckDoesNotAllowTheBindResult() {
+        SePairing.BindCheck refused = SePairing.bindCheck(
+                reply(17, accountWith(2, new byte[] {0x18, 0x01})));
+        assertFalse(SePairing.allowsBindResult(refused));
+        assertFalse(SePairing.allowsBindResult(null));
+    }
+
+    @Test public void watchBeatBindCheckAllowsTheBindResult() {
+        // Exact id-17 reply captured from a Noise Watch Beat (00:00:00:7A:55:0F, firmware 1.1.8).
+        // The watch reports SUCCESS with device_verify clear and then waits for the id-18 result,
+        // so the bind must continue instead of aborting on the flag.
+        byte[] message = hex("08111A42124008001800220533303032362A1130303A30303A30303A37613A35353A3066"
+                + "320531303030353A05312E312E3842124E6F69736546697420437265775F35353046");
+        SePairing.BindCheck check = SePairing.bindCheck(message);
+        assertNotNull(check);
+        assertFalse(check.deviceVerify);
+        assertEquals(SePairing.BIND_RESULT_SUCCESS, check.result);
+        assertTrue(SePairing.allowsBindResult(check));
+        assertEquals("00:00:00:7a:55:0f", check.mac);
+        assertEquals("NoiseFit Crew_550F", check.deviceName);
+        assertEquals("1.1.8", check.firmwareVersion);
+    }
+
     @Test public void describeNeverThrowsOnMalformedReplies() {
         assertNotNull(SePairing.describe(new byte[0]));
         assertNotNull(SePairing.describe(new byte[] {(byte) 0xff, (byte) 0xff}));
@@ -174,5 +197,13 @@ public class SePairingTest {
 
     private static void string(ByteArrayOutputStream out, int field, String value) {
         SeWear.writeMessage(out, field, value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static byte[] hex(String value) {
+        byte[] out = new byte[value.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
     }
 }

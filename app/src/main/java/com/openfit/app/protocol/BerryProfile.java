@@ -38,6 +38,13 @@ public final class BerryProfile {
     public static final UUID RYEEX_WRITE = UUID.fromString("00000002-0000-1000-8000-00805f9b34fb");
     public static final UUID RYEEX_READ = UUID.fromString("00000003-0000-1000-8000-00805f9b34fb");
 
+    /**
+     * An extra vendor channel seen on the Noise Watch Beat (2026-11-18) next to the SE service:
+     * {@code 77d1} takes writes and {@code 77d2} notifies. Its frames are not known yet; the Beat
+     * binds over SE, so OpenFit only reports its presence.
+     */
+    public static final UUID SERVICE_77D0 = UUID.fromString("000077d0-0000-1000-8000-00805f9b34fb");
+
     private BerryProfile() {}
 
     public static boolean isBerry(UUID serviceUuid) {

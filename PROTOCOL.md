@@ -218,8 +218,43 @@ NoiseFit on connect: id 16; if not bound → id 17 with `device_verify:true`; on
 from its local database. Its token is `(UUID + random(10..9999) + userId).substring(30)`; OpenFit
 uses the same shape with a local placeholder user id and stores it per watch address.
 
-The vendor requires `device_verify:true` in the id-17 reply before it sends id 18; OpenFit now
-does the same.
+The reply's `device_verify` flag reports whether the watch itself performed a device verification;
+it is **not** a gate on the bind. The vendor order is "bind check SUCCESS → id 18". The Noise Watch
+Beat answers id 17 with `bind_check_result=SUCCESS` and `device_verify` clear, so OpenFit now
+continues to id 18 for both values and stops only when the result enum is not SUCCESS.
+
+#### Noise Watch Beat (2026-11-18): the SE bind is the real path
+
+A second physical device, the Noise Watch Beat (`00:00:00:7A:55:0F`, firmware 1.1.8, name
+"NoiseFit Crew_550F"), exposes a different service set from the Ultra Buzz:
+
+| Service | Notes |
+|---|---|
+| `16186f00-…` | the same five write-no-response + notify characteristics |
+| `0000aa01-…` | `aa02` write, `aa03` read/write/notify (silent, as on the Buzz) |
+| `000077d0-…` | extra: `77d1` write, `77d2` notify — frames not recovered, unused |
+| `00000001-…` | **absent**, so there is no ZhBracelet channel and no NavPlus bind |
+
+Unlike the Buzz, this firmware implements the SE account group. The exchange reached the watch and
+was answered (MTU 247, announce → `01 01` ready, chunk → `01 00` received):
+
+```
+TX 08 10                                  id 16
+RX 08 10 1A 02 08 00                      bind_account{request_binding_status:false}
+TX 08 11 1A 04 12 02 08 01                id 17, bind_check{device_verify:true}
+RX 08 11 1A 42 12 40 08 00 18 00 …        bind_check{device_verify:false,
+                                             bind_check_result=SUCCESS,
+                                             device_number="30026", mac="00:00:00:7a:55:0f",
+                                             serial_number="10005", firmware_version="1.1.8",
+                                             device_name="NoiseFit Crew_550F"}
+```
+
+Because `bind_check_result` is SUCCESS, the phone has to send id 18
+(`08 12 1A <len> 1A <len> 12 <len> <token>`) to finish the bind. An earlier OpenFit build treated
+the clear `device_verify` flag as a refusal, aborted, fell through to Berry (silent) and reported
+"no reply to the account commands". That gate is removed; `SePairing.allowsBindResult` encodes the
+vendor rule instead. The id-18 write path is implemented and unit-tested, with the on-device
+confirmation still pending.
 
 **On-device status.** The transport has been confirmed repeatedly on the ColorFit Ultra Buzz
 (announce → `01 01` ready, chunks → `01 00` received, inbound announce → chunk → `0100` ack).

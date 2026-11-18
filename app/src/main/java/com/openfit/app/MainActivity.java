@@ -1056,6 +1056,11 @@ public final class MainActivity extends Activity {
                 + (zhWriteChar == null ? "no 00000002 write characteristic"
                 : "00000002 write, "
                 + (zhNotifyChar == null ? "no 00000003 notify" : "00000003 notify")));
+        // The Watch Beat adds this channel next to the SE service. The SE account bind is its
+        // pairing path, so the channel is only reported until its frames are recovered.
+        if (source.getService(BerryProfile.SERVICE_77D0) != null) {
+            logBle("extra vendor channel 000077d0 present · not used yet");
+        }
         logBle("Services: profile=" + watchProfile
                 + ", " + source.getServices().size() + " service(s), "
                 + notificationQueue.size() + " notifiable");
@@ -1443,14 +1448,17 @@ public final class MainActivity extends Activity {
         logPairing("bind check · " + check);
         logBle("Watch bind check · " + SePairing.resultLabel(check.result)
                 + (check.deviceVerify ? " · device verify" : " · no device verify"));
-        if (check.result != SePairing.BIND_RESULT_SUCCESS) {
+        if (!SePairing.allowsBindResult(check)) {
             finishPairing(false, SePairing.resultLabel(check.result));
             return;
         }
         if (!check.deviceVerify) {
-            // The vendor SDK aborts the bind when the watch does not confirm the device check.
-            finishPairing(false, "the watch did not confirm this phone");
-            return;
+            // The flag reports whether the watch performed its own device verification; it is
+            // not a verdict on the bind. The vendor order is "SUCCESS -> id 18", and the Noise
+            // Watch Beat answers SUCCESS with the flag clear and then waits for the bind result.
+            // The ColorFit Ultra Buzz never reaches this point: its SE account group answers
+            // NOT_SUPPORT and it binds through ZhBracelet instead.
+            logPairing("bind check accepted without device verification · continuing");
         }
         String token = openFitToken(lastConnectAddress);
         seStep = "bind-result";

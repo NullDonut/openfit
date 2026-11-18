@@ -174,6 +174,17 @@ public final class SePairing {
         return SeWear.readVarintField(account, ACCOUNT_REQUEST_BINDING_STATUS) > 0;
     }
 
+    /**
+     * Whether a decoded bind-check reply lets the phone send the id-18 bind result. The vendor
+     * order is "bind_check_result SUCCESS → bind_result"; the reply's {@code device_verify} flag
+     * only reports whether the watch ran its own device verification. The Noise Watch Beat
+     * answers SUCCESS with the flag clear and then waits for the bind result, so the flag must
+     * not be treated as a refusal.
+     */
+    public static boolean allowsBindResult(BindCheck check) {
+        return check != null && check.result == BIND_RESULT_SUCCESS;
+    }
+
     /** Watch reply to id 17; {@code null} when malformed or missing. */
     public static BindCheck bindCheck(byte[] sewear) {
         byte[] account = bindAccount(sewear);
