@@ -564,7 +564,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 6 tests: golden bind frames, declared length, key-52 replies, split frames, resync |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (75 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (76 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -658,7 +658,11 @@ a secret.
 6. **Post-bind wiring:** `MainActivity` performs connect → discovery → profile detection →
    notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind → time sync (key 1) →
    user info (key 4, 50 ms later). The pairing and the vendor's two follow-up frames are
-   implemented. Next: device info (key 8) and parsing the health/data channels.
+   implemented. When the SE account group is refused or silent, the app now runs a bounded
+   read-only liveness probe (id 32 device info, id 33 battery) *before* the Zh fallback; a reply
+   means SE settings/heart rate are usable without decompiling the Zh SDK. On the saved-binding
+   fast path, where SE is skipped, the same probes run 800 ms after the Zh bind is confirmed and
+   only report. Next: device info (key 8) and parsing the health/data channels.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
@@ -694,6 +698,7 @@ pair on the watch (done, build b701e4a)
     -> reconnect and check type 1 answers result=1 (done, build 91777d7)
     -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
     -> verify their acks on the watch, then add device info (key 8)
+    -> probe SE ids 32/33 to decide where heart rate comes from (implemented, retest pending)
     -> parse device data on 16186f00 for health screens
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```

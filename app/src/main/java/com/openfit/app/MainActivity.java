@@ -96,6 +96,8 @@ public final class MainActivity extends Activity {
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
     private static final long SE_STEP_TIMEOUT_MS = 8_000L;
     private static final long SE_FIRST_COMMAND_DELAY_MS = 400L;
+    /** Bounded wait for the read-only id 32/33 probes; both commands are queued together. */
+    private static final long SE_PROBE_TIMEOUT_MS = 4_000L;
     private static final long BERRY_STEP_TIMEOUT_MS = 8_000L;
     /**
      * The ZhBracelet bind reply may wait for the wearer to accept a prompt on the watch, so the
@@ -201,6 +203,14 @@ public final class MainActivity extends Activity {
     private Runnable seMtuTimeout;
     private Runnable seStepTimeout;
     private Runnable seAckTimeout;
+    // Read-only SE liveness probe (ids 32/33) that runs once the account group is refused.
+    private boolean seProbeRunning;
+    /** True when the probe is only reporting: a successful Zh bind must not be turned into a failure. */
+    private boolean seProbeQuiet;
+    private int seProbeReplies;
+    private int seProbeAccepted;
+    private String seProbeFailure;
+    private Runnable seProbeTimeout;
     private byte[] seLastPayload;
     private String seLastLabel;
 
@@ -1403,6 +1413,11 @@ public final class MainActivity extends Activity {
     private void onSeMessage(byte[] message) {
         int id = SeWear.readId(message);
         logPairing("SEWear · " + SePairing.describe(message) + " · " + hex(message));
+        if (seProbeRunning && (id == SePairing.FUNCTION_GET_DEVICE_INFO
+                || id == SePairing.FUNCTION_GET_DEVICE_BATTERY_STATUS)) {
+            onSeProbeReply(message, id);
+            return;
+        }
         int error = SeWear.readErrorCode(message);
         if (error != 0) {
             logPairing("watch error for command " + id + " · " + SeWear.errorLabel(error));
@@ -1420,6 +1435,84 @@ public final class MainActivity extends Activity {
             onSeVerifyUser(message);
         } else {
             logPairing("SE reply id " + id + " · " + SeWear.errorLabel(error) + " · " + hex(message));
+        }
+    }
+
+    /**
+     * The account group (ids 16-19) can be refused while the rest of the SE command set still
+     * answers. Before handing the watch to another stack, ask two read-only questions: device
+     * info (id 32) and battery (id 33). A reply means settings and heart rate are reachable over
+     * SE and the ZhBracelet SDK does not have to be decompiled for them.
+     *
+     * <p>Both requests are queued together; the transport serialises them. The probe is bounded by
+     * {@link #SE_PROBE_TIMEOUT_MS} and always ends by continuing the normal fallback with the
+     * original failure reason.
+     */
+    private void startSeLivenessProbe(String reason) {
+        startSeLivenessProbe(reason, false);
+    }
+
+    /**
+     * @param quiet when true the probe only reports its answer and never changes the pairing
+     *     outcome. Used after a saved-binding ZhBracelet pair, where the link is already good and
+     *     the probes are just checking whether the idle SE channel is usable.
+     */
+    private void startSeLivenessProbe(String reason, boolean quiet) {
+        if (seProbeRunning || sePairFinished || gatt == null || seWriteChar == null) return;
+        seProbeRunning = true;
+        seProbeQuiet = quiet;
+        seProbeReplies = 0;
+        seProbeAccepted = 0;
+        seProbeFailure = reason;
+        // The failed bind step may still own the transport (waiting for READY, or with a queued
+        // retry). Release it so the probes are not stuck behind a command that is already lost.
+        cancelSeAckTimeout();
+        seAwaitingReady = false;
+        seCurrentWrite = null;
+        seWriteQueue.clear();
+        logPairing("SE account commands unavailable · probing the SE command set (32, 33)");
+        sendSe(SePairing.deviceInfoRequest(), "device-info (probe)");
+        sendSe(SePairing.deviceBatteryRequest(), "battery (probe)");
+        seProbeTimeout = () -> {
+            seProbeTimeout = null;
+            finishSeLivenessProbe();
+        };
+        handler.postDelayed(seProbeTimeout, SE_PROBE_TIMEOUT_MS);
+    }
+
+    private void onSeProbeReply(byte[] message, int id) {
+        if (!seProbeRunning) return;
+        seProbeReplies++;
+        int error = SeWear.readErrorCode(message);
+        if (error == 0) seProbeAccepted++;
+        String label = id == SePairing.FUNCTION_GET_DEVICE_INFO ? "device info" : "battery";
+        logPairing("SE " + label + " probe · "
+                + (error == 0 ? "answered" : SeWear.errorLabel(error)) + " · " + hex(message));
+        if (error == 0) logBle("SE " + label + " answered · " + hex(message));
+        if (seProbeReplies >= 2) finishSeLivenessProbe();
+    }
+
+    private void finishSeLivenessProbe() {
+        if (!seProbeRunning) return;
+        boolean quiet = seProbeQuiet;
+        seProbeRunning = false;
+        seProbeQuiet = false;
+        cancelSeProbeTimeout();
+        if (seProbeAccepted > 0) {
+            logBle("SE command set is alive · " + seProbeAccepted + " of 2 probes answered");
+        } else if (seProbeReplies > 0) {
+            logBle("SE command set refused the probes too");
+        } else {
+            logBle("SE command set silent · only the ZhBracelet channel answers");
+        }
+        // A quiet probe runs on an already-paired link: report only, do not start a fallback.
+        if (!quiet) finishPairing(false, seProbeFailure);
+    }
+
+    private void cancelSeProbeTimeout() {
+        if (seProbeTimeout != null) {
+            handler.removeCallbacks(seProbeTimeout);
+            seProbeTimeout = null;
         }
     }
 
@@ -1536,7 +1629,8 @@ public final class MainActivity extends Activity {
             return true;
         }
         if (id == SePairing.FUNCTION_BINDING_CHECK && "bind-check".equals(seStep)) {
-            finishPairing(false, "the watch refused the bind request · " + label);
+            // The account group is refused, but the rest of the SE command set may still work.
+            startSeLivenessProbe("the watch refused the bind request · " + label);
             return true;
         }
         if (id == SePairing.FUNCTION_BINDING_RESULT && "bind-result".equals(seStep)) {
@@ -1611,6 +1705,12 @@ public final class MainActivity extends Activity {
                 scheduleSeStepTimeout();
                 return;
             }
+            if ("bind-check".equals(seStep) || "bind-result".equals(seStep)) {
+                // Silence from the account group also deserves the read-only liveness probe
+                // before the watch is handed to another stack.
+                startSeLivenessProbe("no reply from the watch for " + seStep);
+                return;
+            }
             finishPairing(false, "no reply from the watch for " + seStep);
         };
         handler.postDelayed(seStepTimeout, SE_STEP_TIMEOUT_MS);
@@ -1639,6 +1739,16 @@ public final class MainActivity extends Activity {
         if (success) {
             connectionStatus.setText("Paired · " + connectedDeviceName);
             scanStatus.setText("●  PAIRED / READY");
+            if (!sePairStarted) {
+                // Saved-binding fast path: SE was skipped entirely, so its channel is untested on
+                // this link. Run the read-only probes once the Zh post-bind frames are out; the
+                // answer decides whether heart rate comes from SE or the ZhBracelet SDK.
+                handler.postDelayed(() -> {
+                    if (!sePairStarted) {
+                        startSeLivenessProbe("saved ZhBracelet binding", true);
+                    }
+                }, 800L);
+            }
         } else {
             connectionStatus.setText("Connected · pairing failed · " + detail);
             scanStatus.setText("●  CONNECTED / PAIRING FAILED · TAP FOR DIAGNOSTICS");
@@ -2440,6 +2550,12 @@ public final class MainActivity extends Activity {
         seStepAttempts = 0;
         seStep = "idle";
         seState = "not started";
+        cancelSeProbeTimeout();
+        seProbeRunning = false;
+        seProbeQuiet = false;
+        seProbeReplies = 0;
+        seProbeAccepted = 0;
+        seProbeFailure = null;
         cancelZhTimeout();
         cancelZhPostBind();
         zhReader.reset();
@@ -2490,6 +2606,7 @@ public final class MainActivity extends Activity {
         cancelSeMtuTimeout();
         cancelSeStepTimeout();
         cancelSeAckTimeout();
+        cancelSeProbeTimeout();
     }
 
     private static final class SeWrite {

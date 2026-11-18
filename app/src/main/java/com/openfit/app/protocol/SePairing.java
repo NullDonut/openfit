@@ -98,6 +98,14 @@ public final class SePairing {
     }
 
     /**
+     * {@code SEWear{id=33}} = {@code 08 21}: ask for the battery level. Like {@link
+     * #deviceInfoRequest()}, a read-only liveness probe for the SE command set.
+     */
+    public static byte[] deviceBatteryRequest() {
+        return SeWear.wear(FUNCTION_GET_DEVICE_BATTERY_STATUS);
+    }
+
+    /**
      * {@code SEWear{id=16, bind_account{request_binding_status:true}}} = {@code 08 10 1A 02 08
      * 01}. The vendor client sends the bare message; this variant is a probe for firmware that
      * requires the account submessage to be present before it answers.

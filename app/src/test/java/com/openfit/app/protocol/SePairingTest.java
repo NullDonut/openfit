@@ -23,6 +23,12 @@ public class SePairingTest {
         assertEquals(32, SeWear.readId(SePairing.deviceInfoRequest()));
     }
 
+    @Test public void batteryProbeUsesId33() {
+        // 0x21 = 33: the other read-only liveness probe for the SE command set.
+        assertArrayEquals(new byte[] {0x08, 0x21}, SePairing.deviceBatteryRequest());
+        assertEquals(33, SeWear.readId(SePairing.deviceBatteryRequest()));
+    }
+
     @Test public void populatedConnectConfigCarriesTheMtu() {
         assertArrayEquals(new byte[] {
                 (byte) 0x9A, 0x06, 0x03, // ble_connect_parmeter_config (99), 3 bytes

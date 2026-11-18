@@ -223,6 +223,31 @@ it is **not** a gate on the bind. The vendor order is "bind check SUCCESS → id
 Beat answers id 17 with `bind_check_result=SUCCESS` and `device_verify` clear, so OpenFit now
 continues to id 18 for both values and stops only when the result enum is not SUCCESS.
 
+#### SE liveness probe (ids 32/33)
+
+The account group and the rest of the SE command set are independent. A Buzz that answers ids 16-19
+with `NOT_SUPPORT` may still implement ordinary SE commands, so OpenFit probes two read-only ids
+that need no account before falling back to ZhBracelet:
+
+| Id | Phone bytes | Purpose |
+|---|---|---|
+| 32 | `08 20` | `SEGetDeviceInfo` — model and firmware |
+| 33 | `08 21` | battery status |
+
+Both travel through the normal announce/chunk transport as soon as the account group is refused or
+silent, and the probe is bounded to 4 s so it cannot delay the ZhBracelet fallback indefinitely. On a
+saved-binding reconnect the SE exchange is skipped entirely, so the same two probes run once the
+ZhBracelet bind is confirmed; that run only reports and never changes the pairing result. The result
+is one line in the connection log:
+
+- `SE command set is alive · N of 2 probes answered` — SE carries settings and heart rate, and the
+  ZhBracelet SDK does not have to be decompiled for them.
+- `SE command set refused the probes too` — the whole SE surface is stubbed out on this firmware.
+- `SE command set silent` — no evidence either way; the transport itself may be the problem.
+
+Reply payloads are logged as raw hex; the `SEGetDeviceInfo` / battery field numbers are not decoded
+yet.
+
 #### Noise Watch Beat (2026-11-18): the SE bind is the real path
 
 A second physical device, the Noise Watch Beat (`00:00:00:7A:55:0F`, firmware 1.1.8, name
@@ -704,7 +729,10 @@ not yet decompiled.
    Berry frame with the SE "busy" control frame. The service uses SE chunked protobuf; the Berry
    SPP path remains documented for the alternate transport.
 7. ~~Whether the watch answers id 17 `bindCheck`~~ — answered: it answers `NOT_SUPPORT`, on a
-   bonded and an unbonded link, so the SE account group is not implemented on this firmware.
+   bonded and an unbonded link, so the SE account group is not implemented on this firmware. What
+   that does **not** answer is whether the rest of the SE command set works; OpenFit now probes ids
+   32 (device info) and 33 (battery) before falling back to ZhBracelet, and the answer picks the
+   route for heart rate.
 8. ~~Whether account commands need an Android system bond~~ — answered for SE: no. The bond was
    obtained and the SE account commands still answered `NOT_SUPPORT`, while the classic socket
    stayed unusable, which points at an LE-only link rather than a permission problem.
