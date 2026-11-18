@@ -12,7 +12,7 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 - Feature branch: `feature/ble-connection-handling`.
 - Existing PR: [#2, Improve BLE watch connection handling](https://github.com/NullDonut/openfit/pull/2), targeting `feat/openfit-android-starter`.
 - CI builds the debug APK; the latest green build before this SE change was
-  `openfit-debug-b982023`. CI on each push is green with 52 JVM unit tests.
+  `openfit-debug-b982023`. CI on each push is green with 57 JVM unit tests.
 - The protocol layer is compiled and tested locally with `javac` + JUnit 4.13.2 against JDK 21,
   and the whole app compiles against the API 35 `android.jar`. Local Gradle/Android SDK are
   still unavailable, so packaging and installation go through GitHub Actions; no physical
@@ -46,14 +46,15 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 
 ### Still unknown / not implemented
 
-- Which of the three shipped stacks (Berry, Ryeex, Realtek BBPro) the user's watch exposes; the
-  Berry profile is now fully documented in `PROTOCOL.md`, so a single GATT dump of the watch
-  would settle it.
+- Whether the watch accepts the SE id-17/id-18 account bind and returns
+  `bind_check_result=SUCCESS`; the transport is confirmed on hardware, the account reply is not
+  yet observed.
+- Whether the open BLE link needs an Android system bond for account commands. The vendor's SE
+  code path has no bond check (bonding belongs to the Berry classic-SPP path), so OpenFit keeps
+  bonding as an on-demand fallback only.
 - Proprietary Ryeex/VeryFit application-level authentication handshake, cipher inputs/key derivation, protocol opcodes, protobuf envelopes, framing/checksums, notification sequence, and health/sleep transfer (the RC4 cipher itself is decoded; see `PROTOCOL.md`).
-- Whether a successful Android bond alone allows this particular watch to expose useful services/data.
 - Whether the standard Heart Rate Service is present on this specific model; if not, OpenFit currently cannot read watch heart rate.
 - Proprietary NoiseFit QR provisioning; OpenFit’s QR flow only extracts a Bluetooth MAC address.
-- Physical pairing and authenticated communication tests.
 
 ### Safety and provenance boundary
 
@@ -66,9 +67,19 @@ The user authorized adding NoiseFit-related implementations and asked that findi
 
 - Independent app package `com.openfit.app`; Java native Android app; min SDK 26; compile/target 35; AGP 8.6.1, Gradle 8.9; Java compatibility 11; CI JDK 17.
 - BLE scan currently filters recognizable Noise/ColorFit names for convenience (not identity proof).
-- Connect flow now attempts system bonding before GATT connection, following observed NoiseFit app behavior.
-- GATT code only consumes standard Heart Rate Service `0x180D` / Measurement `0x2A37`; no proprietary writes are currently sent.
-- Read-only GATT diagnostics display discovered UUIDs and characteristic properties.
+- Connect flow is connect-first: it connects directly, retries transient GATT failures, and starts
+  Android system bonding only when the watch reports insufficient authentication/encryption.
+- On a watch exposing `16186f00`, the app enables all five characteristics' notifications,
+  negotiates MTU 247, and runs the vendor account bind over the SE ("Apricot") chunked-protobuf
+  transport: id 0 link greeting → id 16 binding status → id 17 bind check → id 18 bind result, or
+  id 19 token verification when already bound. Commands are announced and chunked at `MTU - 5`
+  bytes per chunk; inbound announces are acknowledged with `00 00 01 01 00 00` and the chunks are
+  reassembled into one `SEWear` protobuf.
+- The Berry SPP frame/bind implementation is retained in the protocol package as the documented
+  alternate transport, but it is not used on the GATT link.
+- Standard Heart Rate Service `0x180D` / Measurement `0x2A37` is still the only heart-rate source.
+- Read-only GATT diagnostics display discovered UUIDs and characteristic properties, and the
+  `PAIRING LOG` records TX/RX hex, chunk counts and the bind state.
 - QR accepts a Bluetooth MAC only; no NoiseFit proprietary QR payload parser.
 - Local dashboard has Home/Health/Devices/Sleep tabs, local received heart-rate summaries, and manually entered sleep duration; no cloud/account/analytics.
 
@@ -114,13 +125,45 @@ Verified in this pass (details and wire tables in `PROTOCOL.md`):
   permutation from `.rodata`, keyed by the first array argument; `mixA`/`mixB` are byte
   permutations of MAC + 16-bit pid; `regA/regB/logA/logB/logC` are hard-coded ints.
 - Implemented independently in `app/src/main/java/com/openfit/app/protocol/`
-  (`BerryFrame`, `BerryBinding`, `BerryFrameReader`, `BerrySewear`, `BerryProfile`) with 28
-  unit tests, verified locally with javac + JUnit 4.13.2 and wired into `MainActivity` (MTU,
-  chunked writes, reassembly, bind state machine, per-watch token). The bind write path is not
-  yet validated against a watch.
+  (`BerryFrame`, `BerryBinding`, `BerryFrameReader`, `BerrySewear`, `BerryProfile`), verified
+  locally with javac + JUnit 4.13.2 and wired into `MainActivity` (MTU, chunked writes,
+  reassembly, bind state machine, per-watch token).
 
-Still open: whether this watch answers the Berry bind over GATT or expects classic SPP; inner
-field numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
+Still open at that point: whether this watch answers the Berry bind over GATT or expects classic
+SPP; inner field numbers of `SEFitness`/`SESettingMenu`/`SEFactory`; Ryeex opcodes and handshake.
+
+## 2026-11-17/18 SE (Apricot) transport instead of Berry SPP
+
+The first `16186f00` write attempt (build `b982023`) answered a Berry frame with
+`00 00 01 02 00 00`, the SE stack's busy control frame. That re-opened `BluetoothService`
+(`com.zhapp.ble`, `DEVICE_PROTOCOL_APRICOT`) and produced:
+
+- Control frames `00 00 <code BE16> <payload LE16>` (`0100` received, `0101` ready, `0102` busy,
+  `0103` done, `0105 n` resend).
+- Outbound announce `00 00 00 00 <count LE16>` on `6f02`, then `<index LE16> <chunk>` × count;
+  chunk data `MTU - 5` bytes (`k = MTU - 3`).
+- Inbound announce on `6f01`, phone replies `00 00 01 01 00 00`, then indexed chunks, then
+  `00 00 01 00 00 00`.
+- The first command is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+
+Account bind ids (`SEFunctionId`): 16 binding status, 17 `bind_check{device_verify:true}`,
+18 `bind_result{user_id}`, 19 `verify_user_number`, 23 unbind. The vendor sends id 16 on connect,
+then 17 (unbound) or 19 (already bound), then 18 with a token shaped like
+`(UUID + random + userId).substring(30)`. Note that `SEVerifyResult.verify_result_type` (reply to
+id 19) is a **bool** where true means verified; the bind result fields are enums.
+
+Device test of build `cd68343` (Android 16, `D4:27:1D:30:44:9B`): MTU 247, notifications on all
+five chars, greeting and id 16 announced and chunked, watch replied `01 01` ready, `01 02` busy,
+then `01 00` received — but no SEWear reply. Root cause: the vendor ships **two** `SEWear`
+schemas. The BLE one is `com.zh.ble.wear.protobuf.SEWear` (`id=1`, `change_mtu=2`,
+`bind_account=3`, `ble_connect_parmeter_config=99`, `error_code=100`, no type). The Berry SPP one
+is `com.zh.ble.sa_wear.protobuf.SEWear` (`type=1`, `id=2`, `bind_account=4`). OpenFit had encoded
+id 16 with the SPP numbers (`10 10`), which the watch read as `change_mtu=16`; the correct bytes
+are `08 10`. The two codecs are now separate (`BerrySewear` for SPP, `SeWear` for BLE), with 57
+protocol unit tests (all passing locally) and a successful full-app compile against API 35.
+
+The `PAIRING LOG` on device now shows the exact TX/RX frames, so the next run will distinguish
+"watch did not answer" from "watch refused the account" directly.
 
 ## Project notes
 

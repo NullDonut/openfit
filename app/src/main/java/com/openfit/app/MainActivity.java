@@ -41,7 +41,7 @@ import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.journeyapps.barcodescanner.CaptureActivity;
 import com.openfit.app.protocol.BerryProfile;
-import com.openfit.app.protocol.BerrySewear;
+import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SePairing;
 
@@ -1235,9 +1235,9 @@ public final class MainActivity extends Activity {
     }
 
     private void onSeMessage(byte[] message) {
-        int id = BerrySewear.readId(message);
+        int id = SeWear.readId(message);
         logPairing("SEWear · " + SePairing.describe(message) + " · " + hex(message));
-        int error = BerrySewear.readErrorCode(message);
+        int error = SeWear.readErrorCode(message);
         if (error != 0) logBle("Watch reported error " + error + " for command " + id);
         if (id == SePairing.FUNCTION_MTU) return; // id-0 greeting reply, not part of the bind
         if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS) {
@@ -1296,9 +1296,15 @@ public final class MainActivity extends Activity {
             return;
         }
         logPairing("bind check · " + check);
-        logBle("Watch bind check · " + SePairing.resultLabel(check.result));
+        logBle("Watch bind check · " + SePairing.resultLabel(check.result)
+                + (check.deviceVerify ? " · device verify" : " · no device verify"));
         if (check.result != SePairing.BIND_RESULT_SUCCESS) {
             finishPairing(false, SePairing.resultLabel(check.result));
+            return;
+        }
+        if (!check.deviceVerify) {
+            // The vendor SDK aborts the bind when the watch does not confirm the device check.
+            finishPairing(false, "the watch did not confirm this phone");
             return;
         }
         String token = openFitToken(lastConnectAddress);
@@ -1315,7 +1321,7 @@ public final class MainActivity extends Activity {
         if (sePairFinished) return;
         cancelSeStepTimeout();
         int type = SePairing.bindResultType(message);
-        int error = BerrySewear.readErrorCode(message);
+        int error = SeWear.readErrorCode(message);
         if (type < 0) {
             // Some firmware answers id 18 with only an errorCode; NO_ERROR means accepted.
             if (error == 0) finishPairing(true, "vendor bind confirmed");
@@ -1333,9 +1339,14 @@ public final class MainActivity extends Activity {
     private void onSeVerifyUser(byte[] message) {
         if (sePairFinished) return;
         cancelSeStepTimeout();
-        int type = SePairing.verifyResultType(message);
-        if (type <= 0) finishPairing(true, "saved account verified");
-        else finishPairing(false, "watch rejected the saved account (" + type + ")");
+        Boolean verified = SePairing.verifyResult(message);
+        if (verified == null) {
+            finishPairing(false, "watch sent an unreadable verify reply");
+        } else if (verified) {
+            finishPairing(true, "saved account verified");
+        } else {
+            finishPairing(false, "watch rejected the saved account");
+        }
     }
 
     private void scheduleSeStepTimeout() {

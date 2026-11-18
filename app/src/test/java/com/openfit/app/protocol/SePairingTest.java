@@ -17,39 +17,46 @@ public class SePairingTest {
                 SePairing.connectParameterConfig());
     }
 
-    @Test public void bindingStatusRequestIsWearId16() {
-        assertArrayEquals(new byte[] {0x10, 0x10}, SePairing.bindingStatusRequest());
+    @Test public void bindingStatusRequestUsesSewearIdOne() {
+        // SEWear.id is field 1 in the SE schema; the old Berry encoding (10 10) was change_mtu=16.
+        assertArrayEquals(new byte[] {0x08, 0x10}, SePairing.bindingStatusRequest());
+        assertEquals(16, SeWear.readId(SePairing.bindingStatusRequest()));
     }
 
     @Test public void bindCheckRequestAsksTheWatchToVerifyThisPhone() {
         assertArrayEquals(new byte[] {
-                0x10, 0x11,             // SEWear.id = 17
-                0x22, 0x04,             // bindAccount, 4 bytes
-                0x12, 0x02,             // bindCheck, 2 bytes
-                0x08, 0x01              // deviceVerify = true
+                0x08, 0x11,             // SEWear.id = 17
+                0x1A, 0x04,             // bind_account (3), 4 bytes
+                0x12, 0x02,             // bind_check (2), 2 bytes
+                0x08, 0x01              // device_verify = true
         }, SePairing.bindCheckRequest());
     }
 
     @Test public void bindResultCarriesOnlyTheUserId() {
         assertArrayEquals(new byte[] {
-                0x10, 0x12,             // SEWear.id = 18
-                0x22, 0x07,             // bindAccount, 7 bytes
-                0x1A, 0x05,             // bindResult, 5 bytes
+                0x08, 0x12,             // SEWear.id = 18
+                0x1A, 0x07,             // bind_account, 7 bytes
+                0x1A, 0x05,             // bind_result (3), 5 bytes
                 0x12, 0x03, 'a', 'b', 'c'
         }, SePairing.bindResult("abc"));
     }
 
+    @Test public void bindResultKeepsTheEmptyNestedMessage() {
+        assertArrayEquals(new byte[] {0x08, 0x12, 0x1A, 0x02, 0x1A, 0x00},
+                SePairing.bindResult(""));
+    }
+
     @Test public void verifyUserNumberUsesFieldSix() {
         assertArrayEquals(new byte[] {
-                0x10, 0x13,             // SEWear.id = 19
-                0x22, 0x05,             // bindAccount, 5 bytes
+                0x08, 0x13,             // SEWear.id = 19
+                0x1A, 0x05,             // bind_account, 5 bytes
                 0x32, 0x03, 'a', 'b', 'c'
         }, SePairing.verifyUserNumber("abc"));
     }
 
     @Test public void bindCheckKeyVariantCarriesTheRandomKey() {
         byte[] message = SePairing.bindCheckKeyRequest("key");
-        assertEquals(17, BerrySewear.readId(message));
+        assertEquals(17, SeWear.readId(message));
         SePairing.BindCheck check = SePairing.bindCheck(message);
         assertNotNull(check);
         assertEquals("key", check.randomKey);
@@ -62,12 +69,13 @@ public class SePairingTest {
         byte[] bound = reply(16, account(1, 1));
         assertEquals(Boolean.FALSE, SePairing.bindingStatus(notBound));
         assertEquals(Boolean.TRUE, SePairing.bindingStatus(bound));
-        assertNull(SePairing.bindingStatus(new byte[] {0x10, 0x10}));
+        assertNull(SePairing.bindingStatus(new byte[] {0x08, 0x10}));
     }
 
     @Test public void bindCheckDecodesTheWatchDescription() {
         ByteArrayOutputStream check = new ByteArrayOutputStream();
-        field(check, 3, 0);                                  // bindCheckResult = SUCCESS (omitted)
+        field(check, 1, 1);                                  // device_verify = true
+        field(check, 3, 0);                                  // bind_check_result = SUCCESS (omitted)
         string(check, 5, "D4:27:1D:30:44:9B");
         string(check, 6, "SN123");
         string(check, 7, "1.2.3");
@@ -76,6 +84,7 @@ public class SePairingTest {
 
         SePairing.BindCheck decoded = SePairing.bindCheck(message);
         assertNotNull(decoded);
+        assertTrue(decoded.deviceVerify);
         assertEquals(SePairing.BIND_RESULT_SUCCESS, decoded.result);
         assertEquals("D4:27:1D:30:44:9B", decoded.mac);
         assertEquals("SN123", decoded.serialNumber);
@@ -89,7 +98,7 @@ public class SePairingTest {
         assertNotNull(refused);
         assertEquals(SePairing.BIND_RESULT_REFUSE, refused.result);
 
-        assertNull(SePairing.bindCheck(new byte[] {0x10, 0x11}));
+        assertNull(SePairing.bindCheck(new byte[] {0x08, 0x11}));
         assertNull(SePairing.bindCheck(new byte[] {1, 2, 3}));
     }
 
@@ -97,14 +106,16 @@ public class SePairingTest {
         assertEquals(0, SePairing.bindResultType(reply(18, accountWith(3, new byte[0]))));
         assertEquals(SePairing.BIND_RESULT_REFUSE, SePairing.bindResultType(
                 reply(18, accountWith(3, new byte[] {0x08, 0x01}))));
-        assertEquals(-1, SePairing.bindResultType(new byte[] {0x10, 0x12}));
+        assertEquals(-1, SePairing.bindResultType(new byte[] {0x08, 0x12}));
     }
 
-    @Test public void verifyResultDecodesTheEnum() {
-        assertEquals(0, SePairing.verifyResultType(reply(19, accountWith(7, new byte[0]))));
-        assertEquals(1, SePairing.verifyResultType(
+    @Test public void verifyResultIsABoolAndTrueMeansVerified() {
+        assertEquals(Boolean.FALSE, SePairing.verifyResult(reply(19, accountWith(7, new byte[0]))));
+        assertEquals(Boolean.TRUE, SePairing.verifyResult(
                 reply(19, accountWith(7, new byte[] {0x08, 0x01}))));
-        assertEquals(-1, SePairing.verifyResultType(new byte[] {0x10, 0x13}));
+        assertEquals(Boolean.FALSE, SePairing.verifyResult(
+                reply(19, accountWith(7, new byte[] {0x08, 0x00}))));
+        assertNull(SePairing.verifyResult(new byte[] {0x08, 0x13}));
     }
 
     @Test public void describeNeverThrowsOnMalformedReplies() {
@@ -112,10 +123,11 @@ public class SePairingTest {
         assertNotNull(SePairing.describe(new byte[] {(byte) 0xff, (byte) 0xff}));
         assertTrue(SePairing.describe(reply(17, accountWith(2,
                 new byte[] {0x18, 0x01}))).contains("refused"));
+        assertTrue(SePairing.describe(reply(16, account(1, 1))).contains("bound=true"));
     }
 
     private static byte[] reply(int id, byte[] account) {
-        return BerrySewear.wearWithMessage(0, id, BerrySewear.FIELD_BIND_ACCOUNT, account);
+        return SeWear.wearMessage(id, SeWear.FIELD_BIND_ACCOUNT, account);
     }
 
     private static byte[] account(int field, int value) {
@@ -126,21 +138,16 @@ public class SePairingTest {
 
     private static byte[] accountWith(int field, byte[] body) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        BerrySewear.writeTag(out, field, 2);
-        BerrySewear.writeVarint(out, body.length);
-        out.write(body, 0, body.length);
+        SeWear.writeMessage(out, field, body);
         return out.toByteArray();
     }
 
     private static void field(ByteArrayOutputStream out, int field, int value) {
-        BerrySewear.writeTag(out, field, 0);
-        BerrySewear.writeVarint(out, value);
+        SeWear.writeTag(out, field, 0);
+        SeWear.writeVarint(out, value);
     }
 
     private static void string(ByteArrayOutputStream out, int field, String value) {
-        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        BerrySewear.writeTag(out, field, 2);
-        BerrySewear.writeVarint(out, bytes.length);
-        out.write(bytes, 0, bytes.length);
+        SeWear.writeMessage(out, field, value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 }

@@ -7,10 +7,10 @@ import java.util.Arrays;
  *
  * <p>This is a different transport from the Berry classic-SPP link. Both directions carry a
  * 2-byte little-endian packet number followed by a payload slice. Packet number {@code 0} is
- * reserved for six-byte control frames: {@code 00 00 01 <code> <payload:2 LE>}.
+ * reserved for six-byte control frames: {@code 00 00 <code:2 BE> <payload:2 LE>}.
  *
  * <pre>
- * phone -> watch  00 00 00 00 &lt;chunkCount LE16&gt; 00     announce a transfer
+ * phone -> watch  00 00 00 00 &lt;chunkCount LE16&gt;       announce a transfer
  * watch -> phone  00 00 01 01 00 00                  ready, send the chunks
  * phone -> watch  &lt;index LE16&gt; &lt;chunk&gt;               one chunk (index starts at 1)
  * watch -> phone  00 00 01 03 00 00                  transfer complete

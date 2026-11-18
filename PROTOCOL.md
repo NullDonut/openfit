@@ -1,10 +1,13 @@
 # OpenFit protocol notes (from NoiseFit 5.5.0 static analysis)
 
-Status: **protocol recovered statically; SE transport identified on hardware.** The GATT layout and
-notification setup have been validated against a physical ColorFit Ultra Buzz. The watch does not
-speak the Berry SPP frames on `16186f00`; it uses the vendor's generic SE ("Apricot") chunked
-protobuf transport. That transport and the `SEFunctionId` account bind (16 → 17 → 18, or 19 when
-already bound) are implemented in OpenFit. A physical-device test of the bind is still pending.
+Status: **SE transport confirmed on hardware; account bind under test.** The GATT layout,
+notification setup, MTU negotiation and the announce/ready/chunk transport have been validated
+against a physical ColorFit Ultra Buzz. The watch does not speak the Berry SPP frames on
+`16186f00`; it uses the vendor's generic SE ("Apricot") chunked protobuf transport. The
+`SEFunctionId` account bind (16 → 17 → 18, or 19 when already bound) is implemented in OpenFit.
+The first on-device run exposed an envelope-schema mix-up (Berry `sa_wear` field numbers on the
+SE message); that is fixed, and the watch's reply to the account bind is still pending a new
+physical test.
 
 ## Provenance
 
@@ -54,8 +57,12 @@ Conclusions:
   appear in the Berry or Ryeex sources and is not used.
 - No proprietary write was sent during the GATT dump above. A later write attempt proved that
   `16186f00` speaks the SE chunked-protobuf transport, not the Berry SPP frames. OpenFit now
-  implements the SE transport and the id 16/17/18 account bind on this service; that write path
-  still needs a physical-device confirmation.
+  implements the SE transport and the id 16/17/18 account bind on this service.
+- A follow-up run (same phone/watch, MTU 247, build `cd68343`) confirmed the transport: the watch
+  answered the announce with `01 01` (ready), accepted the chunk with `01 00` (received), and
+  produced `01 02` (busy) when the next command was announced too early. The first request used
+  the Berry SPP field numbers (`10 10`), which the watch read as `change_mtu=16`; the corrected
+  BLE envelope (`08 10`) is in the current build. The account reply itself is still unobserved.
 
 
 ## Berry profile (primary candidate)
@@ -107,7 +114,8 @@ Control frame: `00 00 <code:2 BE> <payload:2 LE>`. The codes handled by
 
 Outbound command (`BluetoothService.g` CMD thread, `G()`, `c(int)`):
 
-1. `6f02` ← `00 00 00 00 <chunkCount LE16> 00` (announce).
+1. `6f02` ← `00 00 00 00 <chunkCount LE16>` (announce; the vendor writes the two-byte
+   count as `<count lo>` then `00`, so counts stay below 256).
 2. `6f02` ← `00 00 01 01 00 00` from the watch (ready).
 3. `6f02` ← `<index LE16> <chunk>` for index 1..N. Chunk data is `MTU - 5` bytes
    (`k = MTU - 3`, data `k - 2`) and `chunkCount = ceil(length / (MTU - 5))`.
@@ -116,7 +124,7 @@ Outbound command (`BluetoothService.g` CMD thread, `G()`, `c(int)`):
 
 Inbound reply (`BluetoothService.i`, handler for `6f01`):
 
-1. `6f01` → phone: `00 00 00 00 <count LE16> 00` (announce).
+1. `6f01` → phone: `00 00 00 00 <count LE16>` (announce).
 2. phone → `6f01`: `00 00 01 01 00 00`.
 3. `6f01` → phone: `<index LE16> <chunk>` × N.
 4. phone → `6f01`: `00 00 01 00 00 00`; the concatenated chunks are one `SEWear` protobuf.
@@ -124,6 +132,42 @@ Inbound reply (`BluetoothService.i`, handler for `6f01`):
 `16186f02` is both the write channel and the channel that carries the control frames; `6f03`–`6f05`
 use the same announce/chunk scheme for their own payloads. The first command after notifications
 is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+
+#### SE `SEWear` envelope (different schema from the Berry SPP one)
+
+The vendor ships **two** protobuf packages with a `SEWear` message. The BLE service uses
+`com.zh.ble.wear.protobuf.SEWear`; the classic-SPP Berry path uses
+`com.zh.ble.sa_wear.protobuf.SEWear`. Mixing their field numbers silently changes the meaning of
+a command, which is exactly what happened in the first on-device test: `10 10`
+(`sa_wear` encoding of id 16) was parsed by the watch as `change_mtu=16`, acknowledged with
+`00 00 01 00 00 00` and otherwise ignored. The correct id-16 request is `08 10`.
+
+| Field | Number | Notes |
+|---|---|---|
+| `id` | 1 | `SEFunctionId` |
+| `change_mtu` | 2 | |
+| `bind_account` | 3 | `SEBindAccount` |
+| `device` | 4 | |
+| `system_time` | 5 | |
+| `user_settings` | 6 | |
+| `watch_face` | 7 | |
+| `sporting` | 8 | |
+| `fitness` | 9 | |
+| `weather` (`weasether` in the generated code) | 10 | |
+| `large_file` | 11 | |
+| `micro_function` | 12 | |
+| `notification` | 13 | |
+| `music` | 14 | |
+| `setting_menu` | 15 | |
+| `factory` | 16 | |
+| `aleax` | 17 | |
+| `ble_connect_parmeter_config` | 99 | |
+| `error_code` | 100 | `CommonProtos.SEErrorCode` |
+
+The BLE schema has **no `type` field**. `SEWear.bind_account` and the other payloads are message
+fields, so an explicitly-set but empty payload still serializes as tag + length 0 (for example
+id 18 with an empty result is `08 12 1A 00`). The `sa_wear` schema instead has `type=1`,
+`id=2`, `bind_account=4`; OpenFit keeps that codec separately in `BerrySewear` for the SPP path.
 
 #### Account bind over SE (`SEFunctionId` + `SEBindAccount`)
 
@@ -150,9 +194,25 @@ From `ControlBleTools` (`bindDevice`, `requestDeviceBindState`, `sendAppBindResu
 `SEBindResultType`/`SEBindCheckResult`: 0=SUCCESS, 1=REFUSE, 2=OVER_TIME,
 3=VERIFICATION_FAILED (the last only in `SEBindCheckResult`). `SEPhoneType`: ANDROID=0, IOS=1.
 
+`SEVerifyResult`: `verify_result_type=1` is a **bool** and `binding_status=2` is a bool.
+`verify_result_type=true` means the token was accepted; the vendor SDK converts false to a
+failure state. It is not an enum, unlike the bind result fields.
+
+Exact phone bytes: id 16 `08 10`; id 17 `08 11 1A 04 12 02 08 01`; id 18
+`08 12 1A <len> 1A <len> 12 <len> <user id>`; id 19 `08 13 1A <len> 32 <len> <token>`.
+
 NoiseFit on connect: id 16; if not bound → id 17 with `device_verify:true`; on
 `bind_check_result=SUCCESS` → id 18 with a random token; if already bound → id 19 with the token
-from its local database. OpenFit follows the same order and stores the token per watch address.
+from its local database. Its token is `(UUID + random(10..9999) + userId).substring(30)`; OpenFit
+uses the same shape with a local placeholder user id and stores it per watch address.
+
+The vendor requires `device_verify:true` in the id-17 reply before it sends id 18; OpenFit now
+does the same.
+
+**On-device status (2026-11-17, build `cd68343`):** the watch acknowledged the SE transport
+(announce → `01 01` ready, chunks → `01 00` received) but did not answer id 16 because the request
+was encoded with the `sa_wear` field numbers. That encoding bug is fixed; the next build tests
+whether the watch answers `08 10` with `bind_account{request_binding_status}`.
 
 ### Berry SPP frame format (alternate transport)
 
@@ -357,4 +417,8 @@ not yet decompiled.
    SPP path remains documented for the alternate transport.
 7. Whether the watch accepts id 17 `bindCheck{deviceVerify:true}` from a non-vendor client and
    returns `bindCheckResult=SUCCESS`, and whether it accepts the id-18 token produced by OpenFit.
-   This is the remaining physical-device test.
+   The transport and the correct envelope are confirmed; this account reply is the remaining
+   physical-device test.
+8. Whether the watch requires an Android system bond for account commands. The vendor's SE code
+   path contains no bond check, while its Berry classic-SPP path does, so OpenFit keeps bonding as
+   an on-demand fallback.

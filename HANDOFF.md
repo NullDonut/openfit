@@ -1,10 +1,11 @@
 # OpenFit handoff — Noise/ColorFit protocol reverse engineering
 
-Last updated: 2026-11-17
+Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (SE/Apricot GATT transport + id 16/17/18/19
-account bind + 52 unit tests). The previous CI build `openfit-debug-b982023` is the one that
-proved the watch answers Berry frames with the SE busy control frame.
+Latest code commit at time of writing: this commit (SE/Apricot transport with the correct
+`com.zh.ble.wear.protobuf.SEWear` envelope + id 16/17/18/19 account bind + 57 unit tests).
+Build `cd68343` is the one that proved the transport end to end on the watch: announce → `01 01`
+ready, chunks → `01 00` received. It also exposed the envelope-schema mix-up that is fixed here.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -17,7 +18,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 52 JUnit tests for the Berry frames, SE transport, bind encoders and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 57 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
 
 ---
 
@@ -355,12 +356,24 @@ Control frames are `00 00 <code:2 BE> <payload:2 LE>`:
 | `0x0103` | `00 00 01 03 00 00` | transfer complete |
 | `0x0105` | `00 00 01 05 <n LE16>` | resend chunk `n` |
 
-Outbound: announce `00 00 00 00 <count LE16> 00` on `6f02` → wait for ready → `<index LE16>
+Outbound: announce `00 00 00 00 <count LE16>` on `6f02` → wait for ready → `<index LE16>
 <chunk>` × count on `6f02` → wait for done. Inbound replies: announce on `6f01` → phone answers
 `00 00 01 01 00 00` on `6f01` → indexed chunks → phone answers `00 00 01 00 00 00` and parses the
 concatenation as one `SEWear`. Chunk data is `MTU - 5` bytes; count is `ceil(length / (MTU - 5))`.
 
 The first command after notifications is `SEWear{id=0, ble_connect_parmeter_config{}}` = `9A 06 00`.
+
+**Two different `SEWear` schemas exist.** The BLE service uses
+`com.zh.ble.wear.protobuf.SEWear`: `id=1`, `change_mtu=2`, `bind_account=3`, payloads 4..17,
+`ble_connect_parmeter_config=99`, `error_code=100`, and **no type field**. The classic-SPP Berry
+path uses `com.zh.ble.sa_wear.protobuf.SEWear`: `type=1`, `id=2`, `bind_account=4`.
+
+The first device build sent the `sa_wear` byte sequence `10 10` for id 16. The watch read it as
+`change_mtu=16`, acked with `01 00` and did nothing, which looked like a silent account refusal.
+The corrected id-16 request is `08 10`; id 17 is `08 11 1A 04 12 02 08 01`; id 18 is
+`08 12 1A <len> 1A <len> 12 <len> <user id>`; id 19 is `08 13 1A <len> 32 <len> <token>`.
+The two codecs are kept apart in `BerrySewear` (SPP) and `SeWear` (BLE).
+
 Account bind ids (`SEFunctionId`) and bodies (`BindAccountProtos`):
 
 | Id | Phone message | Watch reply |
@@ -376,7 +389,8 @@ Account bind ids (`SEFunctionId`) and bodies (`BindAccountProtos`):
 8 classic_bluetooth_status. `SEBindCheck`: 1 device_verify, 2 bind_random_key, 3 bind_check_result,
 4 device_number, 5 mac, 6 serial_number, 7 firmware_version, 8 device_name. `SEBindResult`:
 1 bind_result_type, 2 user_id, 3 phone_type. Result enum: 0 SUCCESS, 1 REFUSE, 2 OVER_TIME,
-3 VERIFICATION_FAILED (only bind check). Phone type: ANDROID 0, IOS 1.
+3 VERIFICATION_FAILED (only bind check). Phone type: ANDROID 0, IOS 1. `SEVerifyResult`:
+`verify_result_type=1` is a **bool** (true = accepted) and `binding_status=2` is a bool.
 
 Vendor order: id 16; if not bound → id 17 `device_verify:true`; on SUCCESS → id 18 with a random
 token; if already bound → id 19 with the stored token. OpenFit follows this and persists the token
@@ -447,7 +461,8 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
 | `app/src/main/java/com/openfit/app/protocol/BerryFrameReader.java` | Reassembles frames from split notifications, skips noise, consumes 8-byte acks |
-| `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Minimal proto3 writer/reader for the SEWear envelope, nested-field helpers, error code, connect-parameter greeting |
+| `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Proto3 codec for the Berry SPP `sa_wear.SEWear` envelope (`type=1`, `id=2`) |
+| `app/src/main/java/com/openfit/app/protocol/SeWear.java` | Proto3 codec for the BLE `wear.SEWear` envelope (`id=1`, `bind_account=3`, greeting, error code) |
 | `app/src/main/java/com/openfit/app/protocol/SeGatt.java` | SE transport: announce, indexed chunks, control frames, MTU chunk size, incoming transfer reassembler |
 | `app/src/main/java/com/openfit/app/protocol/SePairing.java` | SE account bind: id 16/17/18/19 builders, `SEBindCheck`/`SEBindResult`/`SEVerifyResult` parsers |
 | `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | Berry and Ryeex GATT UUID constants and profile detection |
@@ -455,10 +470,11 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/BerryBindingTest.java` | 11 tests: `UserIdBean` layout/truncation, token rule, protocol/device-info parsing, status labels |
 | `app/src/test/java/com/openfit/app/protocol/BerryFrameReaderTest.java` | 6 tests: split notifications, ack consumption, leading noise, reset |
 | `app/src/test/java/com/openfit/app/protocol/SeGattTest.java` | 9 tests: chunk math, announce/control golden bytes, packet prefix, out-of-order transfer reassembly |
-| `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 12 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
+| `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 13 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
+| `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (52 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (57 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -535,11 +551,12 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the SE bind on hardware.** The previous APK proved the transport; this APK is the
-   first to send SE account commands. Watch the status line and the `PAIRING LOG` for
-   `inbound transfer`, `control ready`, `bind check`, and `bind result`. If id 16/17 stay silent,
-   the log distinguishes a transport failure (no READY/announce) from an account refusal. Do not
-   add further write types until each step is confirmed.
+8. **Validate the SE bind on hardware.** Build `cd68343` proved the transport but encoded id 16
+   with the Berry `sa_wear` field numbers (`10 10` = `change_mtu=16`). This APK sends the correct
+   `08 10` (and `08 11 ...` / `08 12 ...`). Watch the `PAIRING LOG` for `TX binding-status · 0810`,
+   then `inbound transfer`, `control ready`, `bind check`, `bind result`. If the reply never
+   arrives, try `bindCheckKeyRequest`; if no announce appears at all, the account path needs the
+   vendor's classic bond + SPP. Do not add further write types until each step is confirmed.
 
 ### Suggested order from here
 
