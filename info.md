@@ -257,6 +257,41 @@ SE `id-32` probe was dropped from the hot path: sending it back-to-back with id 
 `fee7` belongs to the bundled CRP stack (`com.crrepa.ble`) used by other Noise models; the Berry
 SDK does not use it, and the SE channel works without it.
 
+## 2026-11-18 10:57 — the announcement was rejected because GATT was still busy
+
+This run was still on the previous build (`bd6110e`): the log has no `device type` / `SDP records`
+/ `Berry-over-BLE channel` lines. It failed one step earlier than the 10:10 run, and the reason is
+worth recording because it was an app-side race, not a protocol answer:
+
+```
+10:57:47  Services: profile=Noise, 6 service(s), 5 notifiable
+10:57:52  Notification setup timed out
+10:57:52  Connection ready · profile=Noise · notifications enabled
+10:57:52  SE transport MTU negotiated · 247 bytes
+10:57:52  TX binding-status · 0810
+10:57:52  announce binding-status · 1 chunk(s)     (x5)
+10:57:52  SE account exchange failed · the watch rejected the command announcement
+```
+
+The watch answered nothing because nothing was sent. The notification budget was a single 5 s for
+all five CCCDs; it expired while a descriptor write was still outstanding, and the app started the
+SE exchange anyway. Android allows one GATT operation at a time, so every `writeCharacteristic` on
+`6f02` was rejected locally (the app's `writeSe` returned false five times in the same second).
+The pending descriptor callback then arrived at 10:57:57, which is why `Connection ready` appeared
+twice. Nothing was wrong with the SE channel or with the watch.
+
+Fixes in this build:
+
+* the notification budget is 15 s and the log now names each characteristic as its descriptor is
+  written (`notifications: enabling 6f02`, `notifications: enabled 6f02`);
+* `onConnectionReady` is idempotent, so a late descriptor callback cannot start a second setup;
+* a rejected announce is retried five times at 350 ms instead of 80 ms, which lets an in-flight
+  GATT operation finish.
+
+The same GATT report confirms the BLE Berry shape: `aa02` is `READ WRITE` (so the Berry channel
+uses acknowledged writes and always gets a callback), `aa03` is `READ WRITE NOTIFY`, and
+`16186f02` is `READ WRITE_NO_RESPONSE NOTIFY` as assumed.
+
 ## Project notes
 
 `CONTEXT.md` is the general project handoff. `HANDOFF.md` is the current single-page handoff for machine setup, tooling paths, host limits and next steps. `README.md` describes user-facing features and limitations. `PROTOCOL.md` holds the recovered wire protocol. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.

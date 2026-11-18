@@ -85,7 +85,7 @@ public final class MainActivity extends Activity {
     private static final long DISCOVERY_TIMEOUT_MS = 10_000L;
     private static final long RETRY_DELAY_MS = 1_000L;
     private static final long PAIRING_TIMEOUT_MS = 45_000L;
-    private static final long NOTIFICATION_TIMEOUT_MS = 5_000L;
+    private static final long NOTIFICATION_TIMEOUT_MS = 15_000L;
     private static final int PAIRING_MTU_REQUEST = 247;
     private static final long PAIRING_MTU_TIMEOUT_MS = 3_000L;
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
@@ -1014,7 +1014,11 @@ public final class MainActivity extends Activity {
         notificationTimeout = () -> {
             notificationTimeout = null;
             if (!connectionReady) {
-                logBle("Notification setup timed out");
+                // Pairing must not start while a descriptor write is still outstanding: Android
+                // allows one GATT operation at a time, so the first command write would be
+                // rejected and the bind would fail before it began.
+                logBle("Notification setup timed out · "
+                        + (notificationIndex + 1) + "/" + notificationQueue.size() + " attempted");
                 onConnectionReady(source);
             }
         };
@@ -1048,6 +1052,7 @@ public final class MainActivity extends Activity {
                 byte[] configuration =
                         (characteristic.getProperties() & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
                                 ? ENABLE_NOTIFICATION : ENABLE_INDICATION;
+                logBle("notifications: enabling " + shortUuid(characteristic.getUuid()));
                 int result;
                 if (Build.VERSION.SDK_INT >= 33) {
                     result = source.writeDescriptor(descriptor, configuration);
@@ -1077,10 +1082,18 @@ public final class MainActivity extends Activity {
         if (!CLIENT_CONFIGURATION.equals(descriptor.getUuid())) return;
         if (status != BluetoothGatt.GATT_SUCCESS) {
             notificationSetupFailed = true;
-            logBle("Descriptor write failed · GATT status " + status);
+            logBle("Descriptor write failed for "
+                    + shortUuid(descriptor.getCharacteristic() == null
+                            ? null : descriptor.getCharacteristic().getUuid())
+                    + " · GATT status " + status);
             if ((status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
                     || status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION)
                     && handleGattSecurityFailure(source.getDevice(), status)) return;
+        }
+        if (status == BluetoothGatt.GATT_SUCCESS) {
+            logBle("notifications: enabled "
+                    + shortUuid(descriptor.getCharacteristic() == null
+                            ? null : descriptor.getCharacteristic().getUuid()));
         }
         notificationIndex++;
         if (notificationIndex < notificationQueue.size()) {
@@ -1092,6 +1105,7 @@ public final class MainActivity extends Activity {
 
     private void onConnectionReady(BluetoothGatt source) {
         if (source != gatt) return;
+        if (connectionReady) return;
         cancelNotificationTimeout();
         connectionReady = true;
         logBle("Connection ready · profile=" + watchProfile
@@ -1219,13 +1233,16 @@ public final class MainActivity extends Activity {
         int count = SeGatt.chunkCount(write.data.length, seMtu);
         logPairing("announce " + write.label + " · " + count + " chunk(s)");
         if (!writeSe(SeGatt.announce(count))) {
+            logPairing("announce " + write.label + " rejected by the Bluetooth stack");
             if (++seAnnounceRetries > 4) {
                 seAwaitingReady = false;
                 seCurrentWrite = null;
                 finishPairing(false, "the watch rejected the command announcement");
                 return;
             }
-            handler.postDelayed(() -> sendSeAnnounce(write), 80L);
+            // A GATT operation from connection setup may still be in flight; Android rejects
+            // writes until it completes, so wait longer than the descriptor interval.
+            handler.postDelayed(() -> sendSeAnnounce(write), 350L);
             return;
         }
         scheduleSeAckTimeout();
