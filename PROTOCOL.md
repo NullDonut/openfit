@@ -1,13 +1,12 @@
 # OpenFit protocol notes (from NoiseFit 5.5.0 static analysis)
 
-Status: **SE transport confirmed on hardware; account bind under test.** The GATT layout,
-notification setup, MTU negotiation and the announce/ready/chunk transport have been validated
-against a physical ColorFit Ultra Buzz. The watch does not speak the Berry SPP frames on
-`16186f00`; it uses the vendor's generic SE ("Apricot") chunked protobuf transport. The
-`SEFunctionId` account bind (16 → 17 → 18, or 19 when already bound) is implemented in OpenFit.
-The first on-device run exposed an envelope-schema mix-up (Berry `sa_wear` field numbers on the
-SE message); that is fixed, and the watch's reply to the account bind is still pending a new
-physical test.
+Status: **Vendor pairing confirmed on hardware (2026-11-18).** The GATT layout, notification
+setup, MTU negotiation and the SE announce/ready/chunk transport have been validated against a
+physical ColorFit Ultra Buzz. The watch does not speak the Berry SPP frames on `16186f00`; it uses
+the vendor's generic SE ("Apricot") chunked protobuf transport. The `SEFunctionId` account bind
+(16 → 17 → 18, or 19 when already bound) is implemented in OpenFit but this firmware answers the
+whole account group with `NOT_SUPPORT`. The bind that this model accepts is the ZhBracelet
+("NavPlus") key-108 exchange on service `00000001`, confirmed on hardware on 2026-11-18.
 
 ## Provenance
 
@@ -42,21 +41,26 @@ connect-first: the watch showed as **not bonded** in Android while the GATT link
 | `00001801-…` (GATT) | — |
 | `0000aa01-…` | `aa02` (read/write), `aa03` (read/write/notify) |
 | `0000fee7-…` | `fea1` (read/write/notify), `fec9` (read) |
-| `16186f00-…-00807f9b34fb` (Berry) | `6f01`–`6f05`, all read/write-no-response + notify |
-| `00000001-…-00805f9b34fb` (Ryeex base) | `00000002` (read/write, write-no-response), `00000003` (read/write/notify) |
+| `16186f00-…-00807f9b34fb` (Berry/SE) | `6f01`–`6f05`, all read/write-no-response + notify |
+| `00000001-…-00805f9b34fb` (ZhBracelet/NavPlus) | `00000002` (read/write, write-no-response), `00000003` (read/write/notify) |
 
-Conclusions:
+Conclusions (updated after the successful 2026-11-18 bind):
 
-- Berry is the active stack: its five characteristics match §GATT roles exactly, and OpenFit
-  enabled notifications on all five without encryption or a challenge.
-- The Ryeex base service is also exposed, so service presence alone does not identify the stack;
-  Berry is preferred, as implemented.
-- Android bonding is not required for the Berry GATT link (the watch was not bonded during the
-  whole successful connection), which supports OpenFit's connect-first ordering.
-- `0000aa01` is a service the Berry SDK also knows (`0000aa01-0000aa05`). `0000fee7` does not
-  appear in the Berry or Ryeex sources; the only bundled match is the CRP stack
-  (`com.crrepa.ble`, `fee7`/`fee9`), which is used by other Noise models. It is not touched by
-  OpenFit and the watch's SE service works without it.
+- Service presence alone does not identify the protocol. This watch exposes **three** stacks: SE on
+  `16186f00`, Berry-over-BLE on `aa01`, and ZhBracelet on `00000001`. Only the last one answers
+  the vendor bind for this model.
+- SE accepts the chunked-protobuf transport and returns well-formed replies, but the whole
+  account group answers `NOT_SUPPORT` (`SEWear{id=16|0|17, error=1}`).
+- Berry-over-BLE (`aa02`/`aa03`) stays silent; classic SPP is impossible (`device type LE only`,
+  `SDP records none`).
+- The ZhBracelet bind on `00000002` succeeds: `AB 00 00 06 00 00 00 00 01 00 6C 00 01 00` is
+  answered with `AB 00 00 07 97 00 00 4E 03 00 34 00 02 00 01`, i.e. key 52, payload `00 01`,
+  type 0 and result 1. The watch then leaves pairing mode and shows its home screen.
+- Android bonding is not required for the GATT link (the watch was not bonded during the first
+  successful connection), which supports OpenFit's connect-first ordering.
+- `0000fee7` does not appear in the Berry, SE or ZhBracelet sources; the only bundled match is the
+  CRP stack (`com.crrepa.ble`, `fee7`/`fee9`), used by other Noise models. It is not touched by
+  OpenFit and the bind works without it.
 - No proprietary write was sent during the GATT dump above. A later write attempt proved that
   `16186f00` speaks the SE chunked-protobuf transport, not the Berry SPP frames. OpenFit now
   implements the SE transport and the id 16/17/18 account bind on this service.
@@ -69,7 +73,7 @@ Conclusions:
   MTU config; id 16 itself is still unanswered. See the on-device status note below.
 
 
-## Berry profile (primary candidate)
+## Berry profile (alternate transport)
 
 ### GATT roles
 
@@ -517,11 +521,26 @@ Order of commands on connect (from `h.onServicesDiscovered`): bind first, then `
 key 1) and 50 ms later `setUserInfo`. A bind therefore does not depend on time sync or profile
 data.
 
+### Validated on hardware (2026-11-18 11:49, build `b701e4a`)
+
+```
+11:49:04  notifications: enabled 00000003
+11:49:05  Connection ready · profile=Noise · notifications enabled
+11:49:22  TX zh-bind type 0 · AB0000060000000001006C000100
+11:49:25  RX 00000003 · AB0000079700004E03003400020001
+11:49:25  ZhBracelet bind info · type=0 result=1
+11:49:25  PAIRED  ZhBracelet bind accepted (type 0)
+```
+
+The watch left pairing mode and showed its home screen. The reply's bytes 4..7 are not zero
+(`97 00 00 4E`); they are not a standard CRC32 of the payload or of the frame, and the vendor
+parser ignores them for key 52. Treat them as session data. Requests still send zeros there.
+
 The RC4/"Ryeex" cipher documented below belongs to a different bundled SDK (`com.ryeex…`) that
 shares the same base UUIDs but is not the stack used for Ultra Buzz. The zhbraceletsdk frames are
 plaintext.
 
-## Ryeex profile (alternate family)
+## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
 Base service `00000001-0000-1000-8000-00805f9b34fb`, write `00000002-…`, read `00000003-…`.
 Payloads are encrypted with `BleCipher`, which is **RC4 with a fixed initial permutation**,
@@ -568,8 +587,9 @@ not yet decompiled.
 
 ## Open questions
 
-1. ~~Which profile the ColorFit Ultra Buzz exposes~~ — answered by the hardware dump above:
-   Berry (and the Ryeex base service) are present; Berry is selected.
+1. ~~Which profile the ColorFit Ultra Buzz exposes~~ — **answered 2026-11-18:** it exposes SE
+   (`16186f00`), Berry-over-BLE (`aa01`) and ZhBracelet (`00000001`). The vendor binds this model
+   through ZhBracelet; SE answers `NOT_SUPPORT` and Berry is silent.
 2. ~~Berry MTU/segmentation~~ — answered: the reference GATT stack (`BerryRingService`) requests
    MTU 517 and splits every outbound frame into `MTU - 3` chunks (20 when negotiation fails).
    OpenFit mirrors that with a 247-byte request and no-response write pacing.
@@ -587,7 +607,8 @@ not yet decompiled.
 8. ~~Whether account commands need an Android system bond~~ — answered for SE: no. The bond was
    obtained and the SE account commands still answered `NOT_SUPPORT`, while the classic socket
    stayed unusable, which points at an LE-only link rather than a permission problem.
-9. Which Berry bearer this watch actually uses. `aa01` (aa02 write / aa03 notify) is present and is
-   the Berry-Test shape minus aa05, so the build now writes the private cmd 2 there and accepts
-   replies on aa03. The `device type` and `SDP records` lines decide whether the classic socket is
-   even possible; a `DEVICE_TYPE_LE` watch with no SDP records rules SPP out permanently.
+9. ~~Which Berry bearer this watch actually uses~~ — answered: neither. `aa01` is present but
+   silent, and the watch is LE-only (`device type 2`, `SDP records none`), so classic SPP cannot
+   work. The Berry code remains as an alternate and is tried after ZhBracelet.
+10. Time sync (ZhBracelet key 1), user info and device-info commands after a successful bind; and
+    whether a reconnect makes the type-1 inquiry answer `result=1` (binding persisted).

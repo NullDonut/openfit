@@ -1,6 +1,6 @@
 # OpenFit / NoiseFit BLE Research Notes
 
-Last updated: 2026-11-17
+Last updated: 2026-11-18
 
 ## User request and current status
 
@@ -343,7 +343,24 @@ OpenFit now:
 
 `NavPlusQueryDeviceUnitsHandler`/`DataUnitConverter` special-case `COLORFIT_ULTRA_BUZZ`,
 `COLORFIT_VISION_BUZZ` and `COLORFIT_ULTRA_2`, which ties this stack to the user's watch.
-Still pending: a device run of this build; no interoperability claim until then.
+
+**Validated on the watch on 2026-11-18 11:49 (build `b701e4a`):**
+
+```
+11:49:04  notifications: enabled 00000003
+11:49:05  Connection ready · profile=Noise · notifications enabled
+11:49:22  TX zh-bind type 0 · AB0000060000000001006C000100
+11:49:25  RX 00000003 · AB0000079700004E03003400020001
+11:49:25  ZhBracelet bind info · type=0 result=1
+11:49:25  PAIRED  ZhBracelet bind accepted (type 0)
+```
+
+The watch left pairing mode and reached its home screen/clock. The reply carries `97 00 00 4E` in
+header bytes 4..7 (not a standard CRC32 of the payload or frame; the vendor parser ignores it for
+key 52). This is the first confirmed vendor-level pairing. SE still answers `NOT_SUPPORT` on the
+same link, so the SE prober can eventually be demoted or skipped for this model to save ~20 s.
+Still pending: confirming that the binding survives a reconnect (type 1 should then answer
+"Bound") and implementing the post-bind Zh commands (time sync, user info, device info).
 
 ## Project notes
 

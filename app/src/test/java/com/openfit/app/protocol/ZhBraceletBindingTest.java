@@ -45,6 +45,20 @@ public class ZhBraceletBindingTest {
         assertTrue(info.accepted());
     }
 
+    @Test public void parseBindInfoAcceptsTheObservedDeviceReply() {
+        // 2026-11-18 11:49, ColorFit Ultra Buzz, build b701e4a: the watch accepted the bind.
+        byte[] reply = {
+            (byte) 0xAB, 0x00, 0x00, 0x07, (byte) 0x97, 0x00, 0x00, 0x4E,
+            0x03, 0x00, 0x34, 0x00, 0x02, 0x00, 0x01
+        };
+        assertEquals(15, ZhBraceletBinding.declaredLength(reply));
+        ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(reply);
+        assertNotNull(info);
+        assertEquals(ZhBraceletBinding.TYPE_BIND, info.type);
+        assertEquals(1, info.result);
+        assertTrue(info.accepted());
+    }
+
     @Test public void parseBindInfoRejectsOtherFrames() {
         assertNull(ZhBraceletBinding.parseBindInfo(BIND_TYPE_0)); // phone-to-watch echo
         byte[] otherKey = {

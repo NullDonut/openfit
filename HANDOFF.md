@@ -609,37 +609,36 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 4. **Ryeex** application handshake, opcodes, protobuf envelopes.
 5. ~~Whether private `cmdId=3` (bind) needs a prior `UserIdBean`~~ **Answered:** yes — protocol
    (cmd 1), user id (cmd 2), bind (cmd 3, only if unbound), confirm (cmd 4).
-6. **Wiring:** `MainActivity` now performs connect → discovery → profile detection → notification
-   setup → MTU → id 0 → id 16 → id 17 → id 18 (or id 19). Still needed after the device test:
-   HR control and parsing of the remaining SE notifications.
+6. **Post-bind wiring:** `MainActivity` performs connect → discovery → profile detection →
+   notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind. The pairing path is done.
+   Next: send the ZhBracelet time sync and user info after a successful bind, and implement device
+   info/health commands.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the ZhBracelet bind on hardware.** The SE question is closed (ids 16/17 →
-   `NOT_SUPPORT`). The build now tries, in order:
-   ZhBracelet `00000002` bind (type 0 → type 1) → `aa01` BLE Berry → fail.
-   The classic SPP path has been deleted; it was impossible on this LE-only watch.
-
-   Watch the `PAIRING LOG` for these lines first, because they decide everything else:
+8. ~~**Validate the ZhBracelet bind on hardware.**~~ **Validated 2026-11-18 11:49 (build
+   `b701e4a`):**
 
    ```
-   ZhBracelet channel: 00000002 write, 00000003 notify
-   TX zh-bind type 0 · AB 00 00 06 00 00 00 00 01 00 6C 00 01 00
-   RX 00000003 · …
+   TX zh-bind type 0 · AB0000060000000001006C000100
+   RX 00000003 · AB0000079700004E03003400020001
    ZhBracelet bind info · type=0 result=1
    PAIRED  ZhBracelet bind accepted (type 0)
    ```
 
+   The watch left pairing mode and showed its home screen. Type 1 (inquiry) is now only the
+   reconnect path; verify it answers "Bound" after a restart. SE still answers `NOT_SUPPORT`, so
+   its ~20 s probe can be demoted for this model later.
+
 ### Suggested order from here
 
 ```
-install the Berry APK from CI
-    -> connect; read the PAIRING LOG and the device-type / SDP lines
-    -> if aa03 answers, the 2/3/4 bind completes on its own
-    -> if aa03 is silent, read the SDP result before touching SPP again
-    -> extract SEFactory / SESettingMenu / SEFitness inner fields (single-class jadx)
-    -> wire HR control + parse incoming SE replies
+pair on the watch (done, build b701e4a)
+    -> reconnect and check type 1 answers result=1 (binding persisted)
+    -> decompile the ZhBracelet time-sync (key 1) and user-info commands
+    -> wire post-bind sync: time, user info, device info
+    -> parse device data on 16186f00 for health screens
 ```
 
 The QR result-to-connection gap and QR on-device retest remain separate, lower-priority items.
