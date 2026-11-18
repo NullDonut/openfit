@@ -110,6 +110,7 @@ public final class MainActivity extends Activity {
     private static final String KEY_DEVICE_ADDRESS = "device_address";
     private static final String KEY_DEVICE_NAME = "device_name";
     private static final String KEY_WATCH_TOKEN_PREFIX = "watch_token_";
+    private static final String KEY_WATCH_BOUND_PREFIX = "watch_bound_";
     private static final String KEY_SLEEP_MINUTES = "sleep_minutes";
     private static final String KEY_SLEEP_DATE = "sleep_date";
     private static final String KEY_HEART_RATE = "heart_rate";
@@ -199,6 +200,7 @@ public final class MainActivity extends Activity {
     private boolean zhFinished;
     private int zhAttempts;
     private int zhWriteRetries;
+    private boolean zhRebindTried;
     private int zhLastType = -1;
     private Runnable zhStepTimeout;
 
@@ -1612,7 +1614,15 @@ public final class MainActivity extends Activity {
         logPairing("trying the ZhBracelet bind channel · write 00000002, notify 00000003");
         scanStatus.setText("●  PAIRING / WATCH LINK");
         connectionStatus.setText("Pairing · binding to " + connectedDeviceName + "…");
-        sendZhBind(ZhBraceletBinding.TYPE_BIND);
+        // Match the vendor: a first pairing asks to bind (type 0); a watch this app has bound
+        // before is only asked whether the binding still exists (type 1).
+        boolean alreadyBound = isWatchBound(lastConnectAddress);
+        logPairing(alreadyBound
+                ? "saved binding found · checking it (type 1)"
+                : "no saved binding · requesting a new bind (type 0)");
+        sendZhBind(alreadyBound
+                ? ZhBraceletBinding.TYPE_INQUIRY
+                : ZhBraceletBinding.TYPE_BIND);
         return true;
     }
 
@@ -1662,18 +1672,24 @@ public final class MainActivity extends Activity {
         zhStepTimeout = () -> {
             zhStepTimeout = null;
             if (zhFinished) return;
-            if (zhLastType == ZhBraceletBinding.TYPE_BIND) {
+            if (!zhRebindTried && zhLastType == ZhBraceletBinding.TYPE_BIND) {
                 // A silent first request can mean the watch is already bound and only answers an
                 // explicit inquiry; ask, rather than treating silence as a refusal.
                 logPairing("no reply for zh-bind type 0 · asking whether an app binding exists");
                 sendZhBind(ZhBraceletBinding.TYPE_INQUIRY);
                 return;
             }
-            logPairing("ZhBracelet bind channel silent · no reply to type 0 or type 1");
-            zhFinished = true;
-            if (!startBerryFallback("the ZhBracelet bind channel stayed silent")) {
-                reportPairing(false, "no vendor bind channel answered");
+            if (!zhRebindTried && zhLastType == ZhBraceletBinding.TYPE_INQUIRY
+                    && isWatchBound(lastConnectAddress)) {
+                // We had a binding, but the watch stayed silent about it; try a fresh bind once.
+                logPairing("no reply for the saved-binding check · re-requesting a bind");
+                setWatchBound(lastConnectAddress, false);
+                zhRebindTried = true;
+                sendZhBind(ZhBraceletBinding.TYPE_BIND);
+                return;
             }
+            logPairing("ZhBracelet bind channel silent · no reply");
+            failZh("the ZhBracelet bind channel stayed silent");
         };
         handler.postDelayed(zhStepTimeout, ZH_STEP_TIMEOUT_MS);
     }
@@ -1683,6 +1699,14 @@ public final class MainActivity extends Activity {
             handler.removeCallbacks(zhStepTimeout);
             zhStepTimeout = null;
         }
+    }
+
+    /** Ends the ZhBracelet attempt and moves on to Berry (or reports failure). */
+    private void failZh(String detail) {
+        if (zhFinished) return;
+        zhFinished = true;
+        cancelZhTimeout();
+        if (!startBerryFallback(detail)) reportPairing(false, detail);
     }
 
     /** Handles a notification from the ZhBracelet script channel ({@code 00000003}). */
@@ -1698,9 +1722,25 @@ public final class MainActivity extends Activity {
             }
             logPairing("ZhBracelet bind info · type=" + info.type + " result=" + info.result);
             if (info.accepted()) {
-                zhFinished = true;
+                // The vendor treats both "bind agreed" and "inquiry: bound" as success; the
+                // watch stores a single bound flag, not a phone identity.
+                setWatchBound(lastConnectAddress, true);
                 cancelZhTimeout();
+                zhFinished = true;
                 reportPairing(true, "ZhBracelet bind accepted (type " + info.type + ")");
+                return;
+            }
+            if (info.type == ZhBraceletBinding.TYPE_BIND && !zhRebindTried) {
+                logPairing("the watch refused the bind · asking whether an app binding exists");
+                sendZhBind(ZhBraceletBinding.TYPE_INQUIRY);
+                return;
+            }
+            if (info.type == ZhBraceletBinding.TYPE_INQUIRY
+                    && !zhRebindTried && isWatchBound(lastConnectAddress)) {
+                logPairing("the watch no longer reports this app's binding · re-requesting a bind");
+                setWatchBound(lastConnectAddress, false);
+                zhRebindTried = true;
+                sendZhBind(ZhBraceletBinding.TYPE_BIND);
                 return;
             }
             if (info.type == ZhBraceletBinding.TYPE_BIND) {
@@ -1708,11 +1748,7 @@ public final class MainActivity extends Activity {
             } else {
                 logPairing("the watch reports no app binding yet");
             }
-            zhFinished = true;
-            cancelZhTimeout();
-            if (!startBerryFallback("the watch refused the ZhBracelet bind")) {
-                reportPairing(false, "the watch refused the vendor bind");
-            }
+            failZh("the watch refused the ZhBracelet bind");
             return;
         }
     }
@@ -2094,6 +2130,22 @@ public final class MainActivity extends Activity {
                 .remove(KEY_WATCH_TOKEN_PREFIX + address).apply();
     }
 
+    /**
+     * Whether this app has completed the ZhBracelet bind for the watch. The vendor chooses the
+     * bind type from the same knowledge: type 1 on reconnect, type 0 only for a first pairing.
+     */
+    private boolean isWatchBound(String address) {
+        if (address == null) return false;
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_WATCH_BOUND_PREFIX + address, false);
+    }
+
+    private void setWatchBound(String address, boolean bound) {
+        if (address == null) return;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_WATCH_BOUND_PREFIX + address, bound).apply();
+    }
+
     @SuppressWarnings("MissingPermission")
     private boolean writeSe(byte[] value) {
         return writeGattValue(seWriteChar, value);
@@ -2274,6 +2326,7 @@ public final class MainActivity extends Activity {
         zhFinished = false;
         zhAttempts = 0;
         zhWriteRetries = 0;
+        zhRebindTried = false;
         zhLastType = -1;
         cancelBerryStepTimeout();
         berryReader.reset();

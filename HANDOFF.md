@@ -627,9 +627,11 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    PAIRED  ZhBracelet bind accepted (type 0)
    ```
 
-   The watch left pairing mode and showed its home screen. Type 1 (inquiry) is now only the
-   reconnect path; verify it answers "Bound" after a restart. SE still answers `NOT_SUPPORT`, so
-   its ~20 s probe can be demoted for this model later.
+   The watch left pairing mode and showed its home screen. The app now persists that result and
+   follows the vendor's reconnect form: type 1 (inquiry) when a saved binding exists, type 0 for a
+   first pairing, with one rebind if the inquiry reports unbound. Verify that a reconnect gets
+   `type=1 result=1`. SE still answers `NOT_SUPPORT`, so its ~20 s probe can be demoted for this
+   model later.
 
 ### Suggested order from here
 
