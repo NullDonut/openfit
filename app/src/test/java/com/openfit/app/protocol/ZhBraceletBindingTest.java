@@ -1,0 +1,76 @@
+package com.openfit.app.protocol;
+
+import org.junit.Test;
+
+import java.util.List;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+public class ZhBraceletBindingTest {
+    private static final byte[] BIND_TYPE_0 = {
+        (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x6C, 0x00, 0x01, 0x00
+    };
+
+    private static final byte[] BIND_TYPE_1 = {
+        (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x6C, 0x00, 0x01, 0x01
+    };
+
+    @Test public void bindRequestMatchesTheVendorSdkFrame() {
+        // com.zjw.zhbraceletsdk a.b(type) with key 108 (0x6C) and a one-byte payload.
+        assertArrayEquals(BIND_TYPE_0, ZhBraceletBinding.bindRequest(ZhBraceletBinding.TYPE_BIND));
+        assertArrayEquals(BIND_TYPE_1, ZhBraceletBinding.bindRequest(ZhBraceletBinding.TYPE_INQUIRY));
+    }
+
+    @Test public void declaredLengthFollowsTheHeaderField() {
+        assertEquals(14, ZhBraceletBinding.declaredLength(BIND_TYPE_0));
+        assertEquals(-1, ZhBraceletBinding.declaredLength(new byte[] {0x00, 0x00, 0x00, 0x00}));
+    }
+
+    @Test public void parseBindInfoAcceptsAResultFrame() {
+        byte[] reply = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x34, 0x00, 0x01, 0x00, 0x01
+        };
+        ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(reply);
+        assertNotNull(info);
+        assertEquals(0, info.type);
+        assertEquals(1, info.result);
+        assertTrue(info.accepted());
+    }
+
+    @Test public void parseBindInfoRejectsOtherFrames() {
+        assertNull(ZhBraceletBinding.parseBindInfo(BIND_TYPE_0)); // phone-to-watch echo
+        byte[] otherKey = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x08, 0x00, 0x01, 0x00, 0x01
+        };
+        assertNull(ZhBraceletBinding.parseBindInfo(otherKey));
+    }
+
+    @Test public void readerReassemblesSplitFrames() {
+        ZhFrameReader reader = new ZhFrameReader();
+        assertTrue(reader.append(new byte[] {BIND_TYPE_0[0], BIND_TYPE_0[1], BIND_TYPE_0[2]}).isEmpty());
+        List<byte[]> frames = reader.append(java.util.Arrays.copyOfRange(BIND_TYPE_0, 3, BIND_TYPE_0.length));
+        assertEquals(1, frames.size());
+        assertArrayEquals(BIND_TYPE_0, frames.get(0));
+    }
+
+    @Test public void readerResynchronisesAfterGarbage() {
+        ZhFrameReader reader = new ZhFrameReader();
+        byte[] noisy = new byte[BIND_TYPE_0.length + 2];
+        noisy[0] = 0x12;
+        noisy[1] = 0x34;
+        System.arraycopy(BIND_TYPE_0, 0, noisy, 2, BIND_TYPE_0.length);
+        List<byte[]> frames = reader.append(noisy);
+        assertEquals(1, frames.size());
+        assertArrayEquals(BIND_TYPE_0, frames.get(0));
+        assertFalse(ZhBraceletBinding.parseBindInfo(frames.get(0)) != null);
+    }
+}

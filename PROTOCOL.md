@@ -455,6 +455,72 @@ overlapped, the watch answered `control resend 1`, and the probe muddied the log
 Incoming HR values surface through `RealTimeHeartRateCallback`; the parsers live in
 `com.zhapp.ble.parsing.*` and key off the SEWear `type`/`id` of the response.
 
+## ZhBracelet / NavPlus profile (the stack Ultra Buzz actually uses)
+
+This is the missing link for the ColorFit Ultra Buzz. NoiseFit's `NavPlusConnectHandler`
+(`com.noisefit_nav_plus.handler.connect`) does not use SE or Berry: it binds through the bundled
+`com.zjw.zhbraceletsdk` (`ZhBraceletService`). `NavPlusQueryDeviceUnitsHandler` and
+`DataUnitConverter` special-case exactly `COLORFIT_ULTRA_BUZZ`, `COLORFIT_VISION_BUZZ` and
+`COLORFIT_ULTRA_2`, which confirms the assignment.
+
+GATT roles (from `com.zjw.zhbraceletsdk.service.d`, all present on this watch):
+
+| Role | UUID |
+| --- | --- |
+| base / system service | `00000001-0000-1000-8000-00805f9b34fb` |
+| request characteristic | `00000002-…` (read/write/write-no-response) |
+| reply characteristic | `00000003-…` (read/write/notify) |
+| protobuf service (used after bind) | `16186f00-0000-1000-8000-00807f9b34fb` |
+| big-data service (not on this watch) | `00002001-…` |
+
+On `onServicesDiscovered` the SDK enables notifications on **every** characteristic of both
+services, requests MTU 247, and only then calls `ConnectorListener.onConnect`. The handler then
+calls `ZhBraceletService.bindDevice(type)`:
+
+* `type = 0` — initiate a bind (first pairing);
+* `type = 1` — ask whether an app binding already exists (reconnect).
+
+`bindDevice` resolves to `c.c(int)` → `a.b(int)` → `a(byte[]{type}, 1, 108)`, a plaintext frame on
+`00000002`:
+
+```
+AB 00 00 06 00 00 00 00 01 00 6C 00 01 TT
+```
+
+Header layout (`a.a(byte[], byte direction, int key)`):
+
+```
+AB            magic
+00            reserved
+LL LL         frame length - 8 (big endian)
+00 00 00 00   session fields, zero in every phone request
+01            direction: phone -> watch (03 = watch -> phone)
+00            reserved
+KK            command key (6C = 108 = bind)
+00 PP         payload length
+payload
+```
+
+The watch answers with key `0x34` (52), payload `TT RR`:
+
+* `TT` repeats the request type;
+* `RR = 1` → bound / accepted;
+* `RR = 0` → for type 0 the watch refused (still bound to another phone); for type 1 it is not
+  bound.
+
+`com.zjw.zhbraceletsdk.service.c.q(byte[])` maps that to `BindDeviceListener.bindSuccess()`,
+`deniedByDevice()` and `bindError()`. There is **no auth token and no encryption** in this bind:
+the account token used by Berry/SE never appears. `ZhBraceletService.beBind()` only parses an
+advertising service-data blob (`09 16 68 FE …`), not a GATT frame.
+
+Order of commands on connect (from `h.onServicesDiscovered`): bind first, then `Q()` (time sync,
+key 1) and 50 ms later `setUserInfo`. A bind therefore does not depend on time sync or profile
+data.
+
+The RC4/"Ryeex" cipher documented below belongs to a different bundled SDK (`com.ryeex…`) that
+shares the same base UUIDs but is not the stack used for Ultra Buzz. The zhbraceletsdk frames are
+plaintext.
+
 ## Ryeex profile (alternate family)
 
 Base service `00000001-0000-1000-8000-00805f9b34fb`, write `00000002-…`, read `00000003-…`.

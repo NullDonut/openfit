@@ -29,7 +29,11 @@ public final class BerryProfile {
     public static final UUID AA01_READ = UUID.fromString("0000aa03-0000-1000-8000-00805f9b34fb");
     public static final UUID AA01_05_READ = UUID.fromString("0000aa05-0000-1000-8000-00805f9b34fb");
 
-    /** Base service of the alternate (Ryeex) family; useful for diagnostics only. */
+    /**
+     * ZhBracelet ("NavPlus") script channel. NoiseFit binds ColorFit Ultra Buzz, Vision Buzz and
+     * Ultra 2 through the bundled {@code com.zjw.zhbraceletsdk}, whose base service is this one:
+     * requests go to {@link #RYEEX_WRITE} and replies arrive on {@link #RYEEX_READ}.
+     */
     public static final UUID RYEEX_SERVICE = UUID.fromString("00000001-0000-1000-8000-00805f9b34fb");
     public static final UUID RYEEX_WRITE = UUID.fromString("00000002-0000-1000-8000-00805f9b34fb");
     public static final UUID RYEEX_READ = UUID.fromString("00000003-0000-1000-8000-00805f9b34fb");

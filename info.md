@@ -292,6 +292,59 @@ The same GATT report confirms the BLE Berry shape: `aa02` is `READ WRITE` (so th
 uses acknowledged writes and always gets a callback), `aa03` is `READ WRITE NOTIFY`, and
 `16186f02` is `READ WRITE_NO_RESPONSE NOTIFY` as assumed.
 
+## 2026-11-18 — the Ultra Buzz bind is ZhBracelet (NavPlus), not SE or Berry
+
+The 11:03 device run finally exercised the fixed notification setup: all five `16186f0x`
+characteristics plus `aa03` were subscribed before pairing started, the SE announce/chunk exchange
+ran cleanly, and the watch answered every frame. The answer was still authoritative:
+`SEWear{id=16, error=1}`, `{id=0, error=1}`, `{id=17, error=1}` — `NOT_SUPPORT` for the whole
+account group. BLE Berry on `aa02` stayed silent, and the classic fallback cannot exist on an
+LE-only watch (`device type LE only (2)`, `SDP records none`).
+
+The missing evidence was in the vendor APK, not on the wire. `NavPlusConnectHandler` (the handler
+for this model family) binds through a different bundled SDK:
+
+```
+com.noisefit_nav_plus.handler.connect.NavPlusConnectHandler
+    → com.zjw.zhbraceletsdk.service.ZhBraceletService
+    → bindDevice(0) on first pairing, bindDevice(1) on reconnect
+    → com.zjw.zhbraceletsdk.service.c.c(type) → a.b(type)
+    → a(byte[]{type}, 1, 108)
+```
+
+`com.zjw.zhbraceletsdk.service.d` names the services and they are exactly the two GATT blocks the
+watch exposes that OpenFit had not used:
+
+```
+00000001-0000-1000-8000-00805f9b34fb   system service
+00000002-…                            request  (read/write/write-no-response)
+00000003-…                            reply    (read/write/notify)
+16186f00-0000-1000-8000-00807f9b34fb   protobuf service (used after bind)
+```
+
+The bind frame is plaintext on `00000002`:
+
+```
+AB 00 00 06 00 00 00 00 01 00 6C 00 01 00
+```
+
+`AB` = magic, `00 06` = length-8, `01` = phone→watch, `6C` = command 108 (bind), `00 01` =
+one-byte payload, `00` = bind type. The watch replies on `00000003` with command key `0x34` (52)
+and payload `TT RR`: type and result (`1` = accepted/bound, `0` = refused/unbound). `q(byte[])`
+in the vendor's `BleProtocol` maps that straight to `BindDeviceListener.bindSuccess()` /
+`deniedByDevice()` / `bindError()`. No token, no encryption, no time sync is needed first.
+
+OpenFit now:
+
+* subscribes to `00000003` during connection setup;
+* after SE refuses, tries the ZhBracelet bind (`type 0`, then `type 1` after 15 s) before Berry;
+* logs `TX zh-bind type …`, `RX 00000003 · …` and `ZhBracelet bind info · type=… result=…`;
+* no longer starts the classic SPP path at all (the file was removed).
+
+`NavPlusQueryDeviceUnitsHandler`/`DataUnitConverter` special-case `COLORFIT_ULTRA_BUZZ`,
+`COLORFIT_VISION_BUZZ` and `COLORFIT_ULTRA_2`, which ties this stack to the user's watch.
+Still pending: a device run of this build; no interoperability claim until then.
+
 ## Project notes
 
 `CONTEXT.md` is the general project handoff. `HANDOFF.md` is the current single-page handoff for machine setup, tooling paths, host limits and next steps. `README.md` describes user-facing features and limitations. `PROTOCOL.md` holds the recovered wire protocol. This `info.md` is the detailed NoiseFit-specific evidence and investigation log.

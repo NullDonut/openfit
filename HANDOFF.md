@@ -2,8 +2,9 @@
 
 Last updated: 2026-11-18
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (Berry-over-BLE fallback on `aa01`, corrected
-Berry frame magics, inbound acks, link-capability diagnostics, 62 unit tests).
+Latest code commit at time of writing: this commit (ZhBracelet/NavPlus bind on `00000002`,
+Berry-over-BLE fallback on `aa01`, corrected Berry frame magics, inbound acks, link-capability
+diagnostics, classic SPP removed, 68 unit tests).
 
 The 2026-11-18 09:45 device run answered both SE account probes with `NOT_SUPPORT`
 (`08 10 10 00 A0 06 01` and `08 11 10 00 A0 06 01`), which settles the SE question: the transport,
@@ -11,11 +12,17 @@ envelope and id numbering are right and this firmware does not implement the acc
 
 The 10:10 run of `bd6110e` bonded the watch (`10 -> 11 -> 12`) but the classic SPP socket failed
 twice with `IOException · read failed, socket might closed or timeout, read ret: -1`. That is the
-signature of a remote with no RFCOMM listener, and the bond came from an LE scan, so the watch is
-most likely LE-only. While tracing that, two genuine Berry bugs surfaced: the phone→watch and
-watch→phone head magics were swapped (every command was silently ignored), and the phone never
-acknowledged inbound frames although the exchange is stop-and-wait. Both are fixed, and the
-fallback now goes BLE-first (`aa01`: write `aa02`, notify `aa03`) before trying classic SPP.
+signature of a remote with no RFCOMM listener; the later capability log confirmed `device type
+LE only (2)` and `SDP records none`, and the SPP code has been deleted. While tracing that, two
+genuine Berry bugs surfaced: the phone→watch and watch→phone head magics were swapped (every
+command was silently ignored), and the phone never acknowledged inbound frames although the
+exchange is stop-and-wait. Both are fixed.
+
+The 11:03 run then showed a clean SE exchange with real watch answers, but still `NOT_SUPPORT`
+for ids 16/0/17, and BLE Berry stayed silent. The vendor APK explains why: `NavPlusConnectHandler`
+binds ColorFit Ultra Buzz through the bundled `com.zjw.zhbraceletsdk` on the `00000001` service
+(write `00000002`, notify `00000003`) with a plaintext key-108 bind frame. OpenFit now tries that
+ZhBracelet bind first, then `aa01` BLE Berry.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -28,7 +35,7 @@ what is still unknown, and what to do next. The deeper references are:
 | `CONTEXT.md` | Project-level handoff (features, safety boundary, build instructions) |
 | `README.md` | User-facing description and limitations |
 | `app/src/main/java/com/openfit/app/protocol/` | Android-free protocol implementation |
-| `app/src/test/java/com/openfit/app/protocol/` | 61 JUnit tests for the Berry frames, SE transport/envelope, bind encoders and reassembly |
+| `app/src/test/java/com/openfit/app/protocol/` | 68 JUnit tests for the Berry frames, SE transport/envelope, ZhBracelet bind frames and reassembly |
 
 ---
 
@@ -239,7 +246,8 @@ still unknown and must be decided by a GATT dump of the real watch, not by name.
 
 | Stack | Package | Transport | Application-layer crypto |
 |---|---|---|---|
-| Berry | `com.zhapp.ble`, `com.zjw.zhbraceletsdk` | GATT `16186f00-…` (+ optional SPP `00001101-…`) | **none observed** |
+| Berry | `com.zhapp.ble` | GATT `16186f00-…` (+ optional SPP `00001101-…`) | **none observed** |
+| ZhBracelet / NavPlus | `com.zjw.zhbraceletsdk` | GATT `16186f00-…` + `00000001-…` | **none observed** (plaintext `0xAB`) |
 | Ryeex | `com.ryeex.*` | GATT `00000001-…` | RC4 variant in `libble-crypto.so` (decoded) |
 | Realtek BBPro | `com.realsil.sdk.bbpro` | Realtek GATT | BBPro link-key authentication |
 
@@ -438,7 +446,29 @@ Incoming HR values surface through `RealTimeHeartRateCallback`; parsers live in
 
 ---
 
-## 7. Ryeex family (alternate, crypto decoded, framing unknown)
+### 6.7 ZhBracelet (NavPlus) bind — the stack ColorFit Ultra Buzz actually uses
+
+`NavPlusConnectHandler` binds this model family through the bundled
+`com.zjw.zhbraceletsdk`, not SE or Berry:
+
+* base service `00000001-…`; write `00000002-…`, notify `00000003-…`;
+* the SDK enables notifications on everything, requests MTU 247, then calls
+  `ZhBraceletService.bindDevice(0)` (first bind) or `bindDevice(1)` (inquiry);
+* `bindDevice` → `c.c(type)` → `a.b(type)` → `a(byte[]{type}, 1, 108)`, a plaintext frame:
+
+```
+AB 00 00 06 00 00 00 00 01 00 6C 00 01 TT
+```
+
+* `TT = 0` bind, `TT = 1` inquiry. The watch replies on `00000003` with key `0x34` (52) and
+  payload `TT RR`; `RR = 1` accepted/bound, `RR = 0` refused (type 0) or unbound (type 1).
+* No token, no encryption, no time sync before the bind.
+
+OpenFit subscribes to `00000003` and, after the SE account group answers `NOT_SUPPORT`, sends
+`TT = 0`, then `TT = 1` after 15 s, then falls back to Berry. See `PROTOCOL.md` for the exact
+vendor call chain.
+
+## 7. Ryeex family (alternate SDK, not used by Ultra Buzz)
 
 Base service `00000001-0000-1000-8000-00805f9b34fb`, write `00000002-…`, read `00000003-…`.
 `BleCipher` is RC4 with a **fixed initial permutation**, implemented in `libble-crypto.so`:
@@ -487,8 +517,9 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | File | Purpose |
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
-| `app/src/main/java/com/openfit/app/BerrySpp.java` | Classic RFCOMM link on the SPP UUID: background connect, read loop, queued writes, logged failures |
-| `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. the `aa01` Berry-over-BLE service (`aa02` write, `aa03`/`aa05` notify) |
+| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus bind frame (key 108) and key-52 result parsing |
+| `app/src/main/java/com/openfit/app/protocol/ZhFrameReader.java` | Reassembles `0xAB` frames from split `00000003` notifications |
+| `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. `aa01` Berry-over-BLE and the `00000001` ZhBracelet channel |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
 | `app/src/main/java/com/openfit/app/protocol/BerryFrameReader.java` | Reassembles frames from split notifications, skips noise, consumes 8-byte acks |
 | `app/src/main/java/com/openfit/app/protocol/BerrySewear.java` | Proto3 codec for the Berry SPP `sa_wear.SEWear` envelope (`type=1`, `id=2`) |
@@ -502,9 +533,10 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeGattTest.java` | 9 tests: chunk math, announce/control golden bytes, packet prefix, out-of-order transfer reassembly |
 | `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 13 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
+| `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 6 tests: golden bind frames, declared length, key-52 replies, split frames, resync |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (61 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (68 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -564,9 +596,10 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
 
 ## 9. Open questions / next steps
 
-1. ~~**Which stack does the watch expose?**~~ **Answered 2026-11-17:** the physical ColorFit
-   Ultra Buzz exposes Berry `16186f00-…` (5 notifiable chars) *and* the Ryeex base service
-   `00000001-…`. Berry is selected; see the hardware table in `PROTOCOL.md`.
+1. ~~**Which stack does the watch expose?**~~ **Answered 2026-11-18:** the physical ColorFit
+   Ultra Buzz exposes `16186f00-…` (SE protobuf), `aa01` (Berry-over-BLE) and `00000001-…`
+   (ZhBracelet/NavPlus). The vendor binds this model through `com.zjw.zhbraceletsdk` on
+   `00000001`; SE answers `NOT_SUPPORT` for the account group. See `PROTOCOL.md`.
 2. ~~**Berry MTU / segmentation**~~ **Answered:** the reference GATT stack requests MTU 517 and
    splits frames into `MTU - 3` chunks (20 fallback). OpenFit mirrors this with a 247 request,
    paced no-response writes, and a reassembly reader.
@@ -583,26 +616,20 @@ manual sleep notes. No account, analytics, network permission or cloud sync.
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
    includes the last crash stack trace even though the scanner runs in its own activity.
-8. **Validate the Berry bind on hardware.** The SE question is closed (ids 16/17 →
-   `NOT_SUPPORT`). The build now falls back automatically and in this order:
-   `aa01` BLE Berry (write `aa02`, notify `aa03`, private cmd 2 → 3 → 4 with the stored token)
-   → a `SEWear{type=ACCOUNT}` account query if the private command is silent
-   → classic bond + SPP, only if the BLE channel stays silent.
+8. **Validate the ZhBracelet bind on hardware.** The SE question is closed (ids 16/17 →
+   `NOT_SUPPORT`). The build now tries, in order:
+   ZhBracelet `00000002` bind (type 0 → type 1) → `aa01` BLE Berry → fail.
+   The classic SPP path has been deleted; it was impossible on this LE-only watch.
 
    Watch the `PAIRING LOG` for these lines first, because they decide everything else:
 
    ```
-   device type … (2 = LE only, 3 = dual)
-   SDP records none | <uuid, …>
-   Berry-over-BLE channel: aa02 write, N notify characteristic(s)
-   trying the BLE Berry channel · write aa02, notify N char(s)
-   TX user-id · 66 66 48 5A …
+   ZhBracelet channel: 00000002 write, 00000003 notify
+   TX zh-bind type 0 · AB 00 00 06 00 00 00 00 01 00 6C 00 01 00
+   RX 00000003 · …
+   ZhBracelet bind info · type=0 result=1
+   PAIRED  ZhBracelet bind accepted (type 0)
    ```
-
-   A reply appears as `RX aa03 · …` followed by `RX frame · 88 88 48 5A …` and
-   `watch info · type=…, isBind=…, isSameUser=…`; from there the 3/4 exchange continues on its own
-   and ends with `PAIRED  Berry bind confirmed`. `device type 2` plus `SDP records none` settles
-   that RFCOMM is impossible, so the SPP step can then be deleted rather than retried.
 
 ### Suggested order from here
 

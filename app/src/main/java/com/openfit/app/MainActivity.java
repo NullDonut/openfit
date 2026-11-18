@@ -48,6 +48,8 @@ import com.openfit.app.protocol.BerrySewear;
 import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SePairing;
+import com.openfit.app.protocol.ZhBraceletBinding;
+import com.openfit.app.protocol.ZhFrameReader;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
@@ -91,8 +93,12 @@ public final class MainActivity extends Activity {
     private static final long SE_ACK_TIMEOUT_MS = 2_000L;
     private static final long SE_STEP_TIMEOUT_MS = 8_000L;
     private static final long SE_FIRST_COMMAND_DELAY_MS = 400L;
-    private static final long CLASSIC_BOND_TIMEOUT_MS = 40_000L;
     private static final long BERRY_STEP_TIMEOUT_MS = 8_000L;
+    /**
+     * The ZhBracelet bind reply may wait for the wearer to accept a prompt on the watch, so the
+     * first request gets a longer window than the SE steps.
+     */
+    private static final long ZH_STEP_TIMEOUT_MS = 15_000L;
     /** A write-no-response chunk can complete without an onCharacteristicWrite callback on some
      *  stacks; the watchdog keeps the queue moving instead of stalling the bind. */
     private static final long BERRY_WRITE_TIMEOUT_MS = 1_500L;
@@ -180,6 +186,20 @@ public final class MainActivity extends Activity {
     private byte[] seLastPayload;
     private String seLastLabel;
 
+    // ZhBracelet ("NavPlus") binding. NoiseFit drives ColorFit Ultra Buzz, Vision Buzz and
+    // Ultra 2 through the bundled com.zjw.zhbraceletsdk stack, which pairs on the script channel
+    // 00000001 (write 00000002, notify 00000003) with a 0xAB frame whose key 108 asks the watch
+    // to bind. It is a third, independent protocol: neither SE nor Berry.
+    private BluetoothGattCharacteristic zhWriteChar;   // 00000002
+    private BluetoothGattCharacteristic zhNotifyChar;  // 00000003
+    private final ZhFrameReader zhReader = new ZhFrameReader();
+    private boolean zhStarted;
+    private boolean zhFinished;
+    private int zhAttempts;
+    private int zhWriteRetries;
+    private int zhLastType = -1;
+    private Runnable zhStepTimeout;
+
     // Berry pairing. NoiseFit has two Berry transports for the account exchange and both carry
     // exactly the same private 2/3/4 frames: a BLE channel on the aa01 service (its "Berry-Test"
     // stack, write aa02 / notify aa03) and a bonded classic RFCOMM socket on the SPP UUID (the
@@ -191,13 +211,11 @@ public final class MainActivity extends Activity {
     private boolean berryWriteBusy;
     private int berryWriteRetries;
     private final Runnable berryWriteTimeout = this::onBerryWriteTimeout;
-    private BerrySpp berrySpp;
     private final BerryFrameReader berryReader = new BerryFrameReader();
     private String berryTransport = "";
     private boolean berryStarted;
     private boolean berryPhase;
     private boolean berryFinished;
-    private boolean classicAttempted;
     private int berrySerial;
     private String berryStep = "idle";
     private int berryStepAttempts;
@@ -869,9 +887,8 @@ public final class MainActivity extends Activity {
             cancelConnectionTimeout();
             logBle("Disconnected · GATT status " + status);
             if (berryPhase) {
-                // Both Berry transports are separate from the SE command channel, so a GATT drop
-                // during the Berry bind must not tear down the pairing UI. The classic socket is
-                // unaffected; on the BLE channel the link is gone, so the attempt ends there.
+                // The Berry channel sits beside the SE command channel, so a GATT drop during the
+                // Berry bind must not tear down the pairing UI; the attempt ends with the link.
                 logBle("GATT link closed · Berry pairing continues");
                 if ("ble".equals(berryTransport)) {
                     abandonBleBerry("the watch link closed");
@@ -1001,6 +1018,24 @@ public final class MainActivity extends Activity {
         logBle("Berry-over-BLE channel: "
                 + (berryWriteChar == null ? "no aa02 write characteristic"
                 : "aa02 write, " + berryNotifyChars.size() + " notify characteristic(s)"));
+        // The ZhBracelet stack's own command channel. The vendor SDK subscribes to 00000003 and
+        // writes bind requests to 00000002 before it touches the protobuf service.
+        zhWriteChar = null;
+        zhNotifyChar = null;
+        BluetoothGattService zh = source.getService(BerryProfile.RYEEX_SERVICE);
+        if (zh != null) {
+            zhWriteChar = zh.getCharacteristic(BerryProfile.RYEEX_WRITE);
+            zhNotifyChar = zh.getCharacteristic(BerryProfile.RYEEX_READ);
+            if (zhNotifyChar != null
+                    && zhNotifyChar.getDescriptor(CLIENT_CONFIGURATION) != null
+                    && !notificationQueue.contains(zhNotifyChar)) {
+                notificationQueue.add(zhNotifyChar);
+            }
+        }
+        logBle("ZhBracelet channel: "
+                + (zhWriteChar == null ? "no 00000002 write characteristic"
+                : "00000002 write, "
+                + (zhNotifyChar == null ? "no 00000003 notify" : "00000003 notify")));
         logBle("Services: profile=" + watchProfile
                 + ", " + source.getServices().size() + " service(s), "
                 + notificationQueue.size() + " notifiable");
@@ -1541,9 +1576,10 @@ public final class MainActivity extends Activity {
         seCurrentWrite = null;
         seAwaitingReady = false;
         seTransfer.reset();
-        // A watch that answers the SE account commands with NOT_SUPPORT, or not at all, is
-        // almost certainly a Berry model: the vendor binds those on a different stack. Try that
-        // once before reporting a failure.
+        // When the SE account commands come back NOT_SUPPORT (or not at all) the watch belongs to
+        // another vendor stack. Try the ZhBracelet script channel first: that is what NoiseFit
+        // uses for ColorFit Ultra Buzz, Vision Buzz and Ultra 2. Berry stays as the last resort.
+        if (!success && startZhFallback(detail)) return;
         if (!success && startBerryFallback(detail)) return;
         reportPairing(success, detail);
     }
@@ -1562,8 +1598,126 @@ public final class MainActivity extends Activity {
     }
 
     /**
+     * Starts the ZhBracelet bind, the stack NoiseFit's {@code NavPlusConnectHandler} uses for
+     * ColorFit Ultra Buzz / Vision Buzz / Ultra 2. Returns false when this watch does not expose
+     * the script channel, so the caller can try Berry instead.
+     */
+    private boolean startZhFallback(String reason) {
+        if (zhStarted || zhFinished || zhWriteChar == null || zhNotifyChar == null) return false;
+        zhStarted = true;
+        logPairing("SE account exchange failed · " + reason);
+        logDeviceCapabilities();
+        logPairing("trying the ZhBracelet bind channel · write 00000002, notify 00000003");
+        scanStatus.setText("●  PAIRING / WATCH LINK");
+        connectionStatus.setText("Pairing · binding to " + connectedDeviceName + "…");
+        sendZhBind(ZhBraceletBinding.TYPE_BIND);
+        return true;
+    }
+
+    /** Sends one bind (type 0) or binding-inquiry (type 1) frame and arms the reply watchdog. */
+    private void sendZhBind(int type) {
+        if (zhFinished || zhWriteChar == null) return;
+        zhAttempts++;
+        zhLastType = type;
+        byte[] frame = ZhBraceletBinding.bindRequest(type);
+        logPairing("TX zh-bind type " + type + " · " + hex(frame));
+        if (!writeZh(frame)) {
+            // A write from the closing SE exchange may still be in flight; retry briefly instead
+            // of spending the whole reply window on a locally rejected frame.
+            logPairing("zh-bind write rejected by the Bluetooth stack");
+            if (++zhWriteRetries <= 2) {
+                handler.postDelayed(() -> {
+                    if (!zhFinished && zhLastType == type) sendZhBind(type);
+                }, 350L);
+                return;
+            }
+        }
+        zhWriteRetries = 0;
+        scheduleZhTimeout();
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private boolean writeZh(byte[] value) {
+        BluetoothGatt source = gatt;
+        if (source == null || zhWriteChar == null || value == null) return false;
+        try {
+            // The vendor leaves the write type at the default (attended) value on 00000002 even
+            // though it also advertises write-without-response; use the same for a reliable ack.
+            if (Build.VERSION.SDK_INT >= 33) {
+                return source.writeCharacteristic(zhWriteChar, value,
+                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS;
+            }
+            zhWriteChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            zhWriteChar.setValue(value);
+            return source.writeCharacteristic(zhWriteChar);
+        } catch (SecurityException e) {
+            return false;
+        }
+    }
+
+    private void scheduleZhTimeout() {
+        cancelZhTimeout();
+        zhStepTimeout = () -> {
+            zhStepTimeout = null;
+            if (zhFinished) return;
+            if (zhLastType == ZhBraceletBinding.TYPE_BIND) {
+                // A silent first request can mean the watch is already bound and only answers an
+                // explicit inquiry; ask, rather than treating silence as a refusal.
+                logPairing("no reply for zh-bind type 0 · asking whether an app binding exists");
+                sendZhBind(ZhBraceletBinding.TYPE_INQUIRY);
+                return;
+            }
+            logPairing("ZhBracelet bind channel silent · no reply to type 0 or type 1");
+            zhFinished = true;
+            if (!startBerryFallback("the ZhBracelet bind channel stayed silent")) {
+                reportPairing(false, "no vendor bind channel answered");
+            }
+        };
+        handler.postDelayed(zhStepTimeout, ZH_STEP_TIMEOUT_MS);
+    }
+
+    private void cancelZhTimeout() {
+        if (zhStepTimeout != null) {
+            handler.removeCallbacks(zhStepTimeout);
+            zhStepTimeout = null;
+        }
+    }
+
+    /** Handles a notification from the ZhBracelet script channel ({@code 00000003}). */
+    private void handleZhNotification(BluetoothGattCharacteristic characteristic, byte[] value) {
+        if (value == null || value.length == 0) return;
+        logPairing("RX " + shortUuid(characteristic.getUuid()) + " · " + hex(value));
+        for (byte[] frame : zhReader.append(value)) {
+            ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
+            if (info == null) {
+                int key = frame.length > 10 ? frame[10] & 0xFF : -1;
+                logPairing("ZhBracelet frame · key " + key + " ignored");
+                continue;
+            }
+            logPairing("ZhBracelet bind info · type=" + info.type + " result=" + info.result);
+            if (info.accepted()) {
+                zhFinished = true;
+                cancelZhTimeout();
+                reportPairing(true, "ZhBracelet bind accepted (type " + info.type + ")");
+                return;
+            }
+            if (info.type == ZhBraceletBinding.TYPE_BIND) {
+                logPairing("the watch refused the bind · it may still be bound to another phone");
+            } else {
+                logPairing("the watch reports no app binding yet");
+            }
+            zhFinished = true;
+            cancelZhTimeout();
+            if (!startBerryFallback("the watch refused the ZhBracelet bind")) {
+                reportPairing(false, "the watch refused the vendor bind");
+            }
+            return;
+        }
+    }
+
+    /**
      * Starts the Berry account exchange, which is the vendor's other pairing stack. Returns false
-     * when it cannot run, so the caller reports the SE failure instead.
+     * when it cannot run, so the caller reports the failure instead.
      */
     private boolean startBerryFallback(String reason) {
         if (berryStarted || bluetoothAdapter == null) return false;
@@ -1572,11 +1726,11 @@ public final class MainActivity extends Activity {
         berryStarted = true;
         berryPhase = true;
         berryReader.reset();
-        logPairing("SE account exchange failed · " + reason);
+        logPairing("vendor bind not accepted · " + reason);
         logDeviceCapabilities();
         if (startBleBerry()) return true;
-        logPairing("this watch has no aa01 write channel · using the classic link");
-        startClassicBerry();
+        logPairing("this watch has no aa02 write channel · no Berry transport left");
+        finishBerry(false, "no Berry channel on this watch");
         return true;
     }
 
@@ -1650,137 +1804,15 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Drops the BLE Berry channel. If nothing was ever heard on it, the classic socket is the last
-     * transport left; the diagnostic lines above then say whether that is even possible.
+     * Drops the BLE Berry channel. The watch is LE-only ({@code getType() == 2}, no SDP records),
+     * so there is no classic RFCOMM transport to fall back to: a silent BLE channel is the end of
+     * the Berry attempt.
      */
     private void abandonBleBerry(String detail) {
         if (berryFinished) return;
-        if (!classicAttempted) {
-            logPairing("BLE Berry channel silent · " + detail);
-            berryReader.reset();
-            startClassicBerry();
-            return;
-        }
+        logPairing("BLE Berry channel silent · " + detail);
+        berryReader.reset();
         finishBerry(false, detail);
-    }
-
-    /** Classic Berry: Android bonding first (the vendor refuses the RFCOMM socket before it). */
-    private void startClassicBerry() {
-        if (classicAttempted) return;
-        classicAttempted = true;
-        cancelBerryStepTimeout();
-        berryTransport = "spp";
-        berryReader.reset();
-        berryWriteChunks.clear();
-        berryStep = "classic-link";
-        berryStepAttempts = 1;
-        logPairing("falling back to the classic (SPP) Berry pairing");
-        scanStatus.setText("●  PAIRING / CLASSIC LINK");
-        connectionStatus.setText("Pairing · opening the Bluetooth link to " + connectedDeviceName + "…");
-        BluetoothDevice device;
-        try {
-            device = bluetoothAdapter.getRemoteDevice(lastConnectAddress);
-        } catch (IllegalArgumentException e) {
-            finishBerry(false, "the saved watch address is not valid");
-            return;
-        }
-        int bondState;
-        try {
-            bondState = device.getBondState();
-        } catch (SecurityException e) {
-            finishBerry(false, "Bluetooth permission is needed to pair");
-            return;
-        }
-        logPairing("bond state " + bondLabel(bondState));
-        if (bondState == BluetoothDevice.BOND_BONDED) {
-            openBerrySpp(device);
-        } else if (bondState == BluetoothDevice.BOND_BONDING) {
-            // Something else already started pairing; just wait for it to finish.
-            pendingBondDevice = device;
-            bondInProgress = true;
-            bondRequestedByApp = false;
-            scheduleClassicBondTimeout();
-        } else {
-            requestClassicBond(device);
-        }
-    }
-
-    private static String bondLabel(int state) {
-        switch (state) {
-            case BluetoothDevice.BOND_NONE: return "not bonded";
-            case BluetoothDevice.BOND_BONDING: return "bonding";
-            case BluetoothDevice.BOND_BONDED: return "bonded";
-            default: return "state " + state;
-        }
-    }
-
-    @SuppressWarnings("MissingPermission")
-    private void requestClassicBond(BluetoothDevice device) {
-        pendingBondDevice = device;
-        bondInProgress = true;
-        bondRequestedByApp = false;
-        try {
-            boolean accepted = device.createBond();
-            logPairing("createBond accepted=" + accepted);
-            if (!accepted) {
-                finishBerry(false, "Android refused to start Bluetooth pairing");
-                return;
-            }
-        } catch (SecurityException e) {
-            finishBerry(false, "Bluetooth permission is needed to pair");
-            return;
-        }
-        scheduleClassicBondTimeout();
-    }
-
-    private void scheduleClassicBondTimeout() {
-        cancelPairingTimeout();
-        pairingTimeout = () -> {
-            pairingTimeout = null;
-            if (!bondInProgress) return;
-            clearBondState();
-            finishBerry(false, "Bluetooth pairing timed out · accept the prompt on both devices");
-        };
-        handler.postDelayed(pairingTimeout, CLASSIC_BOND_TIMEOUT_MS);
-    }
-
-    @SuppressWarnings("MissingPermission")
-    private void openBerrySpp(BluetoothDevice device) {
-        if (berryFinished) return;
-        berryReader.reset();
-        berryStep = "spp-connect";
-        berryStepAttempts = 1;
-        logPairing("opening the classic SPP socket");
-        scanStatus.setText("●  PAIRING / CLASSIC LINK");
-        connectionStatus.setText("Pairing · connecting over Bluetooth to " + connectedDeviceName + "…");
-        scheduleBerryStepTimeout("classic link setup");
-        BerrySpp.Listener listener = new BerrySpp.Listener() {
-            @Override public void onLog(String message) {
-                runOnUiThread(() -> logPairing(message));
-            }
-
-            @Override public void onConnected() {
-                runOnUiThread(() -> {
-                    cancelBerryStepTimeout();
-                    berryStep = "user-id";
-                    berryStepAttempts = 1;
-                    connectionStatus.setText("Pairing · identifying this phone to " + connectedDeviceName + "…");
-                    scanStatus.setText("●  PAIRING / ACCOUNT");
-                    sendBerryBindUserId();
-                    scheduleBerryStepTimeout("account identification");
-                });
-            }
-
-            @Override public void onData(byte[] chunk) {
-                runOnUiThread(() -> handleBerryChunk("classic", chunk));
-            }
-
-            @Override public void onFailed(String reason) {
-                runOnUiThread(() -> finishBerry(false, reason));
-            }
-        };
-        berrySpp = new BerrySpp(bluetoothAdapter, device, listener);
-        berrySpp.connect();
     }
 
     /** Private cmd 2, the account identification the vendor sends on both Berry transports. */
@@ -1898,8 +1930,6 @@ public final class MainActivity extends Activity {
         logPairing("TX ack · " + BerryBinding.hex(ack));
         if ("ble".equals(berryTransport)) {
             queueBerryBleWrite(ack);
-        } else if (berrySpp != null) {
-            berrySpp.send(ack);
         }
     }
 
@@ -1907,14 +1937,11 @@ public final class MainActivity extends Activity {
     private void sendBerry(byte[] frame, String label) {
         if (frame == null || frame.length == 0) return;
         logPairing("TX " + label + " · " + BerryBinding.hex(frame));
-        if ("ble".equals(berryTransport)) {
-            queueBerryBleWrite(frame);
-        } else if (berrySpp != null) {
-            berrySpp.send(frame);
-        } else {
-            finishBerry(false, "the " + berryTransport + " link is gone");
+        if (!"ble".equals(berryTransport)) {
+            finishBerry(false, "the Berry link is gone");
             return;
         }
+        queueBerryBleWrite(frame);
         berrySerial = BerryFrame.nextSerial(berrySerial);
     }
 
@@ -2033,10 +2060,6 @@ public final class MainActivity extends Activity {
         cancelBerryStepTimeout();
         cancelPairingTimeout();
         if (bondInProgress) clearBondState();
-        if (!success && berrySpp != null) {
-            berrySpp.close();
-            berrySpp = null;
-        }
         reportPairing(success, detail);
     }
 
@@ -2123,6 +2146,12 @@ public final class MainActivity extends Activity {
             pumpBerryBleWrites();
             return;
         }
+        if (zhWriteChar != null && zhWriteChar.getUuid().equals(characteristic.getUuid())) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                logPairing("00000002 write failed · GATT " + status);
+            }
+            return;
+        }
         if (status == BluetoothGatt.GATT_SUCCESS) return;
         if (seWriteChar != null && seWriteChar.getUuid().equals(characteristic.getUuid())) {
             logPairing("TX callback failed · GATT " + status);
@@ -2138,6 +2167,8 @@ public final class MainActivity extends Activity {
             // Only while the BLE Berry attempt owns the shared frame reader. The classic socket
             // has its own stream, and mixing the two would corrupt reassembly.
             if ("ble".equals(berryTransport)) handleBleBerryNotification(characteristic, value);
+        } else if (service != null && BerryProfile.RYEEX_SERVICE.equals(service.getUuid())) {
+            handleZhNotification(characteristic, value);
         } else {
             updateHeartRate(value);
         }
@@ -2233,6 +2264,15 @@ public final class MainActivity extends Activity {
         seStepAttempts = 0;
         seStep = "idle";
         seState = "not started";
+        cancelZhTimeout();
+        zhReader.reset();
+        zhWriteChar = null;
+        zhNotifyChar = null;
+        zhStarted = false;
+        zhFinished = false;
+        zhAttempts = 0;
+        zhWriteRetries = 0;
+        zhLastType = -1;
         cancelBerryStepTimeout();
         berryReader.reset();
         berryStep = "idle";
@@ -2244,11 +2284,6 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(berryWriteTimeout);
         berryWriteChunks.clear();
         berryWriteBusy = false;
-        classicAttempted = false;
-        if (berrySpp != null) {
-            berrySpp.close();
-            berrySpp = null;
-        }
     }
 
     private void cancelSeMtuTimeout() {
@@ -2366,12 +2401,8 @@ public final class MainActivity extends Activity {
                 int previousState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
                 logBle("Bond state " + previousState + " -> " + state);
                 if (state == BluetoothDevice.BOND_BONDED) {
-                    if (berryPhase) {
-                        clearBondState();
-                        logPairing("bonded · opening the classic link");
-                        openBerrySpp(device);
-                        return;
-                    }
+                    // Berry-over-BLE and the ZhBracelet channel do not need the classic link, so
+                    // a completed system bond only ever means "reconnect GATT".
                     boolean shouldReconnect = bondRequestedByApp;
                     clearBondState();
                     if (shouldReconnect) {
@@ -2706,11 +2737,6 @@ public final class MainActivity extends Activity {
         retryConnection = null;
         stopScan();
         closeGatt();
-        if (berrySpp != null) {
-            berrySpp.close();
-            berrySpp = null;
-        }
-        classicAttempted = false;
         berryPhase = false;
         berryWriteChunks.clear();
         berryWriteBusy = false;
