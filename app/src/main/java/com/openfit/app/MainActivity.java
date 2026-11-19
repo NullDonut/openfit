@@ -116,6 +116,12 @@ public final class MainActivity extends Activity {
     private static final long ZH_MEASURE_TIMEOUT_MS = 25_000L;
     /** Continuous mode may report periodically, so give the sensor a little longer. */
     private static final long ZH_CONTINUOUS_TIMEOUT_MS = 45_000L;
+    /**
+     * Let the post-bind burst and the user-info ack finish before asking for a measurement.
+     * Sending 0x19 while the watch is still flushing notifications made it answer "refused"
+     * on 2026-11-19, so the request now waits for the link to settle.
+     */
+    private static final long ZH_MEASURE_DELAY_MS = 4_000L;
     /** Retry gap when another GATT operation still owns the link and the write is refused. */
     private static final long ZH_WRITE_RETRY_MS = 250L;
     /** A write callback normally arrives immediately; treat this as lost and move on. */
@@ -1860,15 +1866,16 @@ public final class MainActivity extends Activity {
         if (!writeZh(frame)) {
             logPairing("zh-user-info write rejected by the Bluetooth stack");
         }
-        scheduleZhPostBind(this::sendZhHeartRateStart, ZH_POST_BIND_GAP_MS);
+        scheduleZhPostBind(this::sendZhHeartRateStart, ZH_MEASURE_DELAY_MS);
     }
 
     /**
      * Post-bind step 3: ask for one heart-rate measurement. The vendor's
      * {@code openMeasurement()} sends key {@code 0x19}; the watch answers a single
      * {@code 0x0B} frame once it has a reading. The Buzz refuses {@code 0x19}, so a refusal
-     * switches to the continuous-HR setting (key {@code 0x29}), which the SDK's ack handler
-     * (key 0x42 → {@code onHeartRateWitch}) and this firmware both support.
+     * switches to the continuous-HR setting (key {@code 0x29}), which is the only HR command
+     * the vendor's NavPlus module actually calls ({@code setContinuousHr}). Both requests wait
+     * {@link #ZH_MEASURE_DELAY_MS} after user info so they do not race the post-bind burst.
      */
     private void sendZhHeartRateStart() {
         zhPostBindTask = null;
@@ -1884,7 +1891,14 @@ public final class MainActivity extends Activity {
         scheduleZhHeartRateTimeout(ZH_MEASURE_TIMEOUT_MS, "measurement");
     }
 
-    /** Turns on the watch's continuous heart-rate setting (key {@code 0x29}). */
+    /**
+     * Turns on the watch's continuous heart-rate setting (key {@code 0x29}).
+     *
+     * <p>Diagnostic probe only. This is the single HR command the vendor's NavPlus module sends,
+     * and the watch stores it as an all-day setting, so the matching stop in
+     * {@link #stopZhHeartRate(String)} restores the default (off) after the wait. Once OpenFit
+     * has a settings screen this should follow the user's choice instead of toggling.
+     */
     private void sendZhContinuousHeartRateStart(String reason) {
         if (zhWriteChar == null || gatt == null) return;
         byte[] frame = ZhBraceletBinding.continuousHeartRateFrame(true);

@@ -51,8 +51,8 @@ public final class ZhBraceletBinding {
      */
     public static final int KEY_COMMAND_ACK = 0x42;
     public static final int KEY_DEVICE_ANSWER = 0xAC;
-    /** Wrapped command/protobuf envelope: payload starts with an inner key or message type. */
-    public static final int KEY_WRAPPED = 0x7F;
+    /** Private settings namespace: byte 13 selects the feature (battery saver, reminders, …). */
+    public static final int KEY_PRIVATE_FEATURE = 0x7F;
     public static final int KEY_UNBIND = 0x33;
 
     public static final int KEY_BIND = 0x6C;
@@ -312,7 +312,7 @@ public final class ZhBraceletBinding {
             case KEY_BIND: return "bind";
             case KEY_COMMAND_ACK: return "command ack";
             case KEY_DEVICE_ANSWER: return "device answer";
-            case KEY_WRAPPED: return "wrapped/protobuf";
+            case KEY_PRIVATE_FEATURE: return "private feature";
             default:
                 return String.format(java.util.Locale.US, "key 0x%02X", key & 0xFF);
         }

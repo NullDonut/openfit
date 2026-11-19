@@ -656,10 +656,10 @@ own ack handler (`service.c.K`, the `0x42` case) never mentions key 25; it does 
 (`0x29`) as {@code onHeartRateWitch}, so continuous HR is the setting this firmware implements.
 OpenFit now treats a refused measurement as a signal to send `0x29 = 01` instead, waits up to 45 s
 for a `0x0B` reading and then turns the setting off. If the `0x29` ack is also 0, the log says so and
-the wait is cancelled. The next fallback, if needed, is the `0x7F` wrapped/protobuf path
-(`SET_HEART_RATE_MONITOR`, FitnessID 11).
+the wait is cancelled. After the run it became clear that `0x29` is the all-day setting (the watch
+keeps sampling into its history) rather than a live stream; see the `0x7F`/SE correction below.
 
-The SDK also has a protobuf path on the same channel for watch-driven reporting:
+The SDK also has a protobuf path on the SE channel for watch-driven reporting:
 `WearProtos.WearPacket.Type.FITNESS` with `Fitness.fitness_id`:
 
 | FitnessID | Value | Notes |
@@ -670,31 +670,42 @@ The SDK also has a protobuf path on the same channel for watch-driven reporting:
 
 `Fitness.basic_data` (field 39) is a `BasicData` message whose field 4 is `heart_rate`.
 
-**Wrapped/protobuf frames (key `0x7F`), recovered 2026-11-19.** Every protobuf command is put
-inside a 14-byte envelope by `service.a.b(byte[] payload, byte direction, int innerKey)`:
+**Where those protobuf packets actually go (corrected 2026-11-19).** `service.c.a(byte[])` adds the
+WearPacket bytes to the big-data queue and writes them to `d.j` = **`16186f02`**, the SE channel,
+not to `00000002`. `service.a.b(byte[], byte, int)` is a *different* envelope used by key `0x7F`:
 
 ```
-AB 00 00 LL 00 00 00 00 01 00 7F hi lo KK [protobuf payload ...]
+AB 00 00 LL 00 00 00 00 01 00 7F hi lo KK [payload ...]
 ```
 
-* `LL` = total frame length − 8, big-endian in bytes 2–3 (so `LL` = 6 + 1 + payload length)
-* `hi lo` = payload length + 1, big-endian in bytes 11–12 (the `KK` byte counts)
-* `KK` = inner key. `a.p()` = key 39, `a.q()` = key 2, `a.s()` = key 41, `a.w()` = key 43
-* bytes 4–7 stay zero outbound; `01` at byte 8 selects "request"
+`0x7F` is a **private feature namespace**, not protobuf: `KK` in byte 13 selects a feature
+(`2` REM sleep switch, `18/19/20/21` reminders, `33` auxiliary sport support, `34` battery saver,
+`38/39` meal reminder). `service.c.b(byte[])` dispatches those in its `b2 == 127` branch and never
+parses them as WearPackets. The log therefore labels key `0x7F` as `private feature`.
 
-`service.n.g.a(boolean auto, boolean warning, int warningValue)` builds
-`SET_HEART_RATE_MONITOR` (FitnessID 11) this way (`HeartRateMonitor{mode=AUTO|OFF, frequency=0,
-warning, warning_value}`), so this is the exact frame to try if plain `0x29` ever stops working.
-OpenFit does not send `0x7F` yet; the log labels any such frame `wrapped/protobuf`.
+So the protobuf heart-rate monitor (`SET_HEART_RATE_MONITOR`, FitnessID 11) is an **SE** command on
+this firmware, and the Buzz's SE account group already answers `NOT_SUPPORT`. It is not a fallback
+for live HR over `00000002`.
 
-OpenFit's implemented path is still one-shot key `0x19`, falling back to plain `0x29` when the
-watch refuses it.
+The vendor does use this SDK, but only one HR command: cross-dex tracing of the full NoiseFit APK
+(`classes5` + `classes9`) shows `ZhBraceletService.setContinuousHr(boolean)` called from
+`com.noisefit_nav_plus.handler.NavPlusUpdateDeviceUnitsHandler.D0`, and
+`setHeartRateMonitor` likewise from the NavPlus service wrapper. `openMeasurement()` has **zero**
+call sites in the whole app. So the Zh binding is the real path on this watch, and continuous HR
+(key `0x29`) is the only live measurement the vendor asks for — there is no hidden on-demand
+command to copy.
 
-OpenFit sends the measurement start 50 ms after the user-info frame, logs
-`ZhBracelet heart rate · N bpm`, stores the reading and immediately stops whichever heart-rate mode
-is open. If no reply arrives within 25 s (measurement) or 45 s (continuous) it logs
-`No heart-rate reply from the watch · stopping …` and sends the stop anyway, so the watch's optical
-sensor is never left running.
+OpenFit's implemented path is one-shot key `0x19`, falling back to plain `0x29` when the watch
+refuses it, with the request delayed 4 s so it does not race the post-bind burst. Both acks are
+honoured; the key `0x42` command-ack handler never mentions key 25, which is why the Buzz's refusal
+is expected.
+
+OpenFit sends the measurement start **4 s** after the user-info frame, once the post-bind burst and
+the user-info ack have had time to settle (the earlier 50 ms request raced the burst and was
+refused). It logs `ZhBracelet heart rate · N bpm`, stores the reading and immediately stops
+whichever heart-rate mode is open. If no reply arrives within 25 s (measurement) or 45 s
+(continuous) it logs `No heart-rate reply from the watch · stopping …` and sends the stop anyway, so
+the watch's optical sensor is never left running.
 
 ### Daily heart-rate history, key `0x0D` (recovered 2026-11-19)
 

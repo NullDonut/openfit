@@ -167,7 +167,7 @@ public class ZhBraceletBindingTest {
         assertEquals("heart rate", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_HEART_RATE));
         assertEquals("measurement", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_MEASUREMENT));
         assertEquals("continuous HR", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_CONTINUOUS_HR));
-        assertEquals("wrapped/protobuf", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_WRAPPED));
+        assertEquals("private feature", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_PRIVATE_FEATURE));
         assertEquals("key 0x08", ZhBraceletBinding.keyLabel(0x08));
     }
 
