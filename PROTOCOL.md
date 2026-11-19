@@ -650,6 +650,15 @@ AB 00 00 LL .. .. .. .. 03 00 0B 00 01 HH     HH = bpm, 0 = no reading yet
 in that bean are computed from `UserCalibration`, **not measured** — the same key-11 frame carries
 only the heart rate. OpenFit therefore ignores the pressure fields and treats `0x0B` as BPM only.
 
+**The Buzz refuses the one-shot command.** On 2026-11-19 it answered `0x19` with
+`AB 00 00 08 00 00 00 4E 03 00 42 00 03 19 00 00` — command ack, key `0x19`, result `0`. The SDK's
+own ack handler (`service.c.K`, the `0x42` case) never mentions key 25; it does handle key 41
+(`0x29`) as {@code onHeartRateWitch}, so continuous HR is the setting this firmware implements.
+OpenFit now treats a refused measurement as a signal to send `0x29 = 01` instead, waits up to 45 s
+for a `0x0B` reading and then turns the setting off. If the `0x29` ack is also 0, the log says so and
+the wait is cancelled. The next fallback, if needed, is the `0x7F` wrapped/protobuf path
+(`SET_HEART_RATE_MONITOR`, FitnessID 11).
+
 The SDK also has a protobuf path on the same channel for watch-driven reporting:
 `WearProtos.WearPacket.Type.FITNESS` with `Fitness.fitness_id`:
 
@@ -664,9 +673,10 @@ Zh wrapping of those protobuf packets (likely key `0x7F`) is not confirmed, so o
 is the implemented path and continuous mode (`0x29` / id 45) is the next experiment.
 
 OpenFit sends the measurement start 50 ms after the user-info frame, logs
-`ZhBracelet heart rate · N bpm`, stores the reading and immediately sends the stop frame. If no
-reply arrives within 25 s it logs `No heart-rate reply from the watch · stopping the measurement`
-and sends the stop anyway, so the watch's optical sensor is never left running.
+`ZhBracelet heart rate · N bpm`, stores the reading and immediately stops whichever heart-rate mode
+is open. If no reply arrives within 25 s (measurement) or 45 s (continuous) it logs
+`No heart-rate reply from the watch · stopping …` and sends the stop anyway, so the watch's optical
+sensor is never left running.
 
 **Writes must be serialised.** `c` keeps an outbound `List<byte[]>` and writes one frame at a time;
 Android also refuses a second `writeCharacteristic` while one is pending. Right after a bind the

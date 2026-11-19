@@ -71,6 +71,14 @@ frame after 250 ms, abandons a missing write callback after 3 s, and the fast pa
 the SE probe at all — the saved Zh binding is the data path and the probe is a known dead end on
 this firmware. Expected next log: `TX zh-user-info`, `TX zh-measure-start`, then either
 `ZhBracelet heart rate · N bpm` or the timeout line.
+
+The 2026-11-19 08:14 run confirmed the queue fix: the time-sync and user-info frames were both
+delivered and acked (`command ack · time sync · ok`, `command ack · user info · ok`). It also
+settled the measurement question — the Buzz **refuses** key `0x19` (`… 42 00 03 19 00 00`). The
+SDK's own `0x42` handler never recognises key 25 but does expose key 41 (`0x29`) as
+`onHeartRateWitch`, so the app now falls back to continuous HR when the measurement is refused and
+gives that mode 45 s to produce a `0x0B` reading. Next: confirm `continuous HR enabled` and a BPM;
+if `0x29` is refused too, the remaining route is the `0x7F` wrapped/protobuf `SET_HEART_RATE_MONITOR`.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -717,8 +725,9 @@ pair on the watch (done, build b701e4a)
     -> reconnect and check type 1 answers result=1 (done, build 91777d7)
     -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
     -> verify their acks on the watch (done: key 0x42, result=1)
-    -> start a one-shot heart-rate measurement (key 0x19) and read key 0x0B (implemented, retest pending)
-    -> try continuous HR (0x29) or the protobuf basic-data report (FitnessID 45/47)
+    -> start a one-shot heart-rate measurement (key 0x19) and read key 0x0B (refused by the Buzz, 2026-11-19)
+    -> fall back to continuous HR (0x29) and read key 0x0B (implemented, retest pending)
+    -> if that is refused too: 0x7F wrapped SET_HEART_RATE_MONITOR (FitnessID 11)
     -> parse device data on 16186f00 for the remaining health screens
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```

@@ -114,6 +114,8 @@ public final class MainActivity extends Activity {
      * answers once it has a reading, so allow a longer window than a plain command ack.
      */
     private static final long ZH_MEASURE_TIMEOUT_MS = 25_000L;
+    /** Continuous mode may report periodically, so give the sensor a little longer. */
+    private static final long ZH_CONTINUOUS_TIMEOUT_MS = 45_000L;
     /** Retry gap when another GATT operation still owns the link and the write is refused. */
     private static final long ZH_WRITE_RETRY_MS = 250L;
     /** A write callback normally arrives immediately; treat this as lost and move on. */
@@ -242,7 +244,9 @@ public final class MainActivity extends Activity {
     private Runnable zhPostBindTask;
     /** True between the measurement-start frame and the watch's reply (or its timeout). */
     private boolean zhMeasureActive;
-    private Runnable zhMeasureTimeout;
+    /** True while the watch's continuous-HR setting is on. */
+    private boolean zhContinuousActive;
+    private Runnable zhHeartRateTimeout;
     /** Serialises 00000002 writes; Android refuses one while another is pending. */
     private final List<byte[]> zhWriteQueue = new ArrayList<>();
     private boolean zhWriteBusy;
@@ -1862,7 +1866,9 @@ public final class MainActivity extends Activity {
     /**
      * Post-bind step 3: ask for one heart-rate measurement. The vendor's
      * {@code openMeasurement()} sends key {@code 0x19}; the watch answers a single
-     * {@code 0x0B} frame once it has a reading.
+     * {@code 0x0B} frame once it has a reading. The Buzz refuses {@code 0x19}, so a refusal
+     * switches to the continuous-HR setting (key {@code 0x29}), which the SDK's ack handler
+     * (key 0x42 → {@code onHeartRateWitch}) and this firmware both support.
      */
     private void sendZhHeartRateStart() {
         zhPostBindTask = null;
@@ -1875,38 +1881,64 @@ public final class MainActivity extends Activity {
             return;
         }
         zhMeasureActive = true;
-        scheduleZhMeasureTimeout();
+        scheduleZhHeartRateTimeout(ZH_MEASURE_TIMEOUT_MS, "measurement");
     }
 
-    /** Sends the measurement-stop frame if a measurement is still open. */
-    private void sendZhHeartRateStop(String reason) {
-        cancelZhMeasureTimeout();
-        if (!zhMeasureActive) return;
-        zhMeasureActive = false;
+    /** Turns on the watch's continuous heart-rate setting (key {@code 0x29}). */
+    private void sendZhContinuousHeartRateStart(String reason) {
         if (zhWriteChar == null || gatt == null) return;
-        byte[] frame = ZhBraceletBinding.measurementFrame(false);
-        zhLastTxKey = ZhBraceletBinding.KEY_MEASUREMENT;
-        logPairing("TX zh-measure-stop · " + hex(frame) + " · " + reason);
+        byte[] frame = ZhBraceletBinding.continuousHeartRateFrame(true);
+        zhLastTxKey = ZhBraceletBinding.KEY_CONTINUOUS_HR;
+        logPairing("TX zh-continuous-hr-on · " + hex(frame) + " · " + reason);
         if (!writeZh(frame)) {
-            logPairing("zh-measure-stop write rejected by the Bluetooth stack");
+            logPairing("zh-continuous-hr write rejected by the Bluetooth stack");
+            return;
+        }
+        zhContinuousActive = true;
+        scheduleZhHeartRateTimeout(ZH_CONTINUOUS_TIMEOUT_MS, "continuous HR");
+    }
+
+    /** Stops whichever heart-rate mode is open; safe to call when none is. */
+    private void stopZhHeartRate(String reason) {
+        cancelZhHeartRateTimeout();
+        boolean measurement = zhMeasureActive;
+        boolean continuous = zhContinuousActive;
+        zhMeasureActive = false;
+        zhContinuousActive = false;
+        if (gatt == null) return;
+        if (measurement) {
+            byte[] frame = ZhBraceletBinding.measurementFrame(false);
+            zhLastTxKey = ZhBraceletBinding.KEY_MEASUREMENT;
+            logPairing("TX zh-measure-stop · " + hex(frame) + " · " + reason);
+            if (!writeZh(frame)) {
+                logPairing("zh-measure-stop write rejected by the Bluetooth stack");
+            }
+        }
+        if (continuous) {
+            byte[] frame = ZhBraceletBinding.continuousHeartRateFrame(false);
+            zhLastTxKey = ZhBraceletBinding.KEY_CONTINUOUS_HR;
+            logPairing("TX zh-continuous-hr-off · " + hex(frame) + " · " + reason);
+            if (!writeZh(frame)) {
+                logPairing("zh-continuous-hr write rejected by the Bluetooth stack");
+            }
         }
     }
 
-    private void scheduleZhMeasureTimeout() {
-        cancelZhMeasureTimeout();
-        zhMeasureTimeout = () -> {
-            zhMeasureTimeout = null;
-            if (!zhMeasureActive) return;
-            logPairing("No heart-rate reply from the watch · stopping the measurement");
-            sendZhHeartRateStop("measurement timed out");
+    private void scheduleZhHeartRateTimeout(long delayMs, String mode) {
+        cancelZhHeartRateTimeout();
+        zhHeartRateTimeout = () -> {
+            zhHeartRateTimeout = null;
+            if (!zhMeasureActive && !zhContinuousActive) return;
+            logPairing("No heart-rate reply from the watch · stopping " + mode);
+            stopZhHeartRate(mode + " timed out");
         };
-        handler.postDelayed(zhMeasureTimeout, ZH_MEASURE_TIMEOUT_MS);
+        handler.postDelayed(zhHeartRateTimeout, delayMs);
     }
 
-    private void cancelZhMeasureTimeout() {
-        if (zhMeasureTimeout != null) {
-            handler.removeCallbacks(zhMeasureTimeout);
-            zhMeasureTimeout = null;
+    private void cancelZhHeartRateTimeout() {
+        if (zhHeartRateTimeout != null) {
+            handler.removeCallbacks(zhHeartRateTimeout);
+            zhHeartRateTimeout = null;
         }
     }
 
@@ -2065,7 +2097,7 @@ public final class MainActivity extends Activity {
             if (bpm > 0) {
                 logPairing("ZhBracelet heart rate · " + bpm + " bpm");
                 showHeartRate(bpm);
-                sendZhHeartRateStop("measurement reported");
+                stopZhHeartRate("heart rate reported");
                 continue;
             }
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
@@ -2075,11 +2107,29 @@ public final class MainActivity extends Activity {
                     String context = ack.key == ZhBraceletBinding.KEY_COMMAND_ACK || zhLastTxKey < 0
                             ? "" : " · last sent " + ZhBraceletBinding.keyLabel(zhLastTxKey);
                     logPairing("ZhBracelet ack · " + ack.describe() + context);
-                    if (ack.key == ZhBraceletBinding.KEY_COMMAND_ACK && ack.success) {
-                        if (ack.refersTo == ZhBraceletBinding.KEY_TIME_SYNC) {
+                    if (ack.key == ZhBraceletBinding.KEY_COMMAND_ACK) {
+                        if (ack.refersTo == ZhBraceletBinding.KEY_TIME_SYNC && ack.success) {
                             logBle("Clock sync acknowledged by the watch");
-                        } else if (ack.refersTo == ZhBraceletBinding.KEY_USER_INFO) {
+                        } else if (ack.refersTo == ZhBraceletBinding.KEY_USER_INFO && ack.success) {
                             logBle("User info acknowledged by the watch");
+                        } else if (ack.refersTo == ZhBraceletBinding.KEY_MEASUREMENT
+                                && zhMeasureActive) {
+                            if (ack.success) {
+                                logPairing("measurement accepted · waiting for the reading");
+                            } else {
+                                zhMeasureActive = false;
+                                logPairing("measurement refused by the watch · trying continuous HR");
+                                sendZhContinuousHeartRateStart("measurement refused");
+                            }
+                        } else if (ack.refersTo == ZhBraceletBinding.KEY_CONTINUOUS_HR
+                                && zhContinuousActive) {
+                            if (ack.success) {
+                                logPairing("continuous HR enabled · waiting for a reading");
+                            } else {
+                                logPairing("continuous HR refused by the watch · no heart-rate source answered");
+                                zhContinuousActive = false;
+                                cancelZhHeartRateTimeout();
+                            }
                         }
                     }
                 } else {
@@ -2701,8 +2751,9 @@ public final class MainActivity extends Activity {
         seProbeFailure = null;
         cancelZhTimeout();
         cancelZhPostBind();
-        cancelZhMeasureTimeout();
+        cancelZhHeartRateTimeout();
         zhMeasureActive = false;
+        zhContinuousActive = false;
         clearZhWriteQueue();
         zhReader.reset();
         zhWriteChar = null;
@@ -3152,8 +3203,9 @@ public final class MainActivity extends Activity {
         cancelNotificationTimeout();
         cancelZhTimeout();
         cancelZhPostBind();
-        cancelZhMeasureTimeout();
+        cancelZhHeartRateTimeout();
         zhMeasureActive = false;
+        zhContinuousActive = false;
         clearZhWriteQueue();
         cancelSeTimeouts();
         seWriteQueue.clear();
