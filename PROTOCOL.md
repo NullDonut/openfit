@@ -668,6 +668,14 @@ OpenFit sends the measurement start 50 ms after the user-info frame, logs
 reply arrives within 25 s it logs `No heart-rate reply from the watch · stopping the measurement`
 and sends the stop anyway, so the watch's optical sensor is never left running.
 
+**Writes must be serialised.** `c` keeps an outbound `List<byte[]>` and writes one frame at a time;
+Android also refuses a second `writeCharacteristic` while one is pending. Right after a bind the
+watch pushes a burst of notifications and the 50 ms post-bind frames can be refused, which is what
+happened on 2026-11-19 with the user-info and measurement frames. OpenFit therefore queues every
+Zh frame, pumps the next one from `onCharacteristicWrite`, retries a refused frame after 250 ms
+and abandons a missing callback after 3 s. On the saved-binding fast path it also skips the SE
+probe so the two channels never compete for the link.
+
 ### Post-bind push burst (2026-11-18 17:45)
 
 Once the bind is accepted the watch pushes a burst on `00000003` with no request from the phone:

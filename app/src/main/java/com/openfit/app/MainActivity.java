@@ -114,6 +114,10 @@ public final class MainActivity extends Activity {
      * answers once it has a reading, so allow a longer window than a plain command ack.
      */
     private static final long ZH_MEASURE_TIMEOUT_MS = 25_000L;
+    /** Retry gap when another GATT operation still owns the link and the write is refused. */
+    private static final long ZH_WRITE_RETRY_MS = 250L;
+    /** A write callback normally arrives immediately; treat this as lost and move on. */
+    private static final long ZH_WRITE_ACK_TIMEOUT_MS = 3_000L;
     /**
      * The watch computes calories and distance from the profile the phone announces. OpenFit has
      * no profile screen yet, so it sends a neutral default instead of zeros (the vendor clamps
@@ -239,6 +243,11 @@ public final class MainActivity extends Activity {
     /** True between the measurement-start frame and the watch's reply (or its timeout). */
     private boolean zhMeasureActive;
     private Runnable zhMeasureTimeout;
+    /** Serialises 00000002 writes; Android refuses one while another is pending. */
+    private final List<byte[]> zhWriteQueue = new ArrayList<>();
+    private boolean zhWriteBusy;
+    private Runnable zhWriteRetry;
+    private Runnable zhWriteAckTimeout;
 
     // Berry pairing. NoiseFit has two Berry transports for the account exchange and both carry
     // exactly the same private 2/3/4 frames: a BLE channel on the aa01 service (its "Berry-Test"
@@ -1748,14 +1757,10 @@ public final class MainActivity extends Activity {
             connectionStatus.setText("Paired · " + connectedDeviceName);
             scanStatus.setText("●  PAIRED / READY");
             if (!sePairStarted) {
-                // Saved-binding fast path: SE was skipped entirely, so its channel is untested on
-                // this link. Run the read-only probes once the Zh post-bind frames are out; the
-                // answer decides whether heart rate comes from SE or the ZhBracelet SDK.
-                handler.postDelayed(() -> {
-                    if (!sePairStarted) {
-                        startSeLivenessProbe("saved ZhBracelet binding", true);
-                    }
-                }, 800L);
+                // Saved-binding fast path: SE was skipped, but on this firmware it is also known
+                // to be stubbed out end to end. A probe here would compete with the Zh post-bind
+                // frames for the same GATT link, which is what stalled the 2026-11-19 run.
+                logPairing("SE probe skipped · the saved ZhBracelet channel is the data path");
             }
         } else {
             connectionStatus.setText("Connected · pairing failed · " + detail);
@@ -1920,21 +1925,86 @@ public final class MainActivity extends Activity {
 
     @SuppressWarnings("MissingPermission")
     private boolean writeZh(byte[] value) {
+        if (value == null || gatt == null || zhWriteChar == null) return false;
+        // The vendor SDK queues frames and writes one at a time (service.c keeps a
+        // List<byte[]>); Android refuses a second writeCharacteristic while one is pending,
+        // which is exactly what happens when the watch bursts notifications right after a bind.
+        if (zhWriteQueue.size() >= 8) zhWriteQueue.remove(0);
+        zhWriteQueue.add(value);
+        pumpZhWrites();
+        return true;
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void pumpZhWrites() {
+        if (zhWriteBusy || zhWriteQueue.isEmpty()) return;
         BluetoothGatt source = gatt;
-        if (source == null || zhWriteChar == null || value == null) return false;
+        BluetoothGattCharacteristic characteristic = zhWriteChar;
+        if (source == null || characteristic == null) return;
+        byte[] value = zhWriteQueue.get(0);
+        boolean accepted;
         try {
             // The vendor leaves the write type at the default (attended) value on 00000002 even
             // though it also advertises write-without-response; use the same for a reliable ack.
             if (Build.VERSION.SDK_INT >= 33) {
-                return source.writeCharacteristic(zhWriteChar, value,
+                accepted = source.writeCharacteristic(characteristic, value,
                         BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS;
+            } else {
+                characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+                characteristic.setValue(value);
+                accepted = source.writeCharacteristic(characteristic);
             }
-            zhWriteChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            zhWriteChar.setValue(value);
-            return source.writeCharacteristic(zhWriteChar);
         } catch (SecurityException e) {
-            return false;
+            accepted = false;
         }
+        if (!accepted) {
+            // Another GATT operation still owns the link. Keep the frame and retry: dropping it
+            // is what lost the user-info and measurement frames on the 2026-11-19 run.
+            scheduleZhWriteRetry();
+            return;
+        }
+        zhWriteBusy = true;
+        scheduleZhWriteAckTimeout();
+    }
+
+    /** Retries a frame the stack refused because a GATT operation was still in flight. */
+    private void scheduleZhWriteRetry() {
+        if (zhWriteRetry != null) return;
+        zhWriteRetry = () -> {
+            zhWriteRetry = null;
+            pumpZhWrites();
+        };
+        handler.postDelayed(zhWriteRetry, ZH_WRITE_RETRY_MS);
+    }
+
+    private void scheduleZhWriteAckTimeout() {
+        cancelZhWriteAckTimeout();
+        zhWriteAckTimeout = () -> {
+            zhWriteAckTimeout = null;
+            if (!zhWriteBusy) return;
+            zhWriteBusy = false;
+            logPairing("00000002 write callback missing · moving on");
+            if (!zhWriteQueue.isEmpty()) zhWriteQueue.remove(0);
+            pumpZhWrites();
+        };
+        handler.postDelayed(zhWriteAckTimeout, ZH_WRITE_ACK_TIMEOUT_MS);
+    }
+
+    private void cancelZhWriteAckTimeout() {
+        if (zhWriteAckTimeout != null) {
+            handler.removeCallbacks(zhWriteAckTimeout);
+            zhWriteAckTimeout = null;
+        }
+    }
+
+    private void clearZhWriteQueue() {
+        if (zhWriteRetry != null) {
+            handler.removeCallbacks(zhWriteRetry);
+            zhWriteRetry = null;
+        }
+        cancelZhWriteAckTimeout();
+        zhWriteQueue.clear();
+        zhWriteBusy = false;
     }
 
     private void scheduleZhTimeout() {
@@ -2503,6 +2573,12 @@ public final class MainActivity extends Activity {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 logPairing("00000002 write failed · GATT " + status);
             }
+            // Ignore a late callback for a write we already abandoned on timeout.
+            if (!zhWriteBusy) return;
+            zhWriteBusy = false;
+            cancelZhWriteAckTimeout();
+            if (!zhWriteQueue.isEmpty()) zhWriteQueue.remove(0);
+            pumpZhWrites();
             return;
         }
         if (status == BluetoothGatt.GATT_SUCCESS) return;
@@ -2627,6 +2703,7 @@ public final class MainActivity extends Activity {
         cancelZhPostBind();
         cancelZhMeasureTimeout();
         zhMeasureActive = false;
+        clearZhWriteQueue();
         zhReader.reset();
         zhWriteChar = null;
         zhNotifyChar = null;
@@ -3077,6 +3154,7 @@ public final class MainActivity extends Activity {
         cancelZhPostBind();
         cancelZhMeasureTimeout();
         zhMeasureActive = false;
+        clearZhWriteQueue();
         cancelSeTimeouts();
         seWriteQueue.clear();
         seCurrentWrite = null;

@@ -61,6 +61,16 @@ key `0x29`, and the one-shot reply arrives on key `0x0B` with BPM in `frame[13]`
 for one measurement after the post-bind user info, stores the reading, and sends the stop frame;
 a 25 s guard stops the optical sensor if the watch never answers. The SBP/DBP fields in
 `HeartInfo` are derived from `UserCalibration`, not measured, and are deliberately not shown.
+
+The 2026-11-19 08:09 run showed the frames are right but exposed a transport bug: on the
+saved-binding fast path MTU stayed 23, the watch's post-bind burst kept the link busy, and Android
+refused the user-info and measurement writes (`false` from `writeCharacteristic` while another
+operation is pending). The same refusal hit the SE probe, adding noise. The Zh channel now
+serialises writes through a queue like the vendor SDK's `service.c` frame list, retries a refused
+frame after 250 ms, abandons a missing write callback after 3 s, and the fast path no longer runs
+the SE probe at all — the saved Zh binding is the data path and the probe is a known dead end on
+this firmware. Expected next log: `TX zh-user-info`, `TX zh-measure-start`, then either
+`ZhBracelet heart rate · N bpm` or the timeout line.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
