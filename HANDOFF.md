@@ -79,6 +79,17 @@ SDK's own `0x42` handler never recognises key 25 but does expose key 41 (`0x29`)
 `onHeartRateWitch`, so the app now falls back to continuous HR when the measurement is refused and
 gives that mode 45 s to produce a `0x0B` reading. Next: confirm `continuous HR enabled` and a BPM;
 if `0x29` is refused too, the remaining route is the `0x7F` wrapped/protobuf `SET_HEART_RATE_MONITOR`.
+
+The 2026-11-19 08:36 run (build `9e9fe8b`) confirmed the fallback works as designed: `0x19` was
+refused, the app logged `measurement refused by the watch · trying continuous HR`, sent key `0x29`
+and got `command ack · continuous HR · ok` plus `continuous HR enabled · waiting for a reading`.
+No `0x0B` arrived in the short log window, but the same run also produced the first fully decoded
+heart rate: the 292-byte `0x0D` frame that is pushed after every bind carries **today's history** —
+a packed date in bytes 13–14 and 288 five-minute samples at bytes 17–304. `parseHeartRateHistory()`
+now decodes it, rejects arrays containing sub-45 bpm samples the way the vendor does, logs
+`ZhBracelet HR history · YYYY-MM-DD · latest N bpm · X sample(s) · day min–max avg M`, and shows the
+latest value. On the 08:36 frame that was `2026-11-19`, latest `82 bpm` (95 max). So a real heart
+rate is available on the very first connection even while live `0x0B` reporting is being confirmed.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -573,7 +584,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | File | Purpose |
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
-| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus frames: key-108 bind, clock sync, profile, heart-rate measurement start/stop and `0x0B` parsing |
+| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus frames: key-108 bind, clock sync, profile, heart-rate measurement start/stop, `0x0B` BPM and `0x0D` daily-history parsing |
 | `app/src/main/java/com/openfit/app/protocol/ZhFrameReader.java` | Reassembles `0xAB` frames from split `00000003` notifications |
 | `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. `aa01` Berry-over-BLE and the `00000001` ZhBracelet channel |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
@@ -685,11 +696,14 @@ a secret.
    (cmd 1), user id (cmd 2), bind (cmd 3, only if unbound), confirm (cmd 4).
 6. **Post-bind wiring:** `MainActivity` performs connect → discovery → profile detection →
    notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind → time sync (key 1) →
-   user info (key 4, 50 ms later) → heart-rate measurement (key `0x19`). A `0x0B` reply updates
-   the dashboard and is stored; a 25 s guard sends the stop frame if no reading arrives. The SE
-   liveness probe (ids 32/33) is retained for diagnostics but came back silent on the Buzz, so
-   health data comes from Zh. Next: continuous HR (`0x29`) and the protobuf `BasicData.heart_rate`
-   report (FitnessID 45/47), plus overnight step/calorie parsing.
+   user info (key 4, 50 ms later) → heart-rate measurement (key `0x19`). A refused `0x19` switches
+   to continuous HR (`0x29`); a `0x0B` reply updates the dashboard and is stored. The `0x0D` history
+   frame is decoded into today's latest/min/max/avg and shown immediately, so the first connection
+   already has a real heart rate. A 25 s (measurement) or 45 s (continuous) guard sends the stop
+   frame if no reading arrives. The SE liveness probe (ids 32/33) is retained for diagnostics but
+   came back silent on the Buzz, so health data comes from Zh. Next: confirm a live `0x0B` after
+   `0x29`; if that fails, send the `0x7F` wrapped `SET_HEART_RATE_MONITOR` (FitnessID 11) and add
+   overnight step/calorie parsing from the remaining burst frames.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now

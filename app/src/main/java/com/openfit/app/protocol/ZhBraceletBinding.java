@@ -39,6 +39,8 @@ public final class ZhBraceletBinding {
      * ({@code service.c.h(byte[]) → service.a.a(byte[],int,int,int)}).
      */
     public static final int KEY_HEART_RATE = 0x0B;
+    /** Daily heart-rate history: packed date then 288 five-minute samples. */
+    public static final int KEY_HEART_RATE_HISTORY = 0x0D;
     /** {@code openMeasurement()} / {@code closeMeasurement()}: 1-byte payload, 1 = start. */
     public static final int KEY_MEASUREMENT = 0x19;
     /** {@code setContinuousHr(boolean)}: 1-byte payload, 1 = continuous HR on. */
@@ -129,6 +131,76 @@ public final class ZhBraceletBinding {
      */
     public static byte[] continuousHeartRateFrame(boolean on) {
         return frame(KEY_CONTINUOUS_HR, new byte[] {(byte) (on ? 1 : 0)});
+    }
+
+    /**
+     * Daily heart-rate history, key {@code 0x0D} (13, "sport heart rate"). The vendor's
+     * {@code c.p(byte[])} → {@code a.e(byte[])} reads a packed date from bytes 13-14 and then
+     * 288 unsigned samples, one per five-minute slot of the day:
+     *
+     * <pre>
+     * frame[13] = 20YY &lt;&lt; 1 | month &gt;&gt; 3
+     * frame[14] = (month &amp; 7) &lt;&lt; 5 | day
+     * frame[17 .. 304] = 288 samples, 0 = no reading
+     * </pre>
+     *
+     * The first 96 slots are the sleep window for the sleep statistics. The vendor drops the
+     * whole payload when any nonzero sample is below 45 bpm, which filters corrupt arrays.
+     */
+    public static HeartRateHistory parseHeartRateHistory(byte[] frame) {
+        if (frame == null || frame.length < HEADER_LENGTH + 292) return null;
+        if ((frame[0] & 0xFF) != MAGIC) return null;
+        if ((frame[8] & 0xFF) != DIRECTION_WATCH) return null;
+        if ((frame[10] & 0xFF) != KEY_HEART_RATE_HISTORY) return null;
+        int year = (frame[13] & 0x7E) >> 1;
+        int month = ((frame[13] & 1) << 3) | ((frame[14] & 0xE0) >> 5);
+        int day = frame[14] & 0x1F;
+        if (year < 17 || month <= 0 || day <= 0) return null;
+        int recent = 0;
+        int dayMax = 0;
+        int dayMin = 0;
+        int daySum = 0;
+        int dayCount = 0;
+        for (int i = 0; i < 288; i++) {
+            int bpm = frame[17 + i] & 0xFF;
+            if (bpm == 0) continue;
+            if (bpm < 45) return null; // the vendor treats this as a corrupt array
+            recent = bpm;
+            if (bpm > dayMax) dayMax = bpm;
+            if (dayMin == 0 || bpm < dayMin) dayMin = bpm;
+            daySum += bpm;
+            dayCount++;
+        }
+        String date = String.format(java.util.Locale.US, "20%02d-%02d-%02d", year, month, day);
+        return new HeartRateHistory(date, recent, dayMax, dayMin,
+                dayCount == 0 ? 0 : daySum / dayCount, dayCount);
+    }
+
+    /** One decoded {@link #KEY_HEART_RATE_HISTORY} frame. */
+    public static final class HeartRateHistory {
+        public final String date;
+        /** Last nonzero sample of the day, i.e. the most recent reading (0 if none). */
+        public final int recent;
+        public final int dayMax;
+        public final int dayMin;
+        public final int dayAverage;
+        public final int sampleCount;
+
+        public HeartRateHistory(String date, int recent, int dayMax, int dayMin,
+                                int dayAverage, int sampleCount) {
+            this.date = date;
+            this.recent = recent;
+            this.dayMax = dayMax;
+            this.dayMin = dayMin;
+            this.dayAverage = dayAverage;
+            this.sampleCount = sampleCount;
+        }
+
+        @Override public String toString() {
+            return "HeartRateHistory{date=" + date + ", recent=" + recent
+                    + ", min=" + dayMin + ", max=" + dayMax + ", avg=" + dayAverage
+                    + ", samples=" + sampleCount + '}';
+        }
     }
 
     private static int clampByte(int value) {
@@ -233,6 +305,7 @@ public final class ZhBraceletBinding {
             case KEY_STATUS: return "status";
             case KEY_UNBIND: return "unbind";
             case KEY_HEART_RATE: return "heart rate";
+            case KEY_HEART_RATE_HISTORY: return "heart-rate history";
             case KEY_MEASUREMENT: return "measurement";
             case KEY_CONTINUOUS_HR: return "continuous HR";
             case KEY_BIND_INFO: return "bind info";

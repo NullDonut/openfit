@@ -668,15 +668,61 @@ The SDK also has a protobuf path on the same channel for watch-driven reporting:
 | `SET_HEART_RATE_MONITOR` | 11 | `HeartRateMonitor{mode, frequency, warning, warning_value}`; mode `AUTO = 0`, `OFF = 1` |
 | `REGISTER_BASIC_DATA_REPORT` | 45 | subscribe to `REPORT_BASIC_DATA` (47) |
 
-`Fitness.basic_data` (field 39) is a `BasicData` message whose field 4 is `heart_rate`. The exact
-Zh wrapping of those protobuf packets (likely key `0x7F`) is not confirmed, so one-shot key `0x19`
-is the implemented path and continuous mode (`0x29` / id 45) is the next experiment.
+`Fitness.basic_data` (field 39) is a `BasicData` message whose field 4 is `heart_rate`.
+
+**Wrapped/protobuf frames (key `0x7F`), recovered 2026-11-19.** Every protobuf command is put
+inside a 14-byte envelope by `service.a.b(byte[] payload, byte direction, int innerKey)`:
+
+```
+AB 00 00 LL 00 00 00 00 01 00 7F hi lo KK [protobuf payload ...]
+```
+
+* `LL` = total frame length − 8, big-endian in bytes 2–3 (so `LL` = 6 + 1 + payload length)
+* `hi lo` = payload length + 1, big-endian in bytes 11–12 (the `KK` byte counts)
+* `KK` = inner key. `a.p()` = key 39, `a.q()` = key 2, `a.s()` = key 41, `a.w()` = key 43
+* bytes 4–7 stay zero outbound; `01` at byte 8 selects "request"
+
+`service.n.g.a(boolean auto, boolean warning, int warningValue)` builds
+`SET_HEART_RATE_MONITOR` (FitnessID 11) this way (`HeartRateMonitor{mode=AUTO|OFF, frequency=0,
+warning, warning_value}`), so this is the exact frame to try if plain `0x29` ever stops working.
+OpenFit does not send `0x7F` yet; the log labels any such frame `wrapped/protobuf`.
+
+OpenFit's implemented path is still one-shot key `0x19`, falling back to plain `0x29` when the
+watch refuses it.
 
 OpenFit sends the measurement start 50 ms after the user-info frame, logs
 `ZhBracelet heart rate · N bpm`, stores the reading and immediately stops whichever heart-rate mode
 is open. If no reply arrives within 25 s (measurement) or 45 s (continuous) it logs
 `No heart-rate reply from the watch · stopping …` and sends the stop anyway, so the watch's optical
 sensor is never left running.
+
+### Daily heart-rate history, key `0x0D` (recovered 2026-11-19)
+
+The 292-byte `0x0D` frame the watch pushes after every bind (and which arrives split across ~20
+notifications at MTU 23) is **today's sport/heart-rate history**. `service.c.b(byte[])` maps key 13
+to `运动心率` and calls `c.p(byte[])` → `service.a.e(byte[])`, which builds a `WoHeartInfo`:
+
+```
+byte 13   20YY << 1 | month >> 3        (year = (b13 & 0x7E) >> 1)
+byte 14   (month & 7) << 5 | day        (month = ((b13 & 1) << 3) | ((b14 & 0xE0) >> 5))
+bytes 17..304   288 unsigned samples, one per five-minute slot of the day
+```
+
+* `frame[17 + i]` for `i = 0..287`; `0` means "no reading in that slot".
+* The **last nonzero sample** is the most recent reading; the vendor exposes it as the current
+  heart rate for the day.
+* `i < 96` is the sleep window (00:00–08:00) used to derive sleep min/max/avg. OpenFit ignores the
+  derived sleep fields for now but keeps them in mind for the sleep screen.
+* The vendor rejects the entire array if any nonzero sample is below 45 bpm, treating it as corrupt
+  (`service.e.a(List)` checks the range). OpenFit does the same.
+* An otherwise valid frame with no nonzero samples is allowed; it just means no history yet.
+
+Decoded example from 2026-11-19 08:36 (`AB 00 01 29 46 00 00 00 03 00 0D 01 24 35 73 …`):
+date `2026-11-19`, samples `5F` (95 bpm) and `52` (82 bpm), latest `82`.
+
+OpenFit logs `ZhBracelet HR history · YYYY-MM-DD · latest N bpm · X sample(s) · day min–max avg M`
+and shows the latest value if it is nonzero. This gives a real heart rate on the first connection
+even when neither `0x19` nor `0x29` produces a live `0x0B` frame.
 
 **Writes must be serialised.** `c` keeps an outbound `List<byte[]>` and writes one frame at a time;
 Android also refuses a second `writeCharacteristic` while one is pending. Right after a bind the
@@ -692,10 +738,10 @@ Once the bind is accepted the watch pushes a burst on `00000003` with no request
 key `0x31` (payload `00 F7 00 3F 01 FC`; the same frame also arrives on connect before the bind),
 `0x02` (52 bytes, mostly zero), `0x37` (28 bytes), `0x0D` (292 bytes, spread over several
 notifications), `0x27` and `0x38` (3 bytes each), `0x08` (22 bytes), `0x09` (6 bytes containing
-the raw watch MAC `D4 27 1D 30 44 9B`), then the key-4 echo and the two key-0x42 acks. The frames
-are plaintext and may be an initial health/status sync, but their payload layout is not decoded
-yet; OpenFit logs and ignores them. The `0x09` MAC reply and the 292-byte `0x0D` frame are the
-most promising next targets.
+the raw watch MAC `D4 27 1D 30 44 9B`), then the key-4 echo and the two key-0x42 acks. The `0x0D`
+frame is now decoded as today's heart-rate history (see above); the remaining frames are plaintext
+status/settings blobs that OpenFit logs and ignores. The `0x09` MAC reply is confirmed and could be
+used to validate the saved binding.
 
 ### Validated on hardware (2026-11-18 11:49, build `b701e4a`)
 

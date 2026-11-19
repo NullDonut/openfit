@@ -2100,6 +2100,15 @@ public final class MainActivity extends Activity {
                 stopZhHeartRate("heart rate reported");
                 continue;
             }
+            ZhBraceletBinding.HeartRateHistory history =
+                    ZhBraceletBinding.parseHeartRateHistory(frame);
+            if (history != null) {
+                logPairing("ZhBracelet HR history · " + history.date + " · latest "
+                        + history.recent + " bpm · " + history.sampleCount + " sample(s) · day "
+                        + history.dayMin + "–" + history.dayMax + " avg " + history.dayAverage);
+                if (history.recent > 0) showHeartRate(history.recent);
+                continue;
+            }
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
             if (info == null) {
                 ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);

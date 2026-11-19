@@ -247,6 +247,59 @@ public class ZhBraceletBindingTest {
         assertTrue(ZhBraceletBinding.parseHeartRate(otherKey) < 0);
     }
 
+    @Test public void parseHeartRateHistoryDecodesTheDailyArray() {
+        byte[] frame = heartHistoryFrame();
+        frame[17 + 10] = (byte) 0x5F;  // 95 bpm at 00:50
+        frame[17 + 287] = (byte) 0x52; // 82 bpm, most recent slot
+        ZhBraceletBinding.HeartRateHistory history =
+                ZhBraceletBinding.parseHeartRateHistory(frame);
+        assertNotNull(history);
+        assertEquals("2026-11-19", history.date);
+        assertEquals(82, history.recent);
+        assertEquals(95, history.dayMax);
+        assertEquals(82, history.dayMin);
+        assertEquals(88, history.dayAverage);
+        assertEquals(2, history.sampleCount);
+    }
+
+    @Test public void parseHeartRateHistoryRejectsBadFrames() {
+        assertNull(ZhBraceletBinding.parseHeartRateHistory(null));
+        assertNull(ZhBraceletBinding.parseHeartRateHistory(new byte[] {(byte) 0xAB}));
+
+        byte[] shortFrame = java.util.Arrays.copyOf(heartHistoryFrame(), 100);
+        assertNull(ZhBraceletBinding.parseHeartRateHistory(shortFrame));
+
+        byte[] wrongKey = heartHistoryFrame();
+        wrongKey[10] = (byte) ZhBraceletBinding.KEY_HEART_RATE;
+        assertNull(ZhBraceletBinding.parseHeartRateHistory(wrongKey));
+
+        // The vendor drops the array when any nonzero sample is below 45 bpm.
+        byte[] implausible = heartHistoryFrame();
+        implausible[17] = 44;
+        assertNull(ZhBraceletBinding.parseHeartRateHistory(implausible));
+
+        byte[] empty = heartHistoryFrame();
+        ZhBraceletBinding.HeartRateHistory history =
+                ZhBraceletBinding.parseHeartRateHistory(empty);
+        assertNotNull(history);
+        assertEquals(0, history.recent);
+        assertEquals(0, history.sampleCount);
+    }
+
+    private static byte[] heartHistoryFrame() {
+        byte[] frame = new byte[305];
+        frame[0] = (byte) 0xAB;
+        frame[2] = 0x01;
+        frame[3] = 0x29;
+        frame[8] = (byte) ZhBraceletBinding.DIRECTION_WATCH;
+        frame[10] = (byte) ZhBraceletBinding.KEY_HEART_RATE_HISTORY;
+        frame[11] = 0x01;
+        frame[12] = 0x24; // 292-byte payload
+        frame[13] = 0x35; // 2026
+        frame[14] = 0x73; // November, day 19
+        return frame;
+    }
+
     private static byte[] hex(String value) {
         byte[] out = new byte[value.length() / 2];
         for (int i = 0; i < out.length; i++) {
