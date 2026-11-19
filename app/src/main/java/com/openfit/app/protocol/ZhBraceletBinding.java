@@ -34,6 +34,16 @@ public final class ZhBraceletBinding {
     public static final int KEY_USER_INFO = 0x04;
     public static final int KEY_STATUS = 0x0F;
     /**
+     * One-shot measurement result. The vendor's dispatcher maps key 11 to
+     * "measurement returns heart rate" and reads the BPM from the first payload byte
+     * ({@code service.c.h(byte[]) → service.a.a(byte[],int,int,int)}).
+     */
+    public static final int KEY_HEART_RATE = 0x0B;
+    /** {@code openMeasurement()} / {@code closeMeasurement()}: 1-byte payload, 1 = start. */
+    public static final int KEY_MEASUREMENT = 0x19;
+    /** {@code setContinuousHr(boolean)}: 1-byte payload, 1 = continuous HR on. */
+    public static final int KEY_CONTINUOUS_HR = 0x29;
+    /**
      * Command acknowledgement: payload {@code [command key] 00 [result]}. Observed on the
      * ColorFit Ultra Buzz answering the clock sync (key 1) and user info (key 4) after a bind.
      */
@@ -101,9 +111,41 @@ public final class ZhBraceletBinding {
         return frame(KEY_USER_INFO, payload);
     }
 
+    /**
+     * Builds {@code openMeasurement()} / {@code closeMeasurement()} (SDK {@code a.u()} and
+     * {@code a.b()}): key {@link #KEY_MEASUREMENT} with a single 1/0 payload byte. Starting a
+     * measurement makes the watch report a BPM on {@link #KEY_HEART_RATE}.
+     */
+    public static byte[] measurementFrame(boolean start) {
+        return frame(KEY_MEASUREMENT, new byte[] {(byte) (start ? 1 : 0)});
+    }
+
+    /**
+     * Builds {@code setContinuousHr(boolean)} (SDK {@code a.j(boolean)}): key
+     * {@link #KEY_CONTINUOUS_HR} with a single 1/0 payload byte. This toggles the watch's own
+     * continuous heart-rate mode rather than starting a one-shot measurement.
+     */
+    public static byte[] continuousHeartRateFrame(boolean on) {
+        return frame(KEY_CONTINUOUS_HR, new byte[] {(byte) (on ? 1 : 0)});
+    }
+
     private static int clampByte(int value) {
         if (value < 1) return 1;
         return Math.min(value, 255);
+    }
+
+    /**
+     * Parses a {@link #KEY_HEART_RATE} reply and returns the BPM, or {@code -1} when this is not a
+     * heart-rate frame or the watch reported nothing ({@code 0}). The vendor reads exactly
+     * {@code frame[13] & 0xFF} ({@code service.a.a(byte[],int,int,int)}).
+     */
+    public static int parseHeartRate(byte[] frame) {
+        if (frame == null || frame.length < 14) return -1;
+        if ((frame[0] & 0xFF) != MAGIC) return -1;
+        if ((frame[8] & 0xFF) != DIRECTION_WATCH) return -1;
+        if ((frame[10] & 0xFF) != KEY_HEART_RATE) return -1;
+        int bpm = frame[13] & 0xFF;
+        return bpm > 0 ? bpm : -1;
     }
 
     /** Parses one acknowledgement reply, or returns {@code null} for any other frame. */
@@ -188,6 +230,9 @@ public final class ZhBraceletBinding {
             case KEY_USER_INFO: return "user info";
             case KEY_STATUS: return "status";
             case KEY_UNBIND: return "unbind";
+            case KEY_HEART_RATE: return "heart rate";
+            case KEY_MEASUREMENT: return "measurement";
+            case KEY_CONTINUOUS_HR: return "continuous HR";
             case KEY_BIND_INFO: return "bind info";
             case KEY_BIND: return "bind";
             case KEY_COMMAND_ACK: return "command ack";

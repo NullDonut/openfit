@@ -51,6 +51,16 @@ the watch" / "User info acknowledged by the watch" and recognises the `0x42` ack
 also captured the watch's unsolicited post-bind burst (keys `0x31`, `0x02`, `0x37`, `0x0D`,
 `0x27`, `0x38`, `0x08`, `0x09`); `0x09` returns the raw MAC and `0x0D` is a 292-byte frame, so
 those are the first targets for health/device data.
+
+The 2026-11-18 18:39 run closed two questions. The SE liveness probe (ids 32/33) was **silent**:
+the transport acknowledged both commands and the watch answered neither, so SE is stubbed out on
+this firmware and cannot supply heart rate. The same run also recovered the ZhBracelet heart-rate
+commands from `com.zjw.zhbraceletsdk` (decompiled from a single-dex mini APK, never the full APK):
+`openMeasurement()`/`closeMeasurement()` = key `0x19` with a 1/0 payload, `setContinuousHr()` =
+key `0x29`, and the one-shot reply arrives on key `0x0B` with BPM in `frame[13]`. OpenFit now asks
+for one measurement after the post-bind user info, stores the reading, and sends the stop frame;
+a 25 s guard stops the optical sensor if the watch never answers. The SBP/DBP fields in
+`HeartInfo` are derived from `UserCalibration`, not measured, and are deliberately not shown.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -545,7 +555,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | File | Purpose |
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
-| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus bind frame (key 108) and key-52 result parsing |
+| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus frames: key-108 bind, clock sync, profile, heart-rate measurement start/stop and `0x0B` parsing |
 | `app/src/main/java/com/openfit/app/protocol/ZhFrameReader.java` | Reassembles `0xAB` frames from split `00000003` notifications |
 | `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. `aa01` Berry-over-BLE and the `00000001` ZhBracelet channel |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
@@ -561,10 +571,10 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeGattTest.java` | 9 tests: chunk math, announce/control golden bytes, packet prefix, out-of-order transfer reassembly |
 | `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 13 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
-| `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 6 tests: golden bind frames, declared length, key-52 replies, split frames, resync |
+| `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 18 tests: golden bind/time-sync/profile frames, measurement and continuous-HR frames, BPM parsing, key-52 replies, split frames, resync |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (76 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (80 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -657,12 +667,11 @@ a secret.
    (cmd 1), user id (cmd 2), bind (cmd 3, only if unbound), confirm (cmd 4).
 6. **Post-bind wiring:** `MainActivity` performs connect → discovery → profile detection →
    notification setup → MTU → SE probe (ids 0/16/17) → ZhBracelet bind → time sync (key 1) →
-   user info (key 4, 50 ms later). The pairing and the vendor's two follow-up frames are
-   implemented. When the SE account group is refused or silent, the app now runs a bounded
-   read-only liveness probe (id 32 device info, id 33 battery) *before* the Zh fallback; a reply
-   means SE settings/heart rate are usable without decompiling the Zh SDK. On the saved-binding
-   fast path, where SE is skipped, the same probes run 800 ms after the Zh bind is confirmed and
-   only report. Next: device info (key 8) and parsing the health/data channels.
+   user info (key 4, 50 ms later) → heart-rate measurement (key `0x19`). A `0x0B` reply updates
+   the dashboard and is stored; a 25 s guard sends the stop frame if no reading arrives. The SE
+   liveness probe (ids 32/33) is retained for diagnostics but came back silent on the Buzz, so
+   health data comes from Zh. Next: continuous HR (`0x29`) and the protobuf `BasicData.heart_rate`
+   report (FitnessID 45/47), plus overnight step/calorie parsing.
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
@@ -697,9 +706,10 @@ a secret.
 pair on the watch (done, build b701e4a)
     -> reconnect and check type 1 answers result=1 (done, build 91777d7)
     -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
-    -> verify their acks on the watch, then add device info (key 8)
-    -> probe SE ids 32/33 to decide where heart rate comes from (implemented, retest pending)
-    -> parse device data on 16186f00 for health screens
+    -> verify their acks on the watch (done: key 0x42, result=1)
+    -> start a one-shot heart-rate measurement (key 0x19) and read key 0x0B (implemented, retest pending)
+    -> try continuous HR (0x29) or the protobuf basic-data report (FitnessID 45/47)
+    -> parse device data on 16186f00 for the remaining health screens
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```
 

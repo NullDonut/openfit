@@ -164,6 +164,9 @@ public class ZhBraceletBindingTest {
         assertEquals("status", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_STATUS));
         assertEquals("bind info", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_BIND_INFO));
         assertEquals("command ack", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_COMMAND_ACK));
+        assertEquals("heart rate", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_HEART_RATE));
+        assertEquals("measurement", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_MEASUREMENT));
+        assertEquals("continuous HR", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_CONTINUOUS_HR));
         assertEquals("key 0x08", ZhBraceletBinding.keyLabel(0x08));
     }
 
@@ -187,6 +190,60 @@ public class ZhBraceletBindingTest {
         assertEquals(ZhBraceletBinding.KEY_TIME_SYNC, answerAck.refersTo);
 
         assertNull(ZhBraceletBinding.parseAck(BIND_TYPE_0)); // phone-to-watch echo
+    }
+
+    @Test public void measurementFramesMatchTheVendorSdk() {
+        // com.zjw.zhbraceletsdk a.u(): openMeasurement(), key 0x19 payload 1.
+        byte[] start = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x19, 0x00, 0x01, 0x01
+        };
+        assertArrayEquals(start, ZhBraceletBinding.measurementFrame(true));
+        assertEquals(start.length, ZhBraceletBinding.declaredLength(start));
+
+        // a.b(): closeMeasurement() only clears the payload byte.
+        byte[] stop = start.clone();
+        stop[13] = 0x00;
+        assertArrayEquals(stop, ZhBraceletBinding.measurementFrame(false));
+    }
+
+    @Test public void continuousHeartRateFrameMatchesTheVendorSdk() {
+        // com.zjw.zhbraceletsdk a.j(boolean), key 41 (0x29), one payload byte.
+        byte[] on = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x29, 0x00, 0x01, 0x01
+        };
+        assertArrayEquals(on, ZhBraceletBinding.continuousHeartRateFrame(true));
+
+        byte[] off = on.clone();
+        off[13] = 0x00;
+        assertArrayEquals(off, ZhBraceletBinding.continuousHeartRateFrame(false));
+    }
+
+    @Test public void parseHeartRateReadsTheFirstPayloadByte() {
+        // Watch reply for key 11: direction 3, one payload byte carrying the BPM.
+        byte[] reply = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, (byte) 0x97, 0x00, 0x00, 0x4E,
+            0x03, 0x00, 0x0B, 0x00, 0x01, 0x48
+        };
+        assertEquals(72, ZhBraceletBinding.parseHeartRate(reply));
+    }
+
+    @Test public void parseHeartRateRejectsOtherFramesAndEmptyReadings() {
+        assertTrue(ZhBraceletBinding.parseHeartRate(null) < 0);
+        assertTrue(ZhBraceletBinding.parseHeartRate(BIND_TYPE_0) < 0); // phone-to-watch
+        assertTrue(ZhBraceletBinding.parseHeartRate(new byte[] {(byte) 0xAB}) < 0);
+
+        byte[] zero = {
+            (byte) 0xAB, 0x00, 0x00, 0x06, (byte) 0x97, 0x00, 0x00, 0x4E,
+            0x03, 0x00, 0x0B, 0x00, 0x01, 0x00
+        };
+        assertTrue("0 bpm is not a reading", ZhBraceletBinding.parseHeartRate(zero) < 0);
+
+        byte[] otherKey = zero.clone();
+        otherKey[10] = ZhBraceletBinding.KEY_STATUS;
+        otherKey[13] = 0x48;
+        assertTrue(ZhBraceletBinding.parseHeartRate(otherKey) < 0);
     }
 
     private static byte[] hex(String value) {

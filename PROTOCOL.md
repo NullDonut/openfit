@@ -240,13 +240,18 @@ saved-binding reconnect the SE exchange is skipped entirely, so the same two pro
 ZhBracelet bind is confirmed; that run only reports and never changes the pairing result. The result
 is one line in the connection log:
 
-- `SE command set is alive · N of 2 probes answered` — SE carries settings and heart rate, and the
-  ZhBracelet SDK does not have to be decompiled for them.
+- `SE command set is alive · N of 2 probes answered` — SE carries settings and heart rate.
 - `SE command set refused the probes too` — the whole SE surface is stubbed out on this firmware.
 - `SE command set silent` — no evidence either way; the transport itself may be the problem.
 
 Reply payloads are logged as raw hex; the `SEGetDeviceInfo` / battery field numbers are not decoded
 yet.
+
+**Verdict on the ColorFit Ultra Buzz (2026-11-18 18:39):** silent. Ids 32 and 33 were both written
+through the announce/chunk transport, the transport acknowledged both chunks, and the watch replied
+to neither before the 4 s window closed (`SE command set silent · only the ZhBracelet channel
+answers`). Combined with ids 16/17 answering `NOT_SUPPORT`, the SE surface on this firmware is
+stubbed end to end. Heart rate therefore comes from the ZhBracelet channel (see below), not SE.
 
 #### Noise Watch Beat (2026-11-18): the SE bind is the real path
 
@@ -621,6 +626,47 @@ The `0x42` form is what the Buzz actually sends after the bind: at 17:45:39 it a
 sync with `AB 00 00 08 97 00 00 4E 03 00 42 00 03 01 00 01` and the user info with
 `… 42 00 03 04 00 01`, i.e. both accepted (`result=1`). The app now reports these as
 "Clock sync acknowledged by the watch" / "User info acknowledged by the watch".
+
+### Heart rate over ZhBracelet (recovered 2026-11-18)
+
+SE cannot deliver health data on this firmware, so the ZhBracelet script channel is the only
+route. The vendor SDK exposes three relevant entry points:
+
+| SDK call | Frame | Meaning |
+|---|---|---|
+| `ZhBraceletService.openMeasurement()` → `c.J()` → `a.u()` | `AB 00 00 06 00 00 00 00 01 00 19 00 01 01` | start a one-shot measurement |
+| `closeMeasurement()` → `c.e()` → `a.b()` | same, last byte `00` | stop it |
+| `setContinuousHr(true/false)` → `c.g(z)` → `a.j(z)` | key `0x29`, last byte `01`/`00` | toggle the watch's own continuous mode |
+
+The reply is key `0x0B` (11). `com.zjw.zhbraceletsdk.service.c.b(byte[])` maps key 11 to
+"measurement returns heart rate" and calls `c.h(byte[])`, which reads the BPM from the first payload
+byte:
+
+```
+AB 00 00 LL .. .. .. .. 03 00 0B 00 01 HH     HH = bpm, 0 = no reading yet
+```
+
+`service.a.a(byte[], int, int, int)` returns `new HeartInfo(bArr[13] & 255, …)`. The SBP/DBP fields
+in that bean are computed from `UserCalibration`, **not measured** — the same key-11 frame carries
+only the heart rate. OpenFit therefore ignores the pressure fields and treats `0x0B` as BPM only.
+
+The SDK also has a protobuf path on the same channel for watch-driven reporting:
+`WearProtos.WearPacket.Type.FITNESS` with `Fitness.fitness_id`:
+
+| FitnessID | Value | Notes |
+|---|---|---|
+| `GET_HEART_RATE_MONITOR` | 10 | read the monitor config |
+| `SET_HEART_RATE_MONITOR` | 11 | `HeartRateMonitor{mode, frequency, warning, warning_value}`; mode `AUTO = 0`, `OFF = 1` |
+| `REGISTER_BASIC_DATA_REPORT` | 45 | subscribe to `REPORT_BASIC_DATA` (47) |
+
+`Fitness.basic_data` (field 39) is a `BasicData` message whose field 4 is `heart_rate`. The exact
+Zh wrapping of those protobuf packets (likely key `0x7F`) is not confirmed, so one-shot key `0x19`
+is the implemented path and continuous mode (`0x29` / id 45) is the next experiment.
+
+OpenFit sends the measurement start 50 ms after the user-info frame, logs
+`ZhBracelet heart rate · N bpm`, stores the reading and immediately sends the stop frame. If no
+reply arrives within 25 s it logs `No heart-rate reply from the watch · stopping the measurement`
+and sends the stop anyway, so the watch's optical sensor is never left running.
 
 ### Post-bind push burst (2026-11-18 17:45)
 

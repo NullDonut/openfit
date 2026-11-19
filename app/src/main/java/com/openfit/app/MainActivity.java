@@ -110,6 +110,11 @@ public final class MainActivity extends Activity {
      */
     private static final long ZH_POST_BIND_GAP_MS = 50L;
     /**
+     * A one-shot heart-rate measurement takes several seconds on the wrist and the watch only
+     * answers once it has a reading, so allow a longer window than a plain command ack.
+     */
+    private static final long ZH_MEASURE_TIMEOUT_MS = 25_000L;
+    /**
      * The watch computes calories and distance from the profile the phone announces. OpenFit has
      * no profile screen yet, so it sends a neutral default instead of zeros (the vendor clamps
      * 0 cm / 0 kg to 1). The log names the values so the next run is unambiguous.
@@ -231,6 +236,9 @@ public final class MainActivity extends Activity {
     private int zhLastTxKey = -1;
     private Runnable zhStepTimeout;
     private Runnable zhPostBindTask;
+    /** True between the measurement-start frame and the watch's reply (or its timeout). */
+    private boolean zhMeasureActive;
+    private Runnable zhMeasureTimeout;
 
     // Berry pairing. NoiseFit has two Berry transports for the account exchange and both carry
     // exactly the same private 2/3/4 frames: a BLE channel on the aa01 service (its "Berry-Test"
@@ -1843,6 +1851,58 @@ public final class MainActivity extends Activity {
         if (!writeZh(frame)) {
             logPairing("zh-user-info write rejected by the Bluetooth stack");
         }
+        scheduleZhPostBind(this::sendZhHeartRateStart, ZH_POST_BIND_GAP_MS);
+    }
+
+    /**
+     * Post-bind step 3: ask for one heart-rate measurement. The vendor's
+     * {@code openMeasurement()} sends key {@code 0x19}; the watch answers a single
+     * {@code 0x0B} frame once it has a reading.
+     */
+    private void sendZhHeartRateStart() {
+        zhPostBindTask = null;
+        if (zhWriteChar == null || gatt == null) return;
+        byte[] frame = ZhBraceletBinding.measurementFrame(true);
+        zhLastTxKey = ZhBraceletBinding.KEY_MEASUREMENT;
+        logPairing("TX zh-measure-start · " + hex(frame));
+        if (!writeZh(frame)) {
+            logPairing("zh-measure-start write rejected by the Bluetooth stack");
+            return;
+        }
+        zhMeasureActive = true;
+        scheduleZhMeasureTimeout();
+    }
+
+    /** Sends the measurement-stop frame if a measurement is still open. */
+    private void sendZhHeartRateStop(String reason) {
+        cancelZhMeasureTimeout();
+        if (!zhMeasureActive) return;
+        zhMeasureActive = false;
+        if (zhWriteChar == null || gatt == null) return;
+        byte[] frame = ZhBraceletBinding.measurementFrame(false);
+        zhLastTxKey = ZhBraceletBinding.KEY_MEASUREMENT;
+        logPairing("TX zh-measure-stop · " + hex(frame) + " · " + reason);
+        if (!writeZh(frame)) {
+            logPairing("zh-measure-stop write rejected by the Bluetooth stack");
+        }
+    }
+
+    private void scheduleZhMeasureTimeout() {
+        cancelZhMeasureTimeout();
+        zhMeasureTimeout = () -> {
+            zhMeasureTimeout = null;
+            if (!zhMeasureActive) return;
+            logPairing("No heart-rate reply from the watch · stopping the measurement");
+            sendZhHeartRateStop("measurement timed out");
+        };
+        handler.postDelayed(zhMeasureTimeout, ZH_MEASURE_TIMEOUT_MS);
+    }
+
+    private void cancelZhMeasureTimeout() {
+        if (zhMeasureTimeout != null) {
+            handler.removeCallbacks(zhMeasureTimeout);
+            zhMeasureTimeout = null;
+        }
     }
 
     private void scheduleZhPostBind(Runnable task, long delayMs) {
@@ -1931,6 +1991,13 @@ public final class MainActivity extends Activity {
         if (value == null || value.length == 0) return;
         logPairing("RX " + shortUuid(characteristic.getUuid()) + " · " + hex(value));
         for (byte[] frame : zhReader.append(value)) {
+            int bpm = ZhBraceletBinding.parseHeartRate(frame);
+            if (bpm > 0) {
+                logPairing("ZhBracelet heart rate · " + bpm + " bpm");
+                showHeartRate(bpm);
+                sendZhHeartRateStop("measurement reported");
+                continue;
+            }
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
             if (info == null) {
                 ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);
@@ -2558,6 +2625,8 @@ public final class MainActivity extends Activity {
         seProbeFailure = null;
         cancelZhTimeout();
         cancelZhPostBind();
+        cancelZhMeasureTimeout();
+        zhMeasureActive = false;
         zhReader.reset();
         zhWriteChar = null;
         zhNotifyChar = null;
@@ -2819,6 +2888,11 @@ public final class MainActivity extends Activity {
     private void updateHeartRate(byte[] value) {
         int bpm = HeartRateParser.parse(value);
         if (bpm < 0) return;
+        showHeartRate(bpm);
+    }
+
+    /** Shows and stores one reading; safe to call from any thread. */
+    private void showHeartRate(int bpm) {
         runOnUiThread(() -> {
             heartRateValue.setText(String.valueOf(bpm));
             recordHeartRate(bpm);
@@ -2999,6 +3073,10 @@ public final class MainActivity extends Activity {
     private void closeGatt() {
         cancelConnectionTimeout();
         cancelNotificationTimeout();
+        cancelZhTimeout();
+        cancelZhPostBind();
+        cancelZhMeasureTimeout();
+        zhMeasureActive = false;
         cancelSeTimeouts();
         seWriteQueue.clear();
         seCurrentWrite = null;
