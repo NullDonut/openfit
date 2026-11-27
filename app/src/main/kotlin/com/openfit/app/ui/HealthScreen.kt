@@ -115,25 +115,6 @@ private fun HealthScreen(state: HealthUiState) {
     }
 }
 
-/**
- * The Nothing-style eyebrow: monospaced, uppercase, wide tracking, red accent.
- *
- * The Views screens use the same treatment for their section labels, which keeps the Compose
- * and Java parts of the app visually consistent.
- */
-@Composable
-private fun Eyebrow(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelMedium.copy(
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.4.sp
-        ),
-        color = MaterialTheme.colorScheme.primary
-    )
-}
-
 @Composable
 private fun HeartCard(state: HealthUiState) {
     Card(

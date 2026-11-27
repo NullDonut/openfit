@@ -137,6 +137,12 @@ The same change fixed an edge-to-edge bug visible on Android 15: targetSdk 35 no
 space for the system bars, so the tab eyebrow was drawn under the status-bar clock.
 `MainActivity.applySystemBarInsets()` now pads the scroll area by the top inset and grows the
 bottom bar by the bottom inset.
+
+Home and Sleep moved to the same Compose treatment on the same day, sharing `Components.kt`
+(eyebrow + secondary button). Only Devices remains on Views, because it hosts the scan results,
+connection log and pairing actions. The user's next feature list, in their words and with no
+fixed order: a settings page to edit watch features (auto HR, reminders, other vendor settings),
+making other sensors work, watch faces, and continuing the app UI.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,

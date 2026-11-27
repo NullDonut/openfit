@@ -56,6 +56,11 @@ import com.openfit.app.protocol.ZhBraceletBinding;
 import com.openfit.app.protocol.ZhFrameReader;
 import com.openfit.app.ui.HealthScreenController;
 import com.openfit.app.ui.HealthUiState;
+import com.openfit.app.ui.HomeActions;
+import com.openfit.app.ui.HomeScreenController;
+import com.openfit.app.ui.HomeUiState;
+import com.openfit.app.ui.SleepScreenController;
+import com.openfit.app.ui.SleepUiState;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
@@ -171,12 +176,12 @@ public final class MainActivity extends ComponentActivity {
     private LinearLayout sleepPanel;
     private LinearLayout bottomNavigation;
     private final List<TextView> tabLabels = new ArrayList<>();
-    private TextView homeWatchSummary;
+    private HomeScreenController homeScreen;
     private TextView connectionStatus;
     private TextView deviceStatus;
     private HealthScreenController healthScreen;
     private TextView scanStatus;
-    private TextView sleepLog;
+    private SleepScreenController sleepScreen;
     private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
@@ -375,46 +380,11 @@ public final class MainActivity extends ComponentActivity {
 
         homePanel = panel();
         page.addView(homePanel);
-        LinearLayout masthead = new LinearLayout(this);
-        masthead.setGravity(Gravity.CENTER_VERTICAL);
-        homePanel.addView(masthead, lp(-1, -2, 0, 0, 0, 25));
-        TextView mark = text("●", 15, C_RED, true);
-        masthead.addView(mark, lp(dp(24), -2));
-        TextView brand = text("OPENFIT", 17, C_TEXT, true);
-        brand.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        brand.setLetterSpacing(.12f);
-        masthead.addView(brand, lp(-2, -2));
-        TextView edition = text("  /  DAILY DEVICE LOG", 9, C_MUTED, true);
-        edition.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
-        edition.setLetterSpacing(.03f);
-        masthead.addView(edition, lp(-2, -2, 5, 3, 0, 0));
-
-        TextView greeting = text(new java.text.SimpleDateFormat("EEE  d MMM", Locale.getDefault())
-                .format(new Date()).toUpperCase(Locale.ROOT) + "  ·  HEALTH STATUS", 10, C_MUTED, true);
-        greeting.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        greeting.setLetterSpacing(.04f);
-        homePanel.addView(greeting, lp(-1, -2, 0, 0, 0, 9));
-        TextView headline = text("Less noise.\nMore signal.", 34, C_TEXT, true);
-        headline.setLineSpacing(dp(-1), 1f);
-        homePanel.addView(headline, lp(-1, -2));
-        TextView subtitle = text("Your health, at a glance.", 13, C_MUTED, false);
-        homePanel.addView(subtitle, lp(-1, -2, 0, 7, 0, 18));
-        LinearLayout overview = card();
-        homePanel.addView(overview, lp(-1, -2, 0, 0, 0, 14));
-        TextView overviewLabel = text("YOUR WATCH", 10, C_MUTED, true);
-        overviewLabel.setLetterSpacing(.12f);
-        overview.addView(overviewLabel, lp(-1, -2));
-        homeWatchSummary = text("No watch connected", 18, C_TEXT, true);
-        overview.addView(homeWatchSummary, lp(-1, -2, 0, 10, 0, 0));
-        TextView overviewHint = text("Pair a watch to see supported data and connection details.", 12, C_MUTED, false);
-        overviewHint.setLineSpacing(dp(2), 1f);
-        overview.addView(overviewHint, lp(-1, -2, 0, 5, 0, 10));
-        Button openWatch = secondaryButton("Manage watch   →");
-        openWatch.setOnClickListener(v -> selectTab(2));
-        overview.addView(openWatch, lp(-1, dp(44)));
-        Button openHealth = secondaryButton("View health   →");
-        openHealth.setOnClickListener(v -> selectTab(1));
-        homePanel.addView(openHealth, lp(-1, dp(48), 0, 0, 0, 0));
+        homeScreen = new HomeScreenController(new HomeActions() {
+            @Override public void onManageWatch() { selectTab(2); }
+            @Override public void onViewHealth() { selectTab(1); }
+        });
+        homePanel.addView(homeScreen.createView(this), lp(-1, -2));
 
         devicePanel = panel();
         page.addView(devicePanel);
@@ -461,30 +431,9 @@ public final class MainActivity extends ComponentActivity {
 
         sleepPanel = panel();
         page.addView(sleepPanel);
-        addPanelHeading(sleepPanel, "SLEEP", "Personal log");
-        LinearLayout sleepCard = card();
-        sleepPanel.addView(sleepCard, lp(-1, -2, 0, 0, 0, 14));
-        LinearLayout sleepHeading = new LinearLayout(this);
-        sleepHeading.setGravity(Gravity.CENTER_VERTICAL);
-        sleepCard.addView(sleepHeading, lp(-1, -2));
-        TextView sleepTitle = text("Sleep", 16, C_TEXT, true);
-        sleepHeading.addView(sleepTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView moon = text("◌", 18, C_RED, true);
-        sleepHeading.addView(moon, lp(-2, -2));
-        sleepLog = text("No sleep entry yet", 20, C_TEXT, true);
-        sleepCard.addView(sleepLog, lp(-1, -2, 0, 12, 0, 0));
-        TextView sleepNote = text("A private note, stored only on this phone.", 12, C_MUTED, false);
-        sleepNote.setLineSpacing(dp(2), 1f);
-        sleepCard.addView(sleepNote, lp(-1, -2, 0, 5, 0, 0));
-        Button sleep = secondaryButton("Add sleep duration   +");
-        sleep.setOnClickListener(v -> showSleepEditor());
-        sleepCard.addView(sleep, lp(-1, dp(48), 0, 14, 0, 0));
+        sleepScreen = new SleepScreenController(this::showSleepEditor);
+        sleepPanel.addView(sleepScreen.createView(this), lp(-1, -2));
 
-        TextView privacy = text("PRIVATE BY DESIGN     ·     STORED ON THIS PHONE", 9, C_MUTED, true);
-        privacy.setLetterSpacing(.06f);
-        privacy.setGravity(Gravity.CENTER);
-        privacy.setLineSpacing(dp(3), 1f);
-        homePanel.addView(privacy, lp(-1, -2, 0, 9, 0, 0));
         buildBottomNavigation(shell);
         applySystemBarInsets(shell, scroll);
         selectTab(0);
@@ -996,7 +945,7 @@ public final class MainActivity extends ComponentActivity {
                 connectionReady = false;
                 connectionSetup = false;
                 deviceStatus.setText("No watch connected");
-                homeWatchSummary.setText("No watch connected");
+                updateHomeWatch("No watch connected");
                 connectionStatus.setText(status == BluetoothGatt.GATT_SUCCESS
                         ? "Disconnected · reconnect when you’re ready"
                         : "Watch disconnected · GATT status " + status);
@@ -1022,7 +971,7 @@ public final class MainActivity extends ComponentActivity {
             }
         } catch (SecurityException ignored) { }
         deviceStatus.setText(connectedDeviceName);
-        homeWatchSummary.setText(connectedDeviceName);
+        updateHomeWatch(connectedDeviceName);
         try {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString(KEY_DEVICE_ADDRESS, source.getDevice().getAddress())
@@ -1257,7 +1206,7 @@ public final class MainActivity extends ComponentActivity {
         String notifications = notificationQueue.isEmpty() ? ""
                 : notificationSetupFailed ? " · some notifications unavailable" : " · notifications enabled";
         deviceStatus.setText(connectedDeviceName);
-        homeWatchSummary.setText(connectedDeviceName);
+        updateHomeWatch(connectedDeviceName);
         connectionStatus.setText("Connected · " + label + notifications);
         scanStatus.setText("●  CONNECTED / TAP FOR DIAGNOSTICS");
         reconnectButton.setText("Reconnect to " + connectedDeviceName);
@@ -3206,14 +3155,20 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void refreshSleepSummary() {
+        if (sleepScreen == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         int duration = prefs.getInt(KEY_SLEEP_MINUTES, 0);
-        if (duration <= 0) { sleepLog.setText("No sleep entry yet"); return; }
-        int hours = duration / 60;
-        int minutes = duration % 60;
+        if (duration <= 0) { sleepScreen.update(new SleepUiState(0, "")); return; }
         String date = prefs.getString(KEY_SLEEP_DATE, "");
-        String label = date.equals(java.time.LocalDate.now().toString()) ? "Last night" : date;
-        sleepLog.setText(String.format(Locale.getDefault(), "%s · %dh %02dm", label, hours, minutes));
+        String label = date.equals(java.time.LocalDate.now().toString())
+                ? "LAST NIGHT" : date.toUpperCase(Locale.ROOT);
+        sleepScreen.update(new SleepUiState(duration, label));
+    }
+
+    /** Keeps the Compose Home tab in sync; safe to call from a BLE callback thread. */
+    private void updateHomeWatch(String name) {
+        if (homeScreen == null) return;
+        runOnUiThread(() -> homeScreen.update(new HomeUiState(name)));
     }
 
     @SuppressWarnings("MissingPermission")
@@ -3248,7 +3203,7 @@ public final class MainActivity extends ComponentActivity {
             String name = prefs.getString(KEY_DEVICE_NAME, "saved watch");
             connectedDeviceName = name;
             deviceStatus.setText(name);
-            homeWatchSummary.setText(name);
+            updateHomeWatch(name);
             connectionStatus.setText("Saved watch · reconnect when nearby");
             reconnectButton.setText("Reconnect to " + name);
             reconnectButton.setVisibility(View.VISIBLE);
