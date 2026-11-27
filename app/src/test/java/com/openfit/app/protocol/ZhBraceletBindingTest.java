@@ -168,7 +168,7 @@ public class ZhBraceletBindingTest {
         assertEquals("measurement", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_MEASUREMENT));
         assertEquals("continuous HR", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_CONTINUOUS_HR));
         assertEquals("private feature", ZhBraceletBinding.keyLabel(ZhBraceletBinding.KEY_PRIVATE_FEATURE));
-        assertEquals("key 0x08", ZhBraceletBinding.keyLabel(0x08));
+        assertEquals("unit / device info", ZhBraceletBinding.keyLabel(0x08));
     }
 
     @Test public void parseAckReadsStatusAndDeviceAnswerFrames() {
@@ -297,6 +297,130 @@ public class ZhBraceletBindingTest {
         frame[12] = 0x24; // 292-byte payload
         frame[13] = 0x35; // 2026
         frame[14] = 0x73; // November, day 19
+        return frame;
+    }
+
+    @Test public void oneByteSettingsUseTheVendorKeyAndValue() {
+        assertArrayEquals(hex("AB000006000000000100200001" + "01"),
+                ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_DND, true));
+        assertArrayEquals(hex("AB0000060000000001000A0001" + "00"),
+                ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_BRIGHT_SCREEN, false));
+        assertArrayEquals(hex("AB000006000000000100090001" + "01"),
+                ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_TIME_FORMAT, true));
+        assertArrayEquals(hex("AB000006000000000100080001" + "00"),
+                ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_UNIT, false));
+    }
+
+    @Test public void findWatchSetsTheSessionFlagInByteNine() {
+        byte[] frame = ZhBraceletBinding.findDeviceFrame();
+        assertEquals(13, frame.length);
+        assertEquals((byte) 0xAB, frame[0]);
+        assertEquals(0x05, frame[3] & 0xFF);
+        assertEquals(0x80, frame[9] & 0xFF);
+        assertEquals(ZhBraceletBinding.KEY_FIND_DEVICE, frame[10] & 0xFF);
+        assertEquals(0, frame[12] & 0xFF);
+    }
+
+    @Test public void privateFeatureFramesPutTheSelectorFirst() {
+        assertArrayEquals(hex("AB0000080000000001007F0003" + "220101"),
+                ZhBraceletBinding.privateToggleFrame(
+                        ZhBraceletBinding.PRIVATE_BATTERY_SAVER, true));
+        assertArrayEquals(hex("AB0000070000000001007F0002" + "0200"),
+                ZhBraceletBinding.privateReadFrame(ZhBraceletBinding.PRIVATE_QUICK_EYE));
+    }
+
+    @Test public void sedentaryFrameRoundTripsThroughTheReplyParser() {
+        byte[] write = ZhBraceletBinding.sedentaryFrame(true, 2, 9, 30, 18, 45);
+        assertEquals(ZhBraceletBinding.KEY_SEDENTARY, write[10] & 0xFF);
+        assertEquals(4, write[12] & 0xFF);
+        byte[] payload = new byte[] {
+            (byte) ZhBraceletBinding.PRIVATE_SEDENTARY, 0,
+            write[13], write[14], write[15], write[16]
+        };
+        ZhBraceletBinding.SitReminder reminder =
+                ZhBraceletBinding.parseSedentary(privateReply(payload));
+        assertNotNull(reminder);
+        assertTrue(reminder.enable);
+        assertEquals(2, reminder.period);
+        assertEquals(9, reminder.startHour);
+        assertEquals(30, reminder.startMin);
+        assertEquals(18, reminder.endHour);
+        assertEquals(45, reminder.endMin);
+    }
+
+    @Test public void alarmFrameRoundTripsAndPicksTheNextOccurrence() {
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        now.clear();
+        now.set(2026, java.util.Calendar.NOVEMBER, 27, 10, 0, 0);
+        java.util.List<ZhBraceletBinding.Alarm> alarms = java.util.Arrays.asList(
+                new ZhBraceletBinding.Alarm(0, 7, 30, 128),
+                new ZhBraceletBinding.Alarm(1, 18, 0, 128));
+        byte[] write = ZhBraceletBinding.alarmsFrame(alarms, now);
+        assertEquals(ZhBraceletBinding.KEY_ALARM, write[10] & 0xFF);
+        assertEquals(10, write[12] & 0xFF);
+        // 07:30 has passed, so it lands tomorrow (2026-11-28); 18:00 is still today (2026-11-27).
+        assertEquals(0x6A, write[13] & 0xFF);
+        assertEquals(0xF8, write[14] & 0xFF);
+        assertEquals(0x77, write[15] & 0xFF);
+        assertEquals(0x80, write[16] & 0xFF);
+        assertEquals(0x80, write[17] & 0xFF);
+        assertEquals(0x6A, write[18] & 0xFF);
+        assertEquals(0xF7, write[19] & 0xFF);
+        assertEquals(0x20, write[20] & 0xFF);
+        assertEquals(0x08, write[21] & 0xFF);
+
+        byte[] records = new byte[10];
+        System.arraycopy(write, 13, records, 0, 10);
+        byte[] payload = new byte[12];
+        payload[0] = (byte) ZhBraceletBinding.PRIVATE_ALARMS;
+        payload[1] = 0;
+        System.arraycopy(records, 0, payload, 2, 10);
+        java.util.List<ZhBraceletBinding.Alarm> decoded =
+                ZhBraceletBinding.parseAlarms(privateReply(payload));
+        assertNotNull(decoded);
+        assertEquals(2, decoded.size());
+        assertEquals(7, decoded.get(0).hour);
+        assertEquals(30, decoded.get(0).minute);
+        assertFalse(decoded.get(0).repeats());
+        assertEquals(18, decoded.get(1).hour);
+        assertEquals(0, decoded.get(1).minute);
+        assertEquals(1, decoded.get(1).id);
+    }
+
+    @Test public void deviceInfoDecodesBatteryAndFirmware() {
+        byte[] payload = new byte[4];
+        payload[0] = 87;    // battery
+        payload[1] = 0x01;  // version number high byte -> N1xx
+        payload[2] = 0x08;  // version tail -> 1.1.8
+        byte[] frame = reply(ZhBraceletBinding.KEY_DEVICE_INFO, payload);
+        ZhBraceletBinding.DeviceInfo info = ZhBraceletBinding.parseDeviceInfo(frame);
+        assertNotNull(info);
+        assertEquals(87, info.battery);
+        assertEquals("N1.1.8", info.versionName);
+    }
+
+    @Test public void stepTargetIsBigEndian() {
+        byte[] frame = ZhBraceletBinding.userTargetStepFrame(8000);
+        assertEquals(ZhBraceletBinding.KEY_USER_TARGET_STEP, frame[10] & 0xFF);
+        assertArrayEquals(new byte[] {0x00, 0x00, 0x1F, 0x40},
+                new byte[] {frame[13], frame[14], frame[15], frame[16]});
+    }
+
+    private static byte[] privateReply(byte[] payload) {
+        return reply(ZhBraceletBinding.KEY_PRIVATE_FEATURE, payload);
+    }
+
+    private static byte[] reply(int key, byte[] payload) {
+        byte[] frame = new byte[13 + payload.length];
+        frame[0] = (byte) 0xAB;
+        int body = frame.length - 8;
+        frame[2] = (byte) ((body >> 8) & 0xFF);
+        frame[3] = (byte) (body & 0xFF);
+        frame[8] = (byte) ZhBraceletBinding.DIRECTION_WATCH;
+        frame[10] = (byte) key;
+        frame[11] = (byte) ((payload.length >> 8) & 0xFF);
+        frame[12] = (byte) (payload.length & 0xFF);
+        System.arraycopy(payload, 0, frame, 13, payload.length);
         return frame;
     }
 

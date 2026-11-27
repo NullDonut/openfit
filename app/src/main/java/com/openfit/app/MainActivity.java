@@ -59,6 +59,12 @@ import com.openfit.app.ui.HealthUiState;
 import com.openfit.app.ui.HomeActions;
 import com.openfit.app.ui.HomeScreenController;
 import com.openfit.app.ui.HomeUiState;
+import com.openfit.app.ui.SettingsActions;
+import com.openfit.app.ui.SettingsScreenController;
+import com.openfit.app.ui.SettingsUiState;
+import com.openfit.app.ui.SedentaryUi;
+import com.openfit.app.ui.AlarmUi;
+import com.openfit.app.ui.WatchInfoUi;
 import com.openfit.app.ui.SleepScreenController;
 import com.openfit.app.ui.SleepUiState;
 
@@ -174,6 +180,7 @@ public final class MainActivity extends ComponentActivity {
     private LinearLayout healthPanel;
     private LinearLayout devicePanel;
     private LinearLayout sleepPanel;
+    private LinearLayout settingsPanel;
     private LinearLayout bottomNavigation;
     private final List<TextView> tabLabels = new ArrayList<>();
     private HomeScreenController homeScreen;
@@ -182,6 +189,29 @@ public final class MainActivity extends ComponentActivity {
     private HealthScreenController healthScreen;
     private TextView scanStatus;
     private SleepScreenController sleepScreen;
+    private SettingsScreenController settingsScreen;
+    private int watchBattery;
+    private String watchFirmware = "";
+    private boolean dndEnabled;
+    private boolean brightScreenEnabled;
+    private boolean continuousHrEnabled;
+    private boolean batterySaverEnabled;
+    private boolean sedentaryEnabled;
+    private int sedentaryPeriod = 2;
+    private int sedentaryStartHour = 9;
+    private int sedentaryStartMin;
+    private int sedentaryEndHour = 18;
+    private int sedentaryEndMin;
+    // Written from BLE replies and read from the UI thread; copy-on-write keeps the Compose
+    // snapshot safe without locking the notification callback.
+    private final List<AlarmUi> watchAlarms = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private String pendingSettingLabel;
+    private int pendingSettingKey = -1;
+    private int pendingSettingSubKey = -1;
+    private Runnable pendingSettingRevert;
+    private Runnable pendingSettingTimeout;
+    private String settingsStatus = "";
+    private boolean settingsStatusIsError;
     private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
@@ -434,6 +464,34 @@ public final class MainActivity extends ComponentActivity {
         sleepScreen = new SleepScreenController(this::showSleepEditor);
         sleepPanel.addView(sleepScreen.createView(this), lp(-1, -2));
 
+        settingsPanel = panel();
+        page.addView(settingsPanel);
+        settingsScreen = new SettingsScreenController(new SettingsActions() {
+            @Override public void onRefreshInfo() { requestWatchInfo(); }
+            @Override public void onSyncTime() { syncWatchClock(); }
+            @Override public void onFindWatch() { findWatch(); }
+            @Override public void onToggleDoNotDisturb(boolean on) { writeSetting("do not disturb",
+                    ZhBraceletBinding.KEY_DND, -1,
+                    ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_DND, on)); }
+            @Override public void onToggleBrightScreen(boolean on) { writeSetting("bright screen",
+                    ZhBraceletBinding.KEY_BRIGHT_SCREEN, -1,
+                    ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_BRIGHT_SCREEN, on)); }
+            @Override public void onToggleContinuousHr(boolean on) { writeSetting("continuous HR",
+                    ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
+                    ZhBraceletBinding.continuousHeartRateFrame(on)); }
+            @Override public void onToggleBatterySaver(boolean on) { writeSetting("battery saver",
+                    -1, ZhBraceletBinding.PRIVATE_BATTERY_SAVER,
+                    ZhBraceletBinding.privateToggleFrame(
+                            ZhBraceletBinding.PRIVATE_BATTERY_SAVER, on)); }
+            @Override public void onToggleSedentary(boolean on) { sendSedentary(on); }
+            @Override public void onEditSedentaryWindow() { showSedentaryWindowEditor(); }
+            @Override public void onAddAlarm() { showAlarmEditor(); }
+            @Override public void onRemoveAlarm(int id) { removeWatchAlarm(id); }
+            @Override public void onForgetWatch() { confirmForgetWatch(); }
+        });
+        settingsPanel.addView(settingsScreen.createView(this), lp(-1, -2));
+        refreshSettings();
+
         buildBottomNavigation(shell);
         applySystemBarInsets(shell, scroll);
         selectTab(0);
@@ -486,7 +544,7 @@ public final class MainActivity extends ComponentActivity {
         bottomNavigation.setGravity(Gravity.CENTER);
         bottomNavigation.setPadding(dp(8), dp(8), dp(8), dp(8));
         bottomNavigation.setBackgroundColor(C_CARD);
-        String[] labels = {"⌂\nHome", "♥\nHealth", "◉\nDevices", "◌\nSleep"};
+        String[] labels = {"⌂\nHome", "♥\nHealth", "◉\nDevices", "◌\nSleep", "⚙\nSettings"};
         for (int i = 0; i < labels.length; i++) {
             final int index = i;
             TextView item = text(labels[i], 11, C_MUTED, true);
@@ -501,12 +559,13 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void selectTab(int tab) {
-        selectedTab = Math.max(0, Math.min(tab, 3));
+        selectedTab = Math.max(0, Math.min(tab, 4));
         if (homePanel == null) return;
         homePanel.setVisibility(selectedTab == 0 ? View.VISIBLE : View.GONE);
         healthPanel.setVisibility(selectedTab == 1 ? View.VISIBLE : View.GONE);
         devicePanel.setVisibility(selectedTab == 2 ? View.VISIBLE : View.GONE);
         sleepPanel.setVisibility(selectedTab == 3 ? View.VISIBLE : View.GONE);
+        settingsPanel.setVisibility(selectedTab == 4 ? View.VISIBLE : View.GONE);
         for (int i = 0; i < tabLabels.size(); i++) {
             tabLabels.get(i).setTextColor(i == selectedTab ? C_TEXT : C_MUTED);
             tabLabels.get(i).setBackgroundColor(i == selectedTab ? C_CARD_ALT : Color.TRANSPARENT);
@@ -1830,6 +1889,10 @@ public final class MainActivity extends ComponentActivity {
         if (!writeZh(frame)) {
             logPairing("zh-time-sync write rejected by the Bluetooth stack");
         }
+        // Read the watch's identity once the link is up. The vendor requests device info on
+        // every connect; it is queued behind the clock sync so it cannot race the post-bind burst.
+        byte[] info = ZhBraceletBinding.deviceInfoRequestFrame();
+        if (writeZh(info)) logPairing("TX zh-device-info · " + hex(info));
         scheduleZhPostBind(this::sendZhUserInfo, ZH_POST_BIND_GAP_MS);
     }
 
@@ -2134,8 +2197,11 @@ public final class MainActivity extends ComponentActivity {
                                 cancelZhHeartRateTimeout();
                             }
                         }
+                        if (pendingSettingKey >= 0 && ack.refersTo == pendingSettingKey) {
+                            resolvePendingSetting(ack.success);
+                        }
                     }
-                } else {
+                } else if (!handleSettingsFrame(frame)) {
                     int key = frame.length > 10 ? frame[10] & 0xFF : -1;
                     logPairing("ZhBracelet frame · " + ZhBraceletBinding.keyLabel(key) + " ignored");
                 }
@@ -3167,8 +3233,333 @@ public final class MainActivity extends ComponentActivity {
 
     /** Keeps the Compose Home tab in sync; safe to call from a BLE callback thread. */
     private void updateHomeWatch(String name) {
-        if (homeScreen == null) return;
-        runOnUiThread(() -> homeScreen.update(new HomeUiState(name)));
+        if (homeScreen != null) {
+            runOnUiThread(() -> homeScreen.update(new HomeUiState(name)));
+        }
+        refreshSettings();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Settings tab
+    // ---------------------------------------------------------------------------------------
+
+    /** Rebuilds the Settings state from the activity's fields and pushes it to Compose. */
+    private void refreshSettings() {
+        if (settingsScreen == null) return;
+        SettingsUiState next = new SettingsUiState(
+                new WatchInfoUi(
+                        connectedDeviceName,
+                        lastConnectAddress == null ? "" : lastConnectAddress,
+                        connectionReady,
+                        watchBattery,
+                        watchFirmware),
+                dndEnabled,
+                brightScreenEnabled,
+                continuousHrEnabled,
+                batterySaverEnabled,
+                new SedentaryUi(sedentaryEnabled, sedentaryPeriod,
+                        sedentaryStartHour, sedentaryStartMin,
+                        sedentaryEndHour, sedentaryEndMin),
+                new ArrayList<>(watchAlarms),
+                settingsStatus,
+                settingsStatusIsError);
+        runOnUiThread(() -> settingsScreen.update(next));
+    }
+
+    private void setSettingsStatus(String text, boolean error) {
+        settingsStatus = text;
+        settingsStatusIsError = error;
+        refreshSettings();
+    }
+
+    /** Requests battery and firmware. The reply arrives on key 0x08. */
+    private void requestWatchInfo() {
+        if (!zhFinished || !connectionReady || zhWriteChar == null) {
+            setSettingsStatus("Connect the watch before reading its info.", true);
+            return;
+        }
+        writeSetting("watch info", ZhBraceletBinding.KEY_DEVICE_INFO, -1,
+                ZhBraceletBinding.deviceInfoRequestFrame(), null);
+        readWatchSettings();
+    }
+
+    /** Sends the clock the user asked for; the watch acks key 0x01 on 0x42. */
+    private void syncWatchClock() {
+        Calendar now = Calendar.getInstance();
+        byte[] frame = ZhBraceletBinding.timeSyncFrame(
+                now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
+                now.get(Calendar.DAY_OF_MONTH), now.get(Calendar.HOUR_OF_DAY),
+                now.get(Calendar.MINUTE), now.get(Calendar.SECOND));
+        writeSetting("time sync", ZhBraceletBinding.KEY_TIME_SYNC, -1, frame, null);
+    }
+
+    /** Find-watch has no acknowledgement; the watch simply vibrates. */
+    private void findWatch() {
+        if (!zhFinished || !connectionReady || zhWriteChar == null) {
+            setSettingsStatus("Connect the watch before finding it.", true);
+            return;
+        }
+        byte[] frame = ZhBraceletBinding.findDeviceFrame();
+        if (!writeZh(frame)) {
+            setSettingsStatus("The Bluetooth stack rejected find watch.", true);
+            return;
+        }
+        logPairing("TX zh-find-watch · " + hex(frame));
+        setSettingsStatus("Find watch sent · the watch should vibrate.", false);
+    }
+
+    /**
+     * Queues one settings frame and arms a reply watchdog. Direct-key writes are answered on
+     * 0x42; private-feature writes answer on 0x7F with status 1 (accepted) or 2 (refused).
+     */
+    private void writeSetting(String label, int ackKey, int privateSubKey,
+                              byte[] frame, Runnable onRefused) {
+        if (!zhFinished || !connectionReady || zhWriteChar == null) {
+            setSettingsStatus("Connect the watch before changing " + label + ".", true);
+            return;
+        }
+        clearPendingSetting();
+        pendingSettingLabel = label;
+        pendingSettingKey = ackKey;
+        pendingSettingSubKey = privateSubKey;
+        pendingSettingRevert = onRefused;
+        setSettingsStatus("Sending " + label + "…", false);
+        logPairing("TX zh-" + label + " · " + hex(frame));
+        if (!writeZh(frame)) {
+            clearPendingSetting();
+            setSettingsStatus("The Bluetooth stack rejected " + label + ".", true);
+            return;
+        }
+        pendingSettingTimeout = () -> {
+            pendingSettingTimeout = null;
+            if (pendingSettingLabel == null) return;
+            String pending = pendingSettingLabel;
+            Runnable revert = pendingSettingRevert;
+            clearPendingSetting();
+            if (revert != null) revert.run();
+            setSettingsStatus("No reply for " + pending + ".", true);
+        };
+        handler.postDelayed(pendingSettingTimeout, 5000L);
+    }
+
+    private void clearPendingSetting() {
+        if (pendingSettingTimeout != null) {
+            handler.removeCallbacks(pendingSettingTimeout);
+            pendingSettingTimeout = null;
+        }
+        pendingSettingLabel = null;
+        pendingSettingKey = -1;
+        pendingSettingSubKey = -1;
+        pendingSettingRevert = null;
+    }
+
+    private void resolvePendingSetting(boolean success) {
+        if (pendingSettingLabel == null) return;
+        String label = pendingSettingLabel;
+        Runnable revert = pendingSettingRevert;
+        clearPendingSetting();
+        if (!success && revert != null) revert.run();
+        setSettingsStatus(label + (success ? " · accepted" : " · refused by the watch"), !success);
+    }
+
+    private void sendSedentary(boolean on) {
+        boolean previous = sedentaryEnabled;
+        sedentaryEnabled = on;
+        refreshSettings();
+        writeSetting("sedentary reminder", ZhBraceletBinding.KEY_SEDENTARY, -1,
+                ZhBraceletBinding.sedentaryFrame(on, sedentaryPeriod,
+                        sedentaryStartHour, sedentaryStartMin, sedentaryEndHour, sedentaryEndMin),
+                () -> { sedentaryEnabled = previous; refreshSettings(); });
+    }
+
+    private void showSedentaryWindowEditor() {
+        android.app.TimePickerDialog start = new android.app.TimePickerDialog(this,
+                (view, hour, minute) -> {
+                    sedentaryStartHour = hour;
+                    sedentaryStartMin = minute;
+                    android.app.TimePickerDialog end = new android.app.TimePickerDialog(this,
+                            (view2, hour2, minute2) -> {
+                                sedentaryEndHour = hour2;
+                                sedentaryEndMin = minute2;
+                                refreshSettings();
+                                sendSedentary(sedentaryEnabled);
+                            }, sedentaryEndHour, sedentaryEndMin, true);
+                    end.setTitle("Reminder ends");
+                    end.show();
+                }, sedentaryStartHour, sedentaryStartMin, true);
+        start.setTitle("Reminder starts");
+        start.show();
+    }
+
+    private void showAlarmEditor() {
+        android.app.TimePickerDialog picker = new android.app.TimePickerDialog(this,
+                (view, hour, minute) -> {
+                    int id = 0;
+                    for (AlarmUi alarm : watchAlarms) id = Math.max(id, alarm.getId() + 1);
+                    if (id > 7) {
+                        setSettingsStatus("The watch stores at most eight alarms.", true);
+                        return;
+                    }
+                    List<AlarmUi> before = new ArrayList<>(watchAlarms);
+                    watchAlarms.add(new AlarmUi(id, hour, minute));
+                    refreshSettings();
+                    sendAlarms(before);
+                }, 7, 0, true);
+        picker.setTitle("Add a one-off alarm");
+        picker.show();
+    }
+
+    private void removeWatchAlarm(int id) {
+        List<AlarmUi> before = new ArrayList<>(watchAlarms);
+        for (int i = 0; i < watchAlarms.size(); i++) {
+            if (watchAlarms.get(i).getId() == id) {
+                watchAlarms.remove(i);
+                break;
+            }
+        }
+        refreshSettings();
+        sendAlarms(before);
+    }
+
+    /** Writes the whole list, because the vendor replaces the alarm set in one frame. */
+    private void sendAlarms(List<AlarmUi> before) {
+        List<ZhBraceletBinding.Alarm> alarms = new ArrayList<>();
+        for (AlarmUi alarm : watchAlarms) {
+            alarms.add(new ZhBraceletBinding.Alarm(
+                    alarm.getId(), alarm.getHour(), alarm.getMinute(), 128));
+        }
+        writeSetting("alarms", ZhBraceletBinding.KEY_ALARM, -1,
+                ZhBraceletBinding.alarmsFrame(alarms),
+                () -> {
+                    watchAlarms.clear();
+                    watchAlarms.addAll(before);
+                    refreshSettings();
+                });
+    }
+
+    /** Reads the watch's stored sedentary reminder and alarm list after a connection. */
+    private void readWatchSettings() {
+        if (!zhFinished || zhWriteChar == null) return;
+        byte[] sedentary = ZhBraceletBinding.privateReadFrame(
+                ZhBraceletBinding.PRIVATE_SEDENTARY);
+        byte[] alarms = ZhBraceletBinding.privateReadFrame(ZhBraceletBinding.PRIVATE_ALARMS);
+        if (writeZh(sedentary)) logPairing("TX zh-read-sedentary · " + hex(sedentary));
+        if (writeZh(alarms)) logPairing("TX zh-read-alarms · " + hex(alarms));
+    }
+
+    private void confirmForgetWatch() {
+        if (lastConnectAddress == null) {
+            setSettingsStatus("No saved watch to forget.", true);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Forget this watch?")
+                .setMessage("This removes the saved binding and token on this phone. "
+                        + "The watch keeps its own pairing until you pair it again.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Forget", (dialog, which) -> forgetWatch())
+                .show();
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void forgetWatch() {
+        String address = lastConnectAddress;
+        if (address != null) {
+            setWatchBound(address, false);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .remove(KEY_WATCH_TOKEN_PREFIX + address)
+                    .remove(KEY_DEVICE_ADDRESS)
+                    .remove(KEY_DEVICE_NAME)
+                    .apply();
+        }
+        closeGatt();
+        connectionReady = false;
+        connectionSetup = false;
+        zhStarted = false;
+        zhFinished = false;
+        zhAttempts = 0;
+        zhWriteRetries = 0;
+        clearPendingSetting();
+        connectedDeviceName = "No watch connected";
+        lastConnectAddress = null;
+        watchBattery = 0;
+        watchFirmware = "";
+        watchAlarms.clear();
+        dndEnabled = false;
+        brightScreenEnabled = false;
+        continuousHrEnabled = false;
+        batterySaverEnabled = false;
+        sedentaryEnabled = false;
+        deviceStatus.setText("No watch connected");
+        connectionStatus.setText("No watch connected");
+        scanStatus.setText("●  READY / SCAN");
+        updateHomeWatch("No watch connected");
+        refreshSettings();
+        selectTab(2);
+        toast("Watch forgotten on this phone.");
+    }
+
+    /**
+     * Handles the settings replies that are not plain 0x42 acks: device info, the private
+     * sedentary/alarm read replies and the private on/off results. Returns true when the frame
+     * was consumed so the caller does not log it as ignored.
+     */
+    private boolean handleSettingsFrame(byte[] frame) {
+        ZhBraceletBinding.DeviceInfo info = ZhBraceletBinding.parseDeviceInfo(frame);
+        if (info != null) {
+            watchBattery = info.battery;
+            watchFirmware = info.versionName;
+            logPairing("watch info · battery " + info.battery + "% · firmware " + info.versionName);
+            if (pendingSettingKey == ZhBraceletBinding.KEY_DEVICE_INFO) resolvePendingSetting(true);
+            refreshSettings();
+            return true;
+        }
+        if (frame.length >= 14 && (frame[10] & 0xFF) == ZhBraceletBinding.KEY_PRIVATE_FEATURE) {
+            int subKey = frame[13] & 0xFF;
+            int status = frame.length > 14 ? frame[14] & 0xFF : -1;
+            if (status == 1 || status == 2) {
+                logPairing("private " + ZhBraceletBinding.privateFeatureLabel(subKey)
+                        + " · " + (status == 1 ? "accepted" : "refused"));
+                if (pendingSettingSubKey == subKey) resolvePendingSetting(status == 1);
+                return true;
+            }
+        }
+        ZhBraceletBinding.SitReminder reminder = ZhBraceletBinding.parseSedentary(frame);
+        if (reminder != null) {
+            sedentaryEnabled = reminder.enable;
+            sedentaryPeriod = reminder.period;
+            sedentaryStartHour = reminder.startHour;
+            sedentaryStartMin = reminder.startMin;
+            sedentaryEndHour = reminder.endHour;
+            sedentaryEndMin = reminder.endMin;
+            logPairing("sedentary reminder · " + reminder);
+            if (pendingSettingSubKey == ZhBraceletBinding.PRIVATE_SEDENTARY) {
+                resolvePendingSetting(true);
+            }
+            refreshSettings();
+            return true;
+        }
+        List<ZhBraceletBinding.Alarm> alarms = ZhBraceletBinding.parseAlarms(frame);
+        if (alarms != null) {
+            watchAlarms.clear();
+            for (ZhBraceletBinding.Alarm alarm : alarms) {
+                watchAlarms.add(new AlarmUi(alarm.id, alarm.hour, alarm.minute));
+            }
+            logPairing("alarm list · " + watchAlarms.size() + " alarm(s)");
+            if (pendingSettingSubKey == ZhBraceletBinding.PRIVATE_ALARMS) {
+                resolvePendingSetting(true);
+            }
+            refreshSettings();
+            return true;
+        }
+        Boolean batterySaver = ZhBraceletBinding.parsePrivateToggle(
+                frame, ZhBraceletBinding.PRIVATE_BATTERY_SAVER);
+        if (batterySaver != null) {
+            batterySaverEnabled = batterySaver;
+            refreshSettings();
+            return true;
+        }
+        return false;
     }
 
     @SuppressWarnings("MissingPermission")
