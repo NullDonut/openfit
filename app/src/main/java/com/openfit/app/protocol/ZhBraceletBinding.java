@@ -695,6 +695,7 @@ public final class ZhBraceletBinding {
         int dayMin = 0;
         int daySum = 0;
         int dayCount = 0;
+        int[] all = new int[288];
         for (int i = 0; i < 288; i++) {
             int bpm = frame[17 + i] & 0xFF;
             if (bpm == 0) continue;
@@ -703,11 +704,12 @@ public final class ZhBraceletBinding {
             if (bpm > dayMax) dayMax = bpm;
             if (dayMin == 0 || bpm < dayMin) dayMin = bpm;
             daySum += bpm;
-            dayCount++;
+            all[dayCount++] = bpm;
         }
         String date = String.format(java.util.Locale.US, "20%02d-%02d-%02d", year, month, day);
         return new HeartRateHistory(date, recent, dayMax, dayMin,
-                dayCount == 0 ? 0 : daySum / dayCount, dayCount);
+                dayCount == 0 ? 0 : daySum / dayCount, dayCount,
+                java.util.Arrays.copyOf(all, dayCount));
     }
 
     /** One decoded {@link #KEY_HEART_RATE_HISTORY} frame. */
@@ -719,15 +721,18 @@ public final class ZhBraceletBinding {
         public final int dayMin;
         public final int dayAverage;
         public final int sampleCount;
+        /** Nonzero readings in slot order, for the Home sparkline. */
+        public final int[] samples;
 
         public HeartRateHistory(String date, int recent, int dayMax, int dayMin,
-                                int dayAverage, int sampleCount) {
+                                int dayAverage, int sampleCount, int[] samples) {
             this.date = date;
             this.recent = recent;
             this.dayMax = dayMax;
             this.dayMin = dayMin;
             this.dayAverage = dayAverage;
             this.sampleCount = sampleCount;
+            this.samples = samples;
         }
 
         @Override public String toString() {

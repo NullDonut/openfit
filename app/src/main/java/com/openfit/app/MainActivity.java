@@ -173,6 +173,8 @@ public final class MainActivity extends ComponentActivity {
     private static final String KEY_SLEEP_DATE = "sleep_date";
     private static final String KEY_HEART_RATE = "heart_rate";
     private static final String KEY_HEART_RATE_TIME = "heart_rate_time";
+    /** Nonzero heart-rate samples in slot order, comma separated, for the Home sparkline. */
+    private static final String KEY_HEART_RATE_SAMPLES = "heart_rate_samples_csv";
     /** Latest read-only sensor values the watch pushed; all prefixed to keep them apart. */
     private static final String KEY_SENSOR_STEPS = "sensor_steps_total";
     private static final String KEY_SENSOR_STEPS_DATE = "sensor_steps_date";
@@ -432,6 +434,7 @@ public final class MainActivity extends ComponentActivity {
         homeScreen = new HomeScreenController(new HomeActions() {
             @Override public void onManageWatch() { selectTab(2); }
             @Override public void onViewHealth() { selectTab(1); }
+            @Override public void onViewSleep() { selectTab(3); }
         });
         homePanel.addView(homeScreen.createView(this), lp(-1, -2));
 
@@ -3144,11 +3147,14 @@ public final class MainActivity extends ComponentActivity {
         long now = System.currentTimeMillis();
         long minute = now / 60_000L;
         String today = java.time.LocalDate.now().toString();
+        boolean newDay = !today.equals(prefs.getString("heart_rate_day", ""));
         android.content.SharedPreferences.Editor editor = prefs.edit()
                 .putInt(KEY_HEART_RATE, bpm)
                 .putLong(KEY_HEART_RATE_TIME, now)
-                .putString("heart_rate_source", "Live reading");
-        if (!today.equals(prefs.getString("heart_rate_day", ""))) {
+                .putString("heart_rate_source", "Live reading")
+                .putString(KEY_HEART_RATE_SAMPLES,
+                        appendSample(newDay ? "" : prefs.getString(KEY_HEART_RATE_SAMPLES, ""), bpm));
+        if (newDay) {
             editor.putString("heart_rate_day", today)
                     .putInt("heart_rate_min", bpm)
                     .putInt("heart_rate_max", bpm)
@@ -3178,10 +3184,12 @@ public final class MainActivity extends ComponentActivity {
                 .putInt("heart_rate_max", history.dayMax)
                 .putInt("heart_rate_samples", history.sampleCount)
                 .putLong("heart_rate_sample_minute", now / 60_000L)
+                .putString(KEY_HEART_RATE_SAMPLES, joinInts(history.samples))
                 .apply();
     }
 
     private void refreshHeartSummary() {
+        refreshHome();
         if (healthScreen == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         List<SensorCard> sensors = buildSensorCards();
@@ -3438,11 +3446,92 @@ public final class MainActivity extends ComponentActivity {
     }
 
     /** Keeps the Compose Home tab in sync; safe to call from a BLE callback thread. */
-    private void updateHomeWatch(String name) {
-        if (homeScreen != null) {
-            runOnUiThread(() -> homeScreen.update(new HomeUiState(name)));
-        }
+    private void updateHomeWatch(String ignoredName) {
+        refreshHome();
         refreshSettings();
+    }
+
+    /**
+     * Rebuilds the Home dashboard from the live connection fields and the persisted sensor
+     * summary. Only today's step/activity/sleep values are shown, so a stale watch record cannot
+     * masquerade as today's activity. Safe to call from any thread.
+     */
+    private void refreshHome() {
+        if (homeScreen == null) return;
+        android.content.SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String name = connectedDeviceName;
+        if (name == null || name.trim().isEmpty() || "No watch connected".equals(name)) {
+            name = p.getString(KEY_DEVICE_NAME, "");
+            if (name == null || name.trim().isEmpty()) name = "No watch connected";
+        }
+        String today = java.time.LocalDate.now().toString();
+        int steps = today.equals(p.getString(KEY_SENSOR_STEPS_DATE, ""))
+                ? p.getInt(KEY_SENSOR_STEPS, 0) : 0;
+        int active = today.equals(p.getString(KEY_SENSOR_ACTIVITY_DATE, ""))
+                ? p.getInt(KEY_SENSOR_ACTIVITY, 0) : 0;
+        boolean sleepToday = today.equals(p.getString(KEY_SENSOR_SLEEP_DATE, ""));
+        int sleep = sleepToday ? p.getInt(KEY_SENSOR_SLEEP, 0) : 0;
+        int deep = sleepToday ? p.getInt(KEY_SENSOR_SLEEP_DEEP, 0) : 0;
+        int light = sleepToday ? p.getInt(KEY_SENSOR_SLEEP_LIGHT, 0) : 0;
+        int rem = sleepToday ? p.getInt(KEY_SENSOR_SLEEP_REM, 0) : 0;
+        HomeUiState next = new HomeUiState(
+                name,
+                connectionReady,
+                watchBattery,
+                watchFirmware == null ? "" : watchFirmware,
+                steps,
+                active,
+                sleep,
+                deep,
+                light,
+                rem,
+                p.getInt(KEY_HEART_RATE, -1),
+                p.getInt("heart_rate_min", 0),
+                p.getInt("heart_rate_max", 0),
+                readHeartSamples(p),
+                p.getInt(KEY_SENSOR_STRESS, 0),
+                today.equals(p.getString("heart_rate_day", "")));
+        runOnUiThread(() -> homeScreen.update(next));
+    }
+
+    private static List<Integer> readHeartSamples(android.content.SharedPreferences p) {
+        List<Integer> samples = new ArrayList<>();
+        String csv = p.getString(KEY_HEART_RATE_SAMPLES, "");
+        if (csv == null || csv.isEmpty()) return samples;
+        for (String part : csv.split(",")) {
+            try {
+                samples.add(Integer.parseInt(part.trim()));
+            } catch (NumberFormatException ignored) { }
+        }
+        return samples;
+    }
+
+    private static String joinInts(int[] values) {
+        if (values == null || values.length == 0) return "";
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) builder.append(',');
+            builder.append(values[i]);
+        }
+        return builder.toString();
+    }
+
+    /** Appends a live reading to the sparkline CSV, keeping the most recent 96 entries. */
+    private static String appendSample(String csv, int value) {
+        StringBuilder builder = new StringBuilder(csv == null ? "" : csv);
+        if (builder.length() > 0) builder.append(',');
+        builder.append(value);
+        int count = 1;
+        for (int i = 0; i < builder.length(); i++) {
+            if (builder.charAt(i) == ',') count++;
+        }
+        while (count > 96) {
+            int comma = builder.indexOf(",");
+            if (comma < 0) break;
+            builder.delete(0, comma + 1);
+            count--;
+        }
+        return builder.toString();
     }
 
     // ---------------------------------------------------------------------------------------
@@ -3714,6 +3803,7 @@ public final class MainActivity extends ComponentActivity {
             logPairing("watch info · battery " + info.battery + "% · firmware " + info.versionName);
             if (pendingSettingKey == ZhBraceletBinding.KEY_DEVICE_INFO) resolvePendingSetting(true);
             refreshSettings();
+            refreshHome();
             return true;
         }
         if (frame.length >= 14 && (frame[10] & 0xFF) == ZhBraceletBinding.KEY_PRIVATE_FEATURE) {

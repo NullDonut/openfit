@@ -260,6 +260,7 @@ public class ZhBraceletBindingTest {
         assertEquals(82, history.dayMin);
         assertEquals(88, history.dayAverage);
         assertEquals(2, history.sampleCount);
+        assertArrayEquals(new int[] {95, 82}, history.samples);
     }
 
     @Test public void parseHeartRateHistoryRejectsBadFrames() {

@@ -7,9 +7,12 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openfit.app.R
 
 /**
  * OpenFit's Compose theme.
@@ -54,17 +57,53 @@ private val OpenFitShapes = Shapes(
 private val OpenFitBaseTypography = Typography()
 
 /**
- * The M3 baseline styles with the heavier weights and tighter tracking used by the expressive
- * type scale. Only the styles the dashboard actually uses are overridden.
+ * Bundled OFL faces. DM Serif Display carries the page titles; Doto is the dot-matrix face for
+ * hero numerals. Both files live in `res/font` so the look survives without a network connection.
+ */
+internal val SerifDisplay = FontFamily(
+    Font(R.font.dm_serif_display, FontWeight.Normal)
+)
+
+internal val DotMatrix = FontFamily(
+    Font(R.font.doto, FontWeight.Bold)
+)
+
+/**
+ * The M3 baseline styles with the expressive weights and tracking, plus the two bundled faces:
+ * display styles become dot-matrix, and the headline/title-large styles become the serif.
  */
 private val OpenFitTypography = Typography(
     displayLarge = OpenFitBaseTypography.displayLarge.copy(
+        fontFamily = DotMatrix,
         fontWeight = FontWeight.Bold,
-        letterSpacing = (-2).sp
+        letterSpacing = (-1).sp
+    ),
+    displayMedium = OpenFitBaseTypography.displayMedium.copy(
+        fontFamily = DotMatrix,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = (-0.5).sp
+    ),
+    displaySmall = OpenFitBaseTypography.displaySmall.copy(
+        fontFamily = DotMatrix,
+        fontWeight = FontWeight.Bold
+    ),
+    headlineLarge = OpenFitBaseTypography.headlineLarge.copy(
+        fontFamily = SerifDisplay,
+        fontWeight = FontWeight.Normal,
+        letterSpacing = (-0.4).sp
+    ),
+    headlineMedium = OpenFitBaseTypography.headlineMedium.copy(
+        fontFamily = SerifDisplay,
+        fontWeight = FontWeight.Normal
     ),
     headlineSmall = OpenFitBaseTypography.headlineSmall.copy(
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = (-0.3).sp
+        fontFamily = SerifDisplay,
+        fontWeight = FontWeight.Normal,
+        letterSpacing = (-0.2).sp
+    ),
+    titleLarge = OpenFitBaseTypography.titleLarge.copy(
+        fontFamily = SerifDisplay,
+        fontWeight = FontWeight.Normal
     ),
     titleMedium = OpenFitBaseTypography.titleMedium.copy(
         fontWeight = FontWeight.SemiBold
