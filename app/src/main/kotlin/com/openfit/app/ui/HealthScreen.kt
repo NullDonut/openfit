@@ -5,10 +5,12 @@ import android.view.View
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,29 +36,35 @@ import androidx.compose.ui.unit.sp
  * One snapshot of what the Health tab should show.
  *
  * Built in Java from the persisted heart-rate summary, so Compose stays a pure presentation
- * layer and the BLE code keeps owning the data.
+ * layer and the BLE code keeps owning the data. [bpm] of -1 means "no reading yet".
  */
 data class HealthUiState(
     val bpm: Int,
     val source: String,
-    val summary: String,
-    val detail: String
+    val latest: String,
+    val dayLabel: String,
+    val low: Int,
+    val high: Int,
+    val samples: Int
 )
 
 /**
- * Hosts the Compose health card inside the existing programmatic Java layout.
+ * Hosts the Compose Health tab inside the existing programmatic Java layout.
  *
  * The activity keeps its own lifecycle; the view uses
  * [ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed] so composition is torn down with
  * the tab's view tree instead of leaking when the activity is recreated.
  */
-class HealthCardController {
+class HealthScreenController {
     private var state by mutableStateOf(
         HealthUiState(
             bpm = -1,
             source = "",
-            summary = "No readings yet",
-            detail = "Connect your watch to read its daily heart-rate history."
+            latest = "",
+            dayLabel = "",
+            low = 0,
+            high = 0,
+            samples = 0
         )
     )
 
@@ -67,14 +76,66 @@ class HealthCardController {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         setContent {
             OpenFitTheme {
-                HealthCard(state)
+                HealthScreen(state)
             }
         }
     }
 }
 
 @Composable
-private fun HealthCard(state: HealthUiState) {
+private fun HealthScreen(state: HealthUiState) {
+    Column(Modifier.fillMaxWidth()) {
+        Eyebrow("HEALTH")
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Your data, at a glance",
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(22.dp))
+
+        HeartCard(state)
+
+        if (state.bpm > 0) {
+            Spacer(Modifier.height(14.dp))
+            Eyebrow(state.dayLabel)
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatTile("LOW", state.low, Modifier.weight(1f))
+                StatTile("HIGH", state.high, Modifier.weight(1f))
+                StatTile("SAMPLES", state.samples, Modifier.weight(1f))
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        AboutCard()
+    }
+}
+
+/**
+ * The Nothing-style eyebrow: monospaced, uppercase, wide tracking, red accent.
+ *
+ * The Views screens use the same treatment for their section labels, which keeps the Compose
+ * and Java parts of the app visually consistent.
+ */
+@Composable
+private fun Eyebrow(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium.copy(
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.4.sp
+        ),
+        color = MaterialTheme.colorScheme.primary
+    )
+}
+
+@Composable
+private fun HeartCard(state: HealthUiState) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -148,18 +209,67 @@ private fun HealthCard(state: HealthUiState) {
 
             Spacer(Modifier.size(12.dp))
             Text(
-                text = state.summary,
+                text = if (state.bpm > 0) state.latest else "No readings yet",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (state.detail.isNotEmpty()) {
+            if (state.bpm <= 0) {
                 Spacer(Modifier.size(4.dp))
                 Text(
-                    text = state.detail,
+                    text = "Connect your watch to read its daily heart-rate history.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun StatTile(label: String, value: Int, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.1.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = if (value > 0) value.toString() else "—",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutCard() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainer
+    ) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+            Eyebrow("ABOUT THIS DATA")
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Your watch records a heart rate every five minutes. OpenFit shows the " +
+                    "samples it receives; gaps mean the watch was off or not worn. " +
+                    "This is not a medical device.",
+                style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

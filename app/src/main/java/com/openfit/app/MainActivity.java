@@ -2,6 +2,9 @@ package com.openfit.app;
 
 import android.Manifest;
 import androidx.activity.ComponentActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -30,6 +33,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.NumberPicker;
@@ -50,7 +54,7 @@ import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SePairing;
 import com.openfit.app.protocol.ZhBraceletBinding;
 import com.openfit.app.protocol.ZhFrameReader;
-import com.openfit.app.ui.HealthCardController;
+import com.openfit.app.ui.HealthScreenController;
 import com.openfit.app.ui.HealthUiState;
 
 import java.text.DateFormat;
@@ -170,7 +174,7 @@ public final class MainActivity extends ComponentActivity {
     private TextView homeWatchSummary;
     private TextView connectionStatus;
     private TextView deviceStatus;
-    private HealthCardController healthCard;
+    private HealthScreenController healthScreen;
     private TextView scanStatus;
     private TextView sleepLog;
     private LinearLayout deviceResults;
@@ -447,17 +451,13 @@ public final class MainActivity extends ComponentActivity {
         deviceResults.setOrientation(LinearLayout.VERTICAL);
         deviceCard.addView(deviceResults, lp(-1, -2, 0, 12, 0, 0));
 
-        TextView section = text("YOUR HEALTH", 10, C_MUTED, true);
-        section.setLetterSpacing(.14f);
         healthPanel = panel();
         page.addView(healthPanel);
-        addPanelHeading(healthPanel, "HEALTH", "Your data, at a glance");
-        healthPanel.addView(section, lp(-1, -2, 1, 12, 0, 10));
 
-        // The heart card is a Compose Material 3 Expressive surface; the rest of the dashboard
-        // stays on the existing Views layout so the BLE screens are untouched.
-        healthCard = new HealthCardController();
-        healthPanel.addView(healthCard.createView(this), lp(-1, -2, 0, 0, 0, 12));
+        // The Health tab is fully Compose (heading, heart card, stat tiles, data note). The other
+        // tabs keep their Views layout so the BLE screens are untouched.
+        healthScreen = new HealthScreenController();
+        healthPanel.addView(healthScreen.createView(this), lp(-1, -2));
 
         sleepPanel = panel();
         page.addView(sleepPanel);
@@ -486,7 +486,33 @@ public final class MainActivity extends ComponentActivity {
         privacy.setLineSpacing(dp(3), 1f);
         homePanel.addView(privacy, lp(-1, -2, 0, 9, 0, 0));
         buildBottomNavigation(shell);
+        applySystemBarInsets(shell, scroll);
         selectTab(0);
+    }
+
+    /**
+     * targetSdk 35 enforces edge-to-edge, so the window no longer reserves space for the status
+     * and navigation bars. Without this the tab eyebrow is drawn under the status-bar clock.
+     * Pad the scroll area by the top inset and grow the bottom bar by the bottom inset, instead
+     * of relying on the platform theme.
+     */
+    private void applySystemBarInsets(LinearLayout shell, ScrollView scroll) {
+        ViewCompat.setOnApplyWindowInsetsListener(shell, (view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            scroll.setPadding(0, bars.top, 0, 0);
+            if (bottomNavigation != null) {
+                bottomNavigation.setPadding(dp(8), dp(8), dp(8), dp(8) + bars.bottom);
+                ViewGroup.LayoutParams params = bottomNavigation.getLayoutParams();
+                int height = dp(66) + bars.bottom;
+                if (params.height != height) {
+                    params.height = height;
+                    bottomNavigation.setLayoutParams(params);
+                }
+            }
+            return windowInsets;
+        });
+        ViewCompat.requestApplyInsets(shell);
     }
 
     private LinearLayout panel() {
@@ -3116,29 +3142,28 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void refreshHeartSummary() {
-        if (healthCard == null) return;
+        if (healthScreen == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         int bpm = prefs.getInt(KEY_HEART_RATE, -1);
         if (bpm < 0) {
-            healthCard.update(new HealthUiState(-1, "", "No readings yet",
-                    "Connect your watch to read its daily heart-rate history."));
+            healthScreen.update(new HealthUiState(-1, "", "", "", 0, 0, 0));
             return;
         }
         String source = prefs.getString("heart_rate_source", "Saved reading");
         String day = prefs.getString("heart_rate_day", "");
         boolean today = java.time.LocalDate.now().toString().equals(day);
-        String summary;
-        if (!today) {
-            summary = "Last reading · " + (day.isEmpty() ? "unknown day" : day);
-        } else {
-            String samples = prefs.getInt("heart_rate_samples", 1)
-                    + ("Watch history".equals(source) ? " five-minute samples" : " minute samples");
-            summary = "Today · " + prefs.getInt("heart_rate_min", bpm) + "–"
-                    + prefs.getInt("heart_rate_max", bpm) + " bpm · " + samples;
-        }
-        String detail = "Latest · " + DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault())
+        String dayLabel = today ? "TODAY"
+                : (day.isEmpty() ? "LAST READING" : day.toUpperCase(Locale.ROOT));
+        String latest = "Latest · " + DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault())
                 .format(new Date(prefs.getLong(KEY_HEART_RATE_TIME, 0L)));
-        healthCard.update(new HealthUiState(bpm, source, summary, detail));
+        healthScreen.update(new HealthUiState(
+                bpm,
+                source,
+                latest,
+                dayLabel,
+                prefs.getInt("heart_rate_min", bpm),
+                prefs.getInt("heart_rate_max", bpm),
+                prefs.getInt("heart_rate_samples", 1)));
     }
 
     private void showSleepEditor() {

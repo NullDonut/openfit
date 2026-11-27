@@ -120,17 +120,23 @@ notification setup each opened a new GATT client (seven `Connect requested` line
 seconds, each restarting discovery). `connect()` now refuses while a setup is in progress, the
 button stays hidden until the link is ready, and every early exit clears the setup flag.
 
-The first UI step landed on 2026-11-27: the Health tab's heart card is now Jetpack Compose on
-Material 3 (`material3` 1.4.0 via BOM 2025.10.01, Kotlin 2.2.21). A CI build proved that
-`MaterialExpressiveTheme`, `MotionScheme` and the expressive components are still `internal` in
-1.4.0; they became public in 1.5.0, which needs compileSdk 37 / AGP 9.1. The theme therefore uses
-the public `MaterialTheme` with oversized corners, emphasized type styles and spring motion to
-reproduce the expressive character. Everything else stays on Views, and the card is hosted through
-`HealthCardController`/`ComposeView` so the BLE code is untouched. It shows a source chip
-(`Watch history` or `Live reading`) and, for history, the watch's five-minute sample count
-instead of implying continuous monitoring. The build now needs Kotlin and the Compose compiler
-plugin; CI still uses Gradle 8.9, and material3 1.5.x was deliberately avoided because it needs
-compileSdk 37 / AGP 9.1.
+The first UI step landed on 2026-11-27 and hardware-verified on the Buzz: the whole Health tab is
+now Jetpack Compose on Material 3 (`material3` 1.4.0 via BOM 2025.10.01, Kotlin 2.2.21), hosted
+through `HealthScreenController`/`ComposeView` so the BLE code is untouched. It shows the heart
+card (latest bpm, source chip `Watch history`/`Live reading`, `Latest · HH:MM`), LOW/HIGH/SAMPLES
+stat tiles for the stored day, and an "about this data" note that explains the five-minute
+sampling and that this is not a medical device. A CI build proved that `MaterialExpressiveTheme`,
+`MotionScheme` and the expressive components are still `internal` in 1.4.0; they became public in
+1.5.0, which needs compileSdk 37 / AGP 9.1 and has no stable `platforms;android-37` in Google's
+SDK repository yet. The theme therefore uses the public `MaterialTheme` with oversized corners,
+emphasized type styles and spring motion. The design direction from the user: keep the app
+Nothing-themed (black, white, one red accent, monospace eyebrows) and add Material components
+where they are available; fall back to older M3 components when an expressive one is missing.
+
+The same change fixed an edge-to-edge bug visible on Android 15: targetSdk 35 no longer reserves
+space for the system bars, so the tab eyebrow was drawn under the status-bar clock.
+`MainActivity.applySystemBarInsets()` now pads the scroll area by the top inset and grows the
+bottom bar by the bottom inset.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
