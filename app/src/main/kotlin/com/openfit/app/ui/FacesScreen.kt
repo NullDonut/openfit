@@ -3,6 +3,7 @@ package com.openfit.app.ui
 import android.content.Context
 import android.view.View
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -45,12 +46,15 @@ data class FacesUiState(
     val ruleCount: Int,
     val status: String,
     val statusIsError: Boolean,
-    val loading: Boolean
+    val loading: Boolean,
+    /** True only on the ZhBracelet / ColorFit profile, where the set-face probe is wired. */
+    val canSet: Boolean = false
 )
 
-/** Every action the Faces screen can start. Read-only for now: refresh only. */
+/** Every action the Faces screen can start. */
 interface FacesActions {
     fun onRefresh()
+    fun onSetFace(id: String)
 }
 
 class FacesScreenController(private val actions: FacesActions) {
@@ -62,7 +66,8 @@ class FacesScreenController(private val actions: FacesActions) {
             ruleCount = -1,
             status = "",
             statusIsError = false,
-            loading = false
+            loading = false,
+            canSet = false
         )
     )
 
@@ -92,7 +97,11 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "Read-only for now. This lists the faces the watch reports and marks the one it is using.",
+            text = if (state.canSet) {
+                "Tap a face to make it current. The watch confirms the change; you can undo it on the watch."
+            } else {
+                "Read-only for now. This lists the faces the watch reports and marks the one it is using."
+            },
             style = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -142,7 +151,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
                                         color = MaterialTheme.colorScheme.outlineVariant
                                     )
                                 }
-                                FaceRow(face)
+                                FaceRow(face, state.canSet && !state.loading, actions)
                             }
                         }
                     }
@@ -169,7 +178,11 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
 
         Spacer(Modifier.height(26.dp))
         Text(
-            text = "READ-ONLY DISCOVERY\nFACE SWITCHING AND CUSTOM UPLOAD COME NEXT",
+            text = if (state.canSet) {
+                "TAP A FACE TO MAKE IT CURRENT\nFACE SWITCHING IS A PROBE · CUSTOM UPLOAD COMES NEXT"
+            } else {
+                "READ-ONLY DISCOVERY\nFACE SWITCHING AND CUSTOM UPLOAD COME NEXT"
+            },
             modifier = Modifier.fillMaxWidth(),
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,
@@ -181,10 +194,13 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
 }
 
 @Composable
-private fun FaceRow(face: WatchFaceUi) {
+private fun FaceRow(face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
+    // Only a non-current face on the set-capable profile is tappable; the activity confirms.
+    val settable = canSet && !face.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .let { if (settable) it.clickable { actions.onSetFace(face.id) } else it }
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -204,13 +220,19 @@ private fun FaceRow(face: WatchFaceUi) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        if (face.current) {
-            Text(
+        when {
+            face.current -> Text(
                 text = "CURRENT",
                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
+            )
+            settable -> Text(
+                text = "TAP TO SET",
+                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

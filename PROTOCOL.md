@@ -1086,8 +1086,16 @@ firmware reports ids only.
 `9999120002100N000000` for `N` = 1..6, with `is_current` set on the first. So the field-1 shape
 and its `is_current` flag are verified; the `info_list` fallback remains a defensive path.
 
-This is read-only: the vendor app only ever installs a face (`PREPARE_INSTALL_WATCH_FACE`), so
-`SET_WATCH_FACE` / removal / custom upload are still unobserved.
+This is read-only discovery: the list request never changes anything. `SET_WATCH_FACE` is not sent
+by the vendor app at all — its only face write is installing a downloaded file
+(`PREPARE_INSTALL_WATCH_FACE`), so removal and custom upload remain unobserved.
+
+**Set-face probe.** OpenFit also offers an explicit "make current" action on the Buzz:
+`WearPacket{type=WATCH_FACE, id=SET_WATCH_FACE(1), watch_face{ id: "<face id>" }}`, i.e.
+`08 04 10 01 32 <len> 12 <len> <id>` (`WatchFace.id` is field 2, string). The watch should answer
+with `watch_face_list` (the new `is_current`) or `success` (field 4, `08 04 10 01 32 02 20 01`).
+Because the vendor never exercises this path, the firmware's handling is **unproven**: it is a
+probe, offered only on the Buzz, behind a confirmation, and reversible on the watch.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 

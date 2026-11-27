@@ -7,6 +7,7 @@ import java.util.List;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class BuzzFaceTest {
@@ -63,6 +64,26 @@ public class BuzzFaceTest {
         assertTrue(BuzzFace.parseInstalledList(hex("08 02 10 01")).isEmpty());
         // Truncated nested list: skipped rather than thrown.
         assertTrue(BuzzFace.parseInstalledList(hex("08 04 10 00 32 04 0a 02 0a 00")).isEmpty());
+    }
+
+    /** SET_WATCH_FACE carries the target id in {@code WatchFace.id} (field 2, string). */
+    @Test public void setFaceCarriesTheTargetId() {
+        assertArrayEquals(new byte[] {0x08, 0x04, 0x10, 0x01, 0x32, 0x04, 0x12, 0x02, 0x77, 0x32},
+                BuzzFace.requestSetFace("w2"));
+        // An empty id still produces a valid type/id packet with no watch_face payload.
+        assertArrayEquals(new byte[] {0x08, 0x04, 0x10, 0x01}, BuzzFace.requestSetFace(""));
+        assertArrayEquals(new byte[] {0x08, 0x04, 0x10, 0x01}, BuzzFace.requestSetFace(null));
+    }
+
+    @Test public void parsesTheSetSuccessFlag() {
+        // WatchFace{ success: true } — field 4.
+        assertEquals(Boolean.TRUE, BuzzFace.parseSetSuccess(hex("08 04 10 01 32 02 20 01")));
+        assertEquals(Boolean.FALSE, BuzzFace.parseSetSuccess(hex("08 04 10 01 32 02 20 00")));
+        // No success field at all: unknown, not "false".
+        assertNull(BuzzFace.parseSetSuccess(hex("08 04 10 01 32 00")));
+        // Not a watch-face packet.
+        assertNull(BuzzFace.parseSetSuccess(hex("08 02 10 01")));
+        assertNull(BuzzFace.parseSetSuccess(null));
     }
 
     private static byte[] hex(String text) {

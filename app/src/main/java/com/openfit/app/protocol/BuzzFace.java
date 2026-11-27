@@ -1,6 +1,7 @@
 package com.openfit.app.protocol;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -35,7 +36,8 @@ import java.util.List;
  *
  * <p>The SDK's own reply handler reads the installed list from {@code watch_face_list} (field 1);
  * a firmware that only reports ids may answer with {@code info_list} (field 8) instead, so both
- * shapes are accepted. Only read-only discovery is wired here.
+ * shapes are accepted. Discovery and a set-face probe are wired here; removal and custom upload
+ * are not.
  */
 public final class BuzzFace {
     private BuzzFace() {}
@@ -50,7 +52,12 @@ public final class BuzzFace {
     /** {@code WatchFace.WatchFaceID.GET_INSTALLED_LIST}. */
     public static final int WATCH_FACE_ID_GET_INSTALLED_LIST = 0;
 
+    /** {@code WatchFace.WatchFaceID.SET_WATCH_FACE}. */
+    public static final int WATCH_FACE_ID_SET_WATCH_FACE = 1;
+
     private static final int FACE_FIELD_WATCH_FACE_LIST = 1;
+    private static final int FACE_FIELD_ID = 2;
+    private static final int FACE_FIELD_SUCCESS = 4;
     private static final int FACE_FIELD_INFO_LIST = 8;
 
     private static final int ITEM_FIELD_ID = 1;
@@ -72,6 +79,43 @@ public final class BuzzFace {
         SeWear.writeTag(out, WEAR_FIELD_ID, 0);
         SeWear.writeVarint(out, WATCH_FACE_ID_GET_INSTALLED_LIST);
         return out.toByteArray();
+    }
+
+    /**
+     * {@code WearPacket{type: WATCH_FACE, id: SET_WATCH_FACE, watch_face{ id: <face> }}} — asks the
+     * watch to make an installed face current. {@code WatchFace.id} is field 2 (string), so this
+     * is the phone-to-watch payloadCase 2. The watch answers with {@code watch_face_list} carrying
+     * the new {@code is_current}, or with {@code success} (field 4).
+     *
+     * <p>This is a probe: the vendor app never sends {@code SET_WATCH_FACE}, so the firmware's
+     * handling of it is unproven. It only changes which face is shown, which the user can undo on
+     * the watch.
+     */
+    public static byte[] requestSetFace(String id) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        SeWear.writeVarintField(out, WEAR_FIELD_TYPE, TYPE_WATCH_FACE);
+        SeWear.writeTag(out, WEAR_FIELD_ID, 0);
+        SeWear.writeVarint(out, WATCH_FACE_ID_SET_WATCH_FACE);
+        if (id != null && !id.isEmpty()) {
+            ByteArrayOutputStream face = new ByteArrayOutputStream();
+            SeWear.writeMessage(face, FACE_FIELD_ID, id.getBytes(StandardCharsets.UTF_8));
+            SeWear.writeMessage(out, WEAR_FIELD_WATCH_FACE, face.toByteArray());
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * Reads the {@code success} flag (WatchFace field 4) from a set-face reply. Returns
+     * {@code null} when the packet is not a {@code WatchFace} or carries no success field, so the
+     * caller can distinguish "the watch said yes/no" from "this was a different reply".
+     */
+    public static Boolean parseSetSuccess(byte[] wearPacket) {
+        if (!isWatchFace(wearPacket)) return null;
+        byte[] face = SeWear.readMessageField(wearPacket, WEAR_FIELD_WATCH_FACE);
+        if (face == null) return null;
+        long success = SeWear.readVarintField(face, FACE_FIELD_SUCCESS);
+        if (success < 0) return null;
+        return success == 1;
     }
 
     /** True when the reassembled packet is a {@code WATCH_FACE} WearPacket. */
