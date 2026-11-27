@@ -52,6 +52,7 @@ import com.openfit.app.protocol.BerryProfile;
 import com.openfit.app.protocol.BerrySewear;
 import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
+import com.openfit.app.protocol.SeCommands;
 import com.openfit.app.protocol.SePairing;
 import com.openfit.app.protocol.ZhBraceletBinding;
 import com.openfit.app.protocol.ZhFrameReader;
@@ -78,6 +79,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -173,6 +175,8 @@ public final class MainActivity extends ComponentActivity {
     private static final long BERRY_WRITE_TIMEOUT_MS = 1_500L;
     private static final long SE_CHUNK_GAP_MS = 15L;
     private static final long SE_BUSY_DELAY_MS = 300L;
+    /** A settings write the watch does not answer is reported instead of leaving the UI stuck. */
+    private static final long SE_COMMAND_TIMEOUT_MS = 6_000L;
     /** An at-top downward drag this far, this fast, refreshes and reconnects. */
     private static final int SWIPE_REFRESH_MIN_DP = 72;
     private static final long SWIPE_REFRESH_MAX_MS = 700L;
@@ -322,6 +326,26 @@ public final class MainActivity extends ComponentActivity {
     private boolean seSetupStarted;
     private boolean sePairStarted;
     private boolean sePairFinished;
+    /**
+     * True while the {@code 16186f00} command channel can carry frames. This used to be the
+     * negation of {@link #sePairFinished}, which closed the channel the moment the bind ended and
+     * left the Watch Beat with no way to send settings or read data. The bind flow and the
+     * transport lifetime are separate concerns now.
+     */
+    private boolean seTransportOpen;
+    /**
+     * True when this watch has no ZhBracelet script channel and therefore uses the SE command
+     * set. The ColorFit Ultra Buzz leaves this false and keeps its existing key protocol.
+     */
+    private boolean seCommandProfile;
+    private boolean sePostConnectStarted;
+    private boolean seRealtimeHeartRate;
+    private int seLastRealtimeBpm = -1;
+    private int seCommandPendingId = -1;
+    private Runnable seCommandTimeout;
+    private String seCommandPendingLabel;
+    private Runnable seCommandRevert;
+    private Runnable seRealtimeTimeout;
     private int seStepAttempts;
     private String seStep = "idle";
     private String seState = "not started";
@@ -621,12 +645,22 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onToggleContinuousHr(boolean on) {
                 boolean previous = continuousHrEnabled;
                 continuousHrEnabled = on;
-                // Keep the diagnostic flag in step so the 0x42 ack is read as the result of this
-                // toggle rather than a leftover post-bind probe.
-                zhContinuousActive = on;
                 persistAutoHr(on);
                 refreshSettings();
                 logPairing("Auto HR " + (on ? "enabled" : "disabled") + " by the user");
+                if (seCommandsActive()) {
+                    seWriteSetting("auto HR", SeCommands.FUNCTION_SET_HEART_RATE_MONITOR,
+                            SeCommands.heartRateMonitor(on),
+                            () -> {
+                                continuousHrEnabled = previous;
+                                persistAutoHr(previous);
+                                refreshSettings();
+                            });
+                    return;
+                }
+                // Keep the diagnostic flag in step so the 0x42 ack is read as the result of this
+                // toggle rather than a leftover post-bind probe.
+                zhContinuousActive = on;
                 writeSetting("auto HR", ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
                         ZhBraceletBinding.continuousHeartRateFrame(on),
                         () -> {
@@ -640,6 +674,12 @@ public final class MainActivity extends ComponentActivity {
                 boolean previous = batterySaverEnabled;
                 batterySaverEnabled = on;
                 refreshSettings();
+                if (seCommandsActive()) {
+                    seWriteSetting("battery saver", SeCommands.FUNCTION_SET_POWER_SAVING,
+                            SeCommands.powerSaving(on),
+                            () -> { batterySaverEnabled = previous; refreshSettings(); });
+                    return;
+                }
                 writeSetting("battery saver", -1,
                         ZhBraceletBinding.PRIVATE_BATTERY_SAVER,
                         ZhBraceletBinding.privateToggleFrame(
@@ -1648,6 +1688,10 @@ public final class MainActivity extends ComponentActivity {
             finishPairing(false, "command characteristic 16186f02 is missing");
             return;
         }
+        // The bind flow and the transport lifetime are separate: the channel stays open after a
+        // successful bind so the SE command set can carry settings and reads. It is closed again
+        // in finishPairing(false) and closeGatt().
+        seTransportOpen = true;
         seState = "negotiating MTU";
         seStep = "mtu";
         boolean requested = false;
@@ -1732,7 +1776,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void sendSeAnnounce(SeWrite write) {
-        if (write == null || sePairFinished) return;
+        if (write == null || !seTransportOpen) return;
         int count = SeGatt.chunkCount(write.data.length, seMtu);
         logPairing("announce " + write.label + " · " + count + " chunk(s)");
         if (!writeSe(SeGatt.announce(count))) {
@@ -1755,7 +1799,7 @@ public final class MainActivity extends ComponentActivity {
         cancelSeAckTimeout();
         seAckTimeout = () -> {
             seAckTimeout = null;
-            if (!seAwaitingReady || seCurrentWrite == null || sePairFinished) return;
+            if (!seAwaitingReady || seCurrentWrite == null || !seTransportOpen) return;
             SeWrite write = seCurrentWrite;
             if (++seAnnounceRetries > 3) {
                 seAwaitingReady = false;
@@ -1772,7 +1816,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void onSeReady() {
-        if (sePairFinished || !seAwaitingReady || seCurrentWrite == null) return;
+        if (!seTransportOpen || !seAwaitingReady || seCurrentWrite == null) return;
         cancelSeAckTimeout();
         seAwaitingReady = false;
         logPairing("watch ready · sending " + seCurrentWrite.label);
@@ -1781,7 +1825,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void sendSeChunk() {
         SeWrite write = seCurrentWrite;
-        if (write == null || sePairFinished) return;
+        if (write == null || !seTransportOpen) return;
         int size = SeGatt.chunkSize(seMtu);
         if (write.offset >= write.data.length) {
             int chunks = (write.data.length + size - 1) / size;
@@ -1802,7 +1846,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void onSeBusy() {
-        if (seCurrentWrite == null || sePairFinished) return;
+        if (seCurrentWrite == null || !seTransportOpen) return;
         logPairing("watch busy · retrying " + seCurrentWrite.label + " after a pause");
         cancelSeAckTimeout();
         seAwaitingReady = true;
@@ -1836,6 +1880,13 @@ public final class MainActivity extends ComponentActivity {
             logPairing("watch error for command " + id + " · " + SeWear.errorLabel(error));
             logBle("Watch reported " + SeWear.errorLabel(error) + " for command " + id);
             if (onSeRefusal(id, error)) return;
+        }
+        // Command replies are dispatched before the bind-state branch so a post-pairing error
+        // or answer cannot be mistaken for a pairing step. Only the SE command profile (the
+        // Noise Watch Beat) reaches this; the ZhBracelet path never does.
+        if (seCommandProfile && SeCommands.isCommandReply(id)) {
+            onSeCommandReply(message, id, error);
+            return;
         }
         if (id == SePairing.FUNCTION_MTU) return; // id-0 greeting reply, not part of the bind
         if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS) {
@@ -2034,7 +2085,8 @@ public final class MainActivity extends ComponentActivity {
      * Returns true when the reply was fully handled.
      */
     private boolean onSeRefusal(int id, int error) {
-        if (sePairFinished) return true;
+        // After a successful bind an error belongs to the command layer, not to a pairing step.
+        if (sePairFinished) return false;
         String label = SeWear.errorLabel(error);
         if (id == SePairing.FUNCTION_INQUIRY_BINDING_STATUS && "binding-status".equals(seStep)) {
             // Escalate now rather than waiting out the step timeout.
@@ -2137,6 +2189,17 @@ public final class MainActivity extends ComponentActivity {
         seCurrentWrite = null;
         seAwaitingReady = false;
         seTransfer.reset();
+        if (success) {
+            // The bind is done but the command channel stays open. A watch that also exposes the
+            // ZhBracelet script channel is deliberately left on that protocol, so the ColorFit
+            // Ultra Buzz path is never routed through the SE command set.
+            seTransportOpen = true;
+            seCommandProfile = sePairStarted && zhWriteChar == null;
+        } else {
+            seTransportOpen = false;
+            seCommandProfile = false;
+            cancelSeCommands();
+        }
         // When the SE account commands come back NOT_SUPPORT (or not at all) the watch belongs to
         // another vendor stack. Try the ZhBracelet script channel first: that is what NoiseFit
         // uses for ColorFit Ultra Buzz, Vision Buzz and Ultra 2. Berry stays as the last resort.
@@ -2152,7 +2215,9 @@ public final class MainActivity extends ComponentActivity {
         if (success) {
             connectionStatus.setText("Paired · " + connectedDeviceName);
             scanStatus.setText("●  PAIRED / READY");
-            if (!sePairStarted) {
+            if (seCommandProfile) {
+                startSeCommands();
+            } else if (!sePairStarted) {
                 // Saved-binding fast path: SE was skipped, but on this firmware it is also known
                 // to be stubbed out end to end. A probe here would compete with the Zh post-bind
                 // frames for the same GATT link, which is what stalled the 2026-11-19 run.
@@ -2173,8 +2238,214 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    // ----------------------------------------------------------------------------------------
+    // SE command set (Noise Watch Beat). Only reached when the watch has no ZhBracelet channel,
+    // so the ColorFit Ultra Buzz keeps its existing key protocol end to end.
+    // ----------------------------------------------------------------------------------------
+
+    /** True when the SE command channel is the live data path for this watch. */
+    private boolean seCommandsActive() {
+        return seCommandProfile && seTransportOpen && connectionReady && seWriteChar != null;
+    }
+
     /**
-     * Starts the ZhBracelet bind/inquiry, the stack NoiseFit's {@code NavPlusConnectHandler} uses
+     * Runs once per successful SE bind. The vendor syncs the clock and the user profile as soon
+     * as the link is up, then reads the settings it renders. Everything is queued on the same
+     * serialised transport the bind used.
+     */
+    private void startSeCommands() {
+        if (!seCommandsActive() || sePostConnectStarted) return;
+        sePostConnectStarted = true;
+        long now = System.currentTimeMillis();
+        int offsetQuarterHours = TimeZone.getDefault().getOffset(now) / (1000 * 60 * 15);
+        logBle("SE commands · clock, profile and settings reads");
+        sendSe(SeCommands.timeSync(now / 1000L, offsetQuarterHours), "time sync");
+        sendSe(SeCommands.userProfile(DEFAULT_USER_HEIGHT_CM, DEFAULT_USER_WEIGHT_KG,
+                DEFAULT_USER_AGE, DEFAULT_USER_MALE), "user profile");
+        sendSe(SeCommands.deviceInfoRequest(), "device info");
+        sendSe(SeCommands.batteryRequest(), "battery");
+        sendSe(SeCommands.requestHeartRateMonitor(), "read auto-hr");
+        sendSe(SeCommands.requestSedentary(), "read sedentary");
+        sendSe(SeCommands.requestPowerSaving(), "read battery saver");
+        // The Watch Beat has no one-shot measurement frame; real-time HR is how the vendor gets
+        // a live reading. Run a short burst so Home has a number, then switch it off again.
+        handler.postDelayed(this::startSeRealtimeHeartRate, 2_500L);
+    }
+
+    private void startSeRealtimeHeartRate() {
+        if (!seCommandsActive() || seRealtimeHeartRate) return;
+        seRealtimeHeartRate = true;
+        logPairing("TX se real-time HR · short burst");
+        sendSe(SeCommands.realTimeHeartRate(true, 5, 30), "real-time HR on");
+        seRealtimeTimeout = () -> {
+            seRealtimeTimeout = null;
+            stopSeRealtimeHeartRate("burst finished");
+        };
+        handler.postDelayed(seRealtimeTimeout, 40_000L);
+    }
+
+    private void stopSeRealtimeHeartRate(String reason) {
+        if (!seRealtimeHeartRate) return;
+        seRealtimeHeartRate = false;
+        if (seRealtimeTimeout != null) {
+            handler.removeCallbacks(seRealtimeTimeout);
+            seRealtimeTimeout = null;
+        }
+        if (!seCommandsActive()) return;
+        logPairing("TX se real-time HR · off (" + reason + ")");
+        sendSe(SeCommands.realTimeHeartRate(false, 5, 30), "real-time HR off");
+    }
+
+    /** Cancels command-side timers without touching the transport or the pairing flow. */
+    private void cancelSeCommands() {
+        cancelSeCommandTimeout();
+        clearSeCommandPending();
+        seRealtimeHeartRate = false;
+        if (seRealtimeTimeout != null) {
+            handler.removeCallbacks(seRealtimeTimeout);
+            seRealtimeTimeout = null;
+        }
+    }
+
+    private void cancelSeCommandTimeout() {
+        if (seCommandTimeout != null) {
+            handler.removeCallbacks(seCommandTimeout);
+            seCommandTimeout = null;
+        }
+    }
+
+    private void clearSeCommandPending() {
+        cancelSeCommandTimeout();
+        seCommandPendingId = -1;
+        seCommandPendingLabel = null;
+        seCommandRevert = null;
+    }
+
+    /**
+     * Queues one SE settings frame and arms a watchdog for its reply id. The SE transport has no
+     * generic ack, so the watch answering the same function id is the success signal (the vendor
+     * registers a listener for exactly that id).
+     */
+    private void seWriteSetting(String label, int replyId, byte[] frame, Runnable revert) {
+        if (!seCommandsActive()) {
+            if (revert != null) revert.run();
+            setSettingsStatus("Connect the watch before changing " + label + ".", true);
+            return;
+        }
+        clearSeCommandPending();
+        seCommandPendingId = replyId;
+        seCommandPendingLabel = label;
+        seCommandRevert = revert;
+        setSettingsStatus("Sending " + label + "...", false);
+        sendSe(frame, label);
+        seCommandTimeout = () -> {
+            seCommandTimeout = null;
+            if (seCommandPendingLabel == null) return;
+            String pending = seCommandPendingLabel;
+            Runnable undo = seCommandRevert;
+            clearSeCommandPending();
+            if (undo != null) undo.run();
+            setSettingsStatus("No reply for " + pending + ".", true);
+        };
+        handler.postDelayed(seCommandTimeout, SE_COMMAND_TIMEOUT_MS);
+    }
+
+    private void resolveSeCommand(int id, boolean success, String note) {
+        if (seCommandPendingLabel == null || seCommandPendingId != id) return;
+        String label = seCommandPendingLabel;
+        Runnable undo = seCommandRevert;
+        clearSeCommandPending();
+        if (!success && undo != null) undo.run();
+        String suffix = note == null || note.isEmpty() ? "" : " · " + note;
+        setSettingsStatus(label + (success ? " · accepted" : " · refused by the watch") + suffix,
+                !success);
+    }
+
+    /**
+     * Applies one reply from the SE command set. The watch answers a set command with the state
+     * it stored, so the UI is refreshed from the reply rather than from the requested value.
+     */
+    private void onSeCommandReply(byte[] message, int id, int error) {
+        if (error != 0) {
+            String label = SeWear.errorLabel(error);
+            logPairing("SE command " + id + " refused · " + label);
+            resolveSeCommand(id, false, label);
+            return;
+        }
+        logBle("SE command reply · " + SeCommands.describe(message));
+        switch (id) {
+            case SeCommands.FUNCTION_DEVICE_INFO: {
+                SeCommands.DeviceInfo info = SeCommands.deviceInfo(message);
+                if (info != null) {
+                    watchFirmware = info.firmware;
+                    if (info.battery >= 0) watchBattery = info.battery;
+                    refreshSettings();
+                    refreshHome();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_DEVICE_BATTERY: {
+                int level = SeCommands.batteryLevel(message);
+                if (level >= 0) {
+                    watchBattery = level;
+                    refreshSettings();
+                    refreshHome();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_GET_HEART_RATE_MONITOR:
+            case SeCommands.FUNCTION_SET_HEART_RATE_MONITOR: {
+                Boolean on = SeCommands.heartRateMonitorOn(message);
+                if (on != null) {
+                    continuousHrEnabled = on;
+                    persistAutoHr(on);
+                    refreshSettings();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_GET_SEDENTARY:
+            case SeCommands.FUNCTION_SET_SEDENTARY: {
+                SeCommands.Sedentary sedentary = SeCommands.sedentary(message);
+                if (sedentary != null) {
+                    sedentaryEnabled = sedentary.on;
+                    if (sedentary.periodMinutes > 0) sedentaryPeriod = sedentary.periodMinutes;
+                    if (sedentary.startHour >= 0 && sedentary.startMinute >= 0) {
+                        sedentaryStartHour = sedentary.startHour;
+                        sedentaryStartMin = sedentary.startMinute;
+                    }
+                    if (sedentary.endHour >= 0 && sedentary.endMinute >= 0) {
+                        sedentaryEndHour = sedentary.endHour;
+                        sedentaryEndMin = sedentary.endMinute;
+                    }
+                    refreshSettings();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_GET_POWER_SAVING:
+            case SeCommands.FUNCTION_SET_POWER_SAVING: {
+                Boolean saving = SeCommands.powerSavingOn(message);
+                if (saving != null) {
+                    batterySaverEnabled = saving;
+                    refreshSettings();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_REPORT_REAL_TIME_HEART_RATE: {
+                SeCommands.RealTimeSample sample = SeCommands.realTimeSample(message);
+                if (sample != null && sample.bpm > 0 && sample.bpm <= 250) {
+                    seLastRealtimeBpm = sample.bpm;
+                    showHeartRate(sample.bpm);
+                    stopSeRealtimeHeartRate("reading received");
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        resolveSeCommand(id, true, null);
+    }
+
+    /** Starts the ZhBracelet bind/inquiry, the stack NoiseFit's {@code NavPlusConnectHandler} uses
      * for ColorFit Ultra Buzz / Vision Buzz / Ultra 2. It runs first when this app already has a
      * saved binding for the watch, and as the SE fallback otherwise. Returns false when the watch
      * does not expose the script channel, so the caller can try Berry instead.
@@ -3197,6 +3468,12 @@ public final class MainActivity extends ComponentActivity {
         seProbeReplies = 0;
         seProbeAccepted = 0;
         seProbeFailure = null;
+        seTransportOpen = false;
+        seCommandProfile = false;
+        sePostConnectStarted = false;
+        seRealtimeHeartRate = false;
+        seLastRealtimeBpm = -1;
+        cancelSeCommands();
         cancelZhTimeout();
         cancelZhPostBind();
         cancelZhHeartRateTimeout();
@@ -4019,6 +4296,15 @@ public final class MainActivity extends ComponentActivity {
 
     /** Requests battery and firmware. The reply arrives on key 0x08. */
     private void requestWatchInfo() {
+        if (seCommandsActive()) {
+            seWriteSetting("watch info", SeCommands.FUNCTION_DEVICE_INFO,
+                    SeCommands.deviceInfoRequest(), null);
+            sendSe(SeCommands.batteryRequest(), "battery");
+            sendSe(SeCommands.requestHeartRateMonitor(), "read auto-hr");
+            sendSe(SeCommands.requestSedentary(), "read sedentary");
+            sendSe(SeCommands.requestPowerSaving(), "read battery saver");
+            return;
+        }
         if (!zhFinished || !connectionReady || zhWriteChar == null) {
             setSettingsStatus("Connect the watch before reading its info.", true);
             return;
@@ -4030,6 +4316,13 @@ public final class MainActivity extends ComponentActivity {
 
     /** Sends the clock the user asked for; the watch acks key 0x01 on 0x42. */
     private void syncWatchClock() {
+        if (seCommandsActive()) {
+            long now = System.currentTimeMillis();
+            int offsetQuarterHours = TimeZone.getDefault().getOffset(now) / (1000 * 60 * 15);
+            seWriteSetting("time sync", SeCommands.FUNCTION_SET_TIME,
+                    SeCommands.timeSync(now / 1000L, offsetQuarterHours), null);
+            return;
+        }
         Calendar now = Calendar.getInstance();
         byte[] frame = ZhBraceletBinding.timeSyncFrame(
                 now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
@@ -4040,6 +4333,11 @@ public final class MainActivity extends ComponentActivity {
 
     /** Find-watch has no acknowledgement; the watch simply vibrates. */
     private void findWatch() {
+        if (seCommandsActive()) {
+            sendSe(SeCommands.findWear(), "find-watch");
+            setSettingsStatus("Find watch sent · the watch should vibrate.", false);
+            return;
+        }
         if (!zhFinished || !connectionReady || zhWriteChar == null) {
             setSettingsStatus("Connect the watch before finding it.", true);
             return;
@@ -4113,6 +4411,17 @@ public final class MainActivity extends ComponentActivity {
         boolean previous = sedentaryEnabled;
         sedentaryEnabled = on;
         refreshSettings();
+        if (seCommandsActive()) {
+            // The UI keeps the interval code the Buzz uses; on SE the vendor expects seconds and
+            // a sensible reminder is at least half an hour, so never send the small Buzz code.
+            int minutes = sedentaryPeriod >= 30 ? sedentaryPeriod : 60;
+            seWriteSetting("sedentary reminder", SeCommands.FUNCTION_SET_SEDENTARY,
+                    SeCommands.sedentary(on, minutes * 60,
+                            sedentaryStartHour, sedentaryStartMin,
+                            sedentaryEndHour, sedentaryEndMin),
+                    () -> { sedentaryEnabled = previous; refreshSettings(); });
+            return;
+        }
         writeSetting("sedentary reminder", ZhBraceletBinding.KEY_SEDENTARY, -1,
                 ZhBraceletBinding.sedentaryFrame(on, sedentaryPeriod,
                         sedentaryStartHour, sedentaryStartMin, sedentaryEndHour, sedentaryEndMin),
@@ -4139,6 +4448,10 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showAlarmEditor() {
+        if (seCommandsActive()) {
+            setSettingsStatus("Alarms are not implemented for this watch yet.", true);
+            return;
+        }
         android.app.TimePickerDialog picker = new android.app.TimePickerDialog(this,
                 (view, hour, minute) -> {
                     int id = 0;
@@ -4157,6 +4470,10 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void removeWatchAlarm(int id) {
+        if (seCommandsActive()) {
+            setSettingsStatus("Alarms are not implemented for this watch yet.", true);
+            return;
+        }
         List<AlarmUi> before = new ArrayList<>(watchAlarms);
         for (int i = 0; i < watchAlarms.size(); i++) {
             if (watchAlarms.get(i).getId() == id) {
@@ -4170,6 +4487,10 @@ public final class MainActivity extends ComponentActivity {
 
     /** Writes the whole list, because the vendor replaces the alarm set in one frame. */
     private void sendAlarms(List<AlarmUi> before) {
+        if (seCommandsActive()) {
+            setSettingsStatus("Alarms are not implemented for this watch yet.", true);
+            return;
+        }
         List<ZhBraceletBinding.Alarm> alarms = new ArrayList<>();
         for (AlarmUi alarm : watchAlarms) {
             alarms.add(new ZhBraceletBinding.Alarm(
@@ -4186,6 +4507,12 @@ public final class MainActivity extends ComponentActivity {
 
     /** Reads the watch's stored sedentary reminder and alarm list after a connection. */
     private void readWatchSettings() {
+        if (seCommandsActive()) {
+            sendSe(SeCommands.requestHeartRateMonitor(), "read auto-hr");
+            sendSe(SeCommands.requestSedentary(), "read sedentary");
+            sendSe(SeCommands.requestPowerSaving(), "read battery saver");
+            return;
+        }
         if (!zhFinished || zhWriteChar == null) return;
         byte[] sedentary = ZhBraceletBinding.privateReadFrame(
                 ZhBraceletBinding.PRIVATE_SEDENTARY);
@@ -4411,6 +4738,10 @@ public final class MainActivity extends ComponentActivity {
         seWriteQueue.clear();
         seCurrentWrite = null;
         seAwaitingReady = false;
+        seTransportOpen = false;
+        seCommandProfile = false;
+        sePostConnectStarted = false;
+        cancelSeCommands();
         if (sePairStarted && !sePairFinished) {
             sePairFinished = true;
             seState = "disconnected";

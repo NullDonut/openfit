@@ -336,6 +336,42 @@ while `NOT_SUPPORT` there confirms the protocol conclusion.
 
 The remaining question is whether any of those account probes is answered, and with what.
 
+#### Watch Beat command set over SE (2026-11-27)
+
+Once the bind succeeds the Watch Beat uses the same `16186f00` transport for ordinary commands.
+OpenFit keeps the transport open after the bind (`seTransportOpen`) instead of tearing it down at
+the end of the pairing flow, and only watches with **no** ZhBracelet write characteristic
+(`seCommandProfile`) take this route, so the ColorFit Ultra Buzz keeps its existing key protocol.
+
+Every frame is `SEWear{id, <payload>, error_code}`; field numbers were read from the generated
+protobuf classes and the exact bytes are pinned in `SeCommandsTest`:
+
+| id | command | payload |
+|---|---|---|
+| 32 | `GET_DEVICE_INFO` | bare request; reply `device{device_info{firmware, serial, battery{capacity}}}` |
+| 33 | `GET_DEVICE_BATTERY_STATUS` | bare request; reply `device{battery{capacity, charge_status}}` |
+| 48 | `SET_SYSTEM_TIME` | `system_time{time_set{timestamp uint32, offset sint32 quarter-hours, time_format bool}}` |
+| 68 | `SET_USER_PROFILE` | `user_settings{user_profile{height, weight float, age, sex}}` |
+| 161 | `FIND_WEAR` | bare request, no reply |
+| 214 / 215 | `GET/SET_HEART_RATE_MONITOR` | `setting_menu{heart_rate_monitor{mode AUTO=0/OFF=1, frequency 5 min, continuous ALL_DAY=0/INTELLIGENT=1, warnings}}` |
+| 217 / 218 | `GET/SET_SEDENTARY_REMINDER` | `setting_menu{sedentary_reminder{on, start, end, frequency seconds, no_disturb}}` |
+| 235 / 236 | `GET/SET_POWER_SAVING` | `setting_menu{power_saving{on}}` |
+| 730 / 731 | `GET/SET_REAL_TIME_HR` | `setting_menu{real_time_settings{switch, frequency seconds, auto_shutdown seconds}}` |
+| 733 | `REPORT_REAL_TIME_HR` | watch → phone `setting_menu{real_time_data{timestamp, bpm}}` |
+
+Vendor details that matter:
+
+- The user profile writes `age`, not `birth`, and the weight is a **float** field.
+- Sedentary `frequency` is stored in **seconds** (`interval * 60`), and the vendor always sets
+  `no_disturb_in_launch=true`.
+- The HR frequency the vendor sends is **5 minutes**, matching the UI's five-minute cadence.
+- The SE protobufs are **proto2**: the vendor's generated `writeTo` emits every field of the
+  message it sets, so default values such as `mode=0` and `continuous=0` appear on the wire.
+
+The Watch Beat has no one-shot measurement frame. OpenFit runs a bounded real-time HR burst
+(id 731 on, 5 s interval, 30 s auto-shutdown) after connecting, records the first id-733 sample for
+Home, and turns the stream off again.
+
 ### Berry SPP frame format (alternate transport)
 
 From `com.zhapp.ble.bean.berry.CmdDataBean#getCmdBytes` (multi-byte fields are

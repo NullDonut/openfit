@@ -924,6 +924,20 @@ a secret.
     the sleep placeholder is readable. Health, Sleep and Settings still use the older layout and
     will adopt the shared components next.
 
+12. **SE command set for the Noise Watch Beat (2026-11-27, CI build pending).**
+    The bind now works end to end (`Watch bound state · yes` and `saved account verified` on
+    reconnect). The old code closed the `16186f00` write path in `finishPairing`, which is why no
+    post-bind command had ever been answered; the transport lifetime is now tracked separately in
+    `seTransportOpen`. `SeCommands` encodes the vendor's Apricot frames for ids 32/33 (info,
+    battery), 48 (clock), 68 (profile), 161 (find wear), 214/215 (auto HR), 217/218 (sedentary),
+    235/236 (battery saver) and 730/731/733 (real-time HR), with 16 byte-exact unit tests. Settings
+    actions route through SE only when `seCommandProfile` is true, i.e. the watch has no
+    ZhBracelet write characteristic, so the ColorFit Ultra Buzz path is untouched. Alarms are
+    reported as unsupported on this profile for now. On the next Watch Beat run, check: clock sync
+    on the watch, firmware/battery in Settings, Auto HR toggle, battery saver, sedentary on/off,
+    find watch, and a heart-rate reading on Home after connect. If any command is silent, the
+    pairing log now shows `TX <label>` and `SE command ...`/`No reply for ...`.
+
 ### Suggested order from here
 
 ```
