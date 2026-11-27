@@ -712,7 +712,7 @@ Existing app behavior: local dashboard, BLE discovery by recognizable Noise/Colo
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
 manual sleep notes. No account, analytics, network permission or cloud sync.
 
-### 8.0 Watch Settings tab (2026-11-27)
+### Watch Settings tab (2026-11-27)
 
 A fifth Compose tab exposes the commands recovered from `com.zjw.zhbraceletsdk.service.a`:
 
