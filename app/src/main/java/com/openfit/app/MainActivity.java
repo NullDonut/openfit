@@ -574,6 +574,9 @@ public final class MainActivity extends ComponentActivity {
         pageScroll = new ScrollView(this);
         pageScroll.setFillViewport(true);
         pageScroll.setClipToPadding(false);
+        // Keep the page scrollable but hide the system scrollbar for the clean, full-bleed look.
+        pageScroll.setVerticalScrollBarEnabled(false);
+        pageScroll.setHorizontalScrollBarEnabled(false);
         page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(22), dp(10), dp(22), dp(28));
@@ -982,6 +985,7 @@ public final class MainActivity extends ComponentActivity {
         body.setTextIsSelectable(true);
         body.setPadding(dp(18), dp(14), dp(18), dp(14));
         ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(body);
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle("Watch diagnostics")
