@@ -1,22 +1,28 @@
 package com.openfit.app.ui
 
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.MaterialExpressiveTheme
-import androidx.compose.material3.MotionScheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
- * OpenFit's Material 3 Expressive theme.
+ * OpenFit's Compose theme.
  *
  * The palette mirrors the Java dashboard (near-black surfaces, white text, one red accent) so
- * Compose cards sit next to the remaining Views screens without a visual seam. The expressive
- * motion scheme is what gives the new components their spring-based transitions.
+ * Compose cards sit next to the remaining Views screens without a visual seam.
+ *
+ * Note on Material 3 Expressive: `MaterialExpressiveTheme`, `MotionScheme` and the expressive
+ * components only became public API in material3 1.5.0, which requires compileSdk 37 and
+ * AGP 9.1. This module builds with compileSdk 35 / AGP 8.6.1, so material3 1.4.0 is the newest
+ * usable release. The expressive *character* is reproduced here with the stable API surface:
+ * oversized corner radii, emphasized (tighter, heavier) display/title styles, and spring-based
+ * size/colour motion at the call sites.
  */
 private val OpenFitColors = darkColorScheme(
     primary = Color(0xFFF5283C),
@@ -45,14 +51,36 @@ private val OpenFitShapes = Shapes(
     extraLarge = RoundedCornerShape(32.dp)
 )
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val OpenFitBaseTypography = Typography()
+
+/**
+ * The M3 baseline styles with the heavier weights and tighter tracking used by the expressive
+ * type scale. Only the styles the dashboard actually uses are overridden.
+ */
+private val OpenFitTypography = Typography(
+    displayLarge = OpenFitBaseTypography.displayLarge.copy(
+        fontWeight = FontWeight.Bold,
+        letterSpacing = (-2).sp
+    ),
+    headlineSmall = OpenFitBaseTypography.headlineSmall.copy(
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = (-0.3).sp
+    ),
+    titleMedium = OpenFitBaseTypography.titleMedium.copy(
+        fontWeight = FontWeight.SemiBold
+    ),
+    labelMedium = OpenFitBaseTypography.labelMedium.copy(
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 0.4.sp
+    )
+)
+
 @Composable
 fun OpenFitTheme(content: @Composable () -> Unit) {
-    MaterialExpressiveTheme(
+    MaterialTheme(
         colorScheme = OpenFitColors,
-        motionScheme = MotionScheme.expressive(),
         shapes = OpenFitShapes,
-        typography = Typography(),
+        typography = OpenFitTypography,
         content = content
     )
 }

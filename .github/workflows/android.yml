@@ -48,10 +48,10 @@ jobs:
         if: failure()
         run: |
           echo "--- Gradle failure summary ---"
-          grep -nE "What went wrong|FAILURE:|error:|Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|Unsupported class file|requires .*compile" build.log | tail -40 || true
+          grep -nE "What went wrong|FAILURE:|error:|^e: |Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|Unsupported class file|requires .*compile|Cannot access|Unresolved reference" build.log | tail -40 || true
           echo "--- Last log lines ---"
           tail -c 3000 build.log || true
-          { grep -hE "What went wrong|FAILURE:|error:|Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|requires .*compile" build.log | tail -15 || true
+          { grep -hE "What went wrong|FAILURE:|error:|^e: |Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|requires .*compile|Cannot access|Unresolved reference" build.log | tail -20 || true
             echo "---"
             tail -c 1500 build.log || true
           } | sed 's/\r$//; s/%/%25/g' | awk '{print "::error::" $0}'
