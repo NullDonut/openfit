@@ -427,14 +427,14 @@ private fun HeartCard(state: HomeUiState, actions: HomeActions) {
                 }
                 if (state.heartSamples.isNotEmpty()) {
                     Spacer(Modifier.height(16.dp))
-                    SparkBars(
+                    Sparkline(
                         values = downsample(
                             state.heartSamples.map { it.toFloat() },
                             48
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(54.dp),
+                            .height(56.dp),
                         color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.height(7.dp))

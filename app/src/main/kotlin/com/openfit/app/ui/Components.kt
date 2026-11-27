@@ -22,12 +22,13 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -237,35 +238,85 @@ internal fun CapsuleRings(
     }
 }
 
-/** Bar sparkline. Bars are scaled between the smallest and largest value in [values]. */
+/**
+ * Line sparkline: a smoothed trace with a faded area and a soft dot on the newest value. Used for
+ * the compact heart-rate strip on Home, so it reads as the small sibling of the full Health graph.
+ */
 @Composable
-internal fun SparkBars(
+internal fun Sparkline(
     values: List<Float>,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.primary
 ) {
     Canvas(modifier) {
-        if (values.isEmpty()) return@Canvas
+        if (values.size < 2) return@Canvas
         val min = values.minOrNull() ?: 0f
         val max = values.maxOrNull() ?: 1f
-        val range = (max - min).coerceAtLeast(1f)
-        val slot = size.width / values.size
-        val bar = (slot * 0.62f).coerceIn(1f, 8.dp.toPx())
-        values.forEachIndexed { index, value ->
-            val fraction = if (values.size == 1) {
-                0.6f
-            } else {
-                ((value - min) / range).coerceIn(0f, 1f) * 0.85f + 0.15f
-            }
-            val height = fraction * size.height
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(index * slot + (slot - bar) / 2f, size.height - height),
-                size = Size(bar, height),
-                cornerRadius = CornerRadius(bar / 2f)
-            )
+        val span = (max - min).coerceAtLeast(1f)
+        val stepX = size.width / (values.size - 1)
+        val padTop = 7.dp.toPx()
+        val padBottom = 3.dp.toPx()
+        val usable = (size.height - padTop - padBottom).coerceAtLeast(1f)
+        val points = values.mapIndexed { index, value ->
+            val fraction = (value - min) / span
+            Offset(index * stepX, padTop + (1f - fraction) * usable)
         }
+        val area = Path()
+        val line = smoothPath(points, area, size.height)
+        drawPath(
+            path = area,
+            brush = Brush.verticalGradient(
+                colors = listOf(color.copy(alpha = 0.30f), Color.Transparent),
+                startY = 0f,
+                endY = size.height
+            )
+        )
+        drawPath(
+            path = line,
+            color = color,
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+        val last = points.last()
+        drawCircle(color = color.copy(alpha = 0.22f), radius = 6.dp.toPx(), center = last)
+        drawCircle(color = color, radius = 3.dp.toPx(), center = last)
     }
+}
+
+/**
+ * A Catmull-Rom style smoothing of [points] as a cubic path. Each control point is clamped to its
+ * segment's vertical span so the curve looks continuous without overshooting the data. When [area]
+ * is supplied, the same curve is also appended to it as a closed shape dropping to [baseline],
+ * ready to fill.
+ */
+internal fun smoothPath(points: List<Offset>, area: Path? = null, baseline: Float = 0f): Path {
+    val line = Path()
+    if (points.isEmpty()) return line
+    line.moveTo(points[0].x, points[0].y)
+    area?.moveTo(points[0].x, baseline)
+    area?.lineTo(points[0].x, points[0].y)
+    val last = points.size - 1
+    if (last == 0) {
+        area?.lineTo(points[0].x, baseline)
+        area?.close()
+        return line
+    }
+    for (index in 0 until last) {
+        val p0 = points[if (index > 0) index - 1 else index]
+        val p1 = points[index]
+        val p2 = points[index + 1]
+        val p3 = points[if (index + 2 <= last) index + 2 else last]
+        val c1x = p1.x + (p2.x - p0.x) / 6f
+        val c1y = (p1.y + (p2.y - p0.y) / 6f)
+            .coerceIn(minOf(p1.y, p2.y), maxOf(p1.y, p2.y))
+        val c2x = p2.x - (p3.x - p1.x) / 6f
+        val c2y = (p2.y - (p3.y - p1.y) / 6f)
+            .coerceIn(minOf(p1.y, p2.y), maxOf(p1.y, p2.y))
+        line.cubicTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+        area?.cubicTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+    }
+    area?.lineTo(points[last].x, baseline)
+    area?.close()
+    return line
 }
 
 /** Evenly reduces [values] to at most [target] entries, keeping the overall shape. */

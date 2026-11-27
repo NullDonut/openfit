@@ -33,8 +33,11 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
@@ -363,11 +366,12 @@ private fun HypnogramCard(state: SleepUiState) {
                 progress = progress,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(150.dp)
+                    .height(160.dp)
             )
 
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.width(38.dp))
                 Text(
                     text = formatClock(state.startMinute),
                     modifier = Modifier.weight(1f),
@@ -381,6 +385,7 @@ private fun HypnogramCard(state: SleepUiState) {
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(Modifier.width(6.dp))
             }
         }
     }
@@ -394,25 +399,58 @@ private fun Hypnogram(
     progress: Float,
     modifier: Modifier = Modifier
 ) {
-    val track = trackColor()
-    val accent = MaterialTheme.colorScheme.primary
+    val grid = MaterialTheme.colorScheme.outline
+    val deep = MaterialTheme.colorScheme.primary
+    val light = MaterialTheme.colorScheme.onSurface
+    val rem = MaterialTheme.colorScheme.onSurfaceVariant
+    val awake = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+    val soft = MaterialTheme.colorScheme.onSurfaceVariant
+    val measurer = rememberTextMeasurer()
+    val labelStyle = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 9.sp
+    )
+
     Canvas(modifier) {
         if (stages.isEmpty()) return@Canvas
-        val padY = 10.dp.toPx()
+        val leftPad = 38.dp.toPx()
+        val rightPad = 6.dp.toPx()
+        val padY = 12.dp.toPx()
+        val plotLeft = leftPad
+        val plotRight = size.width - rightPad
+        val plotWidth = (plotRight - plotLeft).coerceAtLeast(1f)
         val usable = size.height - padY * 2f
         fun yFor(level: Int): Float = padY + usable * (3 - level) / 3f
+        fun colorFor(level: Int): Color = when (level) {
+            0 -> deep
+            2 -> rem
+            3 -> awake
+            else -> light
+        }
+        val levelLabels = listOf(3 to "AWAKE", 2 to "REM", 1 to "LIGHT", 0 to "DEEP")
 
-        // Faint band guides: awake at the top, deep at the bottom.
-        for (level in 0..3) {
+        // A faint band per stage, each labelled in the left gutter.
+        for ((level, name) in levelLabels) {
+            val guideY = yFor(level)
             drawLine(
-                color = track,
-                start = Offset(0f, yFor(level)),
-                end = Offset(size.width, yFor(level)),
+                color = grid,
+                start = Offset(plotLeft, guideY),
+                end = Offset(plotRight, guideY),
                 strokeWidth = 1.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(
-                    floatArrayOf(4.dp.toPx(), 5.dp.toPx()),
+                    floatArrayOf(3.dp.toPx(), 5.dp.toPx()),
                     0f
                 )
+            )
+            val text = measurer.measure(name, labelStyle)
+            drawText(
+                textLayoutResult = text,
+                topLeft = Offset(
+                    leftPad - text.size.width - 7.dp.toPx(),
+                    guideY - text.size.height / 2f
+                ),
+                color = soft
             )
         }
 
@@ -421,36 +459,37 @@ private fun Hypnogram(
         val span = (endAbs - base).coerceAtLeast(1).toFloat()
         fun xFor(minute: Int): Float {
             val m = if (minute < base) minute + 24 * 60 else minute
-            return ((m - base) / span) * size.width * progress
+            return plotLeft + ((m - base) / span) * plotWidth * progress
         }
 
-        val stroke = 2.5.dp.toPx()
-        var previousY = 0f
+        val bar = 5.dp.toPx()
+        var previousY: Float? = null
         stages.forEachIndexed { index, stage ->
             val level = levelFor(stage.stage)
             val x0 = xFor(stage.startMinute)
             val x1 = if (index + 1 < stages.size) {
                 xFor(stages[index + 1].startMinute)
             } else {
-                size.width * progress
+                plotLeft + plotWidth * progress
             }
             val y = yFor(level)
-            if (index > 0) {
+            if (previousY != null && previousY != y) {
                 drawLine(
-                    color = accent,
+                    color = colorFor(level).copy(alpha = 0.6f),
                     start = Offset(x0, previousY),
                     end = Offset(x0, y),
-                    strokeWidth = stroke,
+                    strokeWidth = 1.5.dp.toPx()
+                )
+            }
+            if (x1 > x0) {
+                drawLine(
+                    color = colorFor(level),
+                    start = Offset(x0, y),
+                    end = Offset(x1, y),
+                    strokeWidth = bar,
                     cap = StrokeCap.Round
                 )
             }
-            drawLine(
-                color = accent,
-                start = Offset(x0, y),
-                end = Offset(x1.coerceAtLeast(x0), y),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round
-            )
             previousY = y
         }
     }
@@ -465,12 +504,12 @@ private fun stageParts(state: SleepUiState): List<StagePart> {
         StagePart("DEEP", state.deep, scheme.primary),
         StagePart("LIGHT", state.light, scheme.onSurface),
         StagePart("REM", state.rem, scheme.onSurfaceVariant),
-        StagePart("AWAKE", state.awake + state.stayUp, scheme.outline)
+        StagePart("AWAKE", state.awake + state.stayUp, scheme.onSurfaceVariant.copy(alpha = 0.35f))
     )
 }
 
 @Composable
-private fun trackColor(): Color = MaterialTheme.colorScheme.surfaceVariant
+private fun trackColor(): Color = MaterialTheme.colorScheme.outline
 
 /** Maps a vendor stage code to a band level: 3 awake (top) down to 0 deep (bottom). */
 private fun levelFor(stage: Int): Int = when (stage) {

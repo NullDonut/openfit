@@ -3,6 +3,17 @@
 Last updated: 2026-11-27
 Branch: `feature/ble-connection-handling`
 
+## 2026-11-27 — Redesign the charts
+
+The Health heart-rate graph was rebuilt: a labelled BPM axis with 3–6 tidy guide lines, faint
+six-hour divisions, a Catmull-Rom smoothed trace over a gradient area, a red vertical "now"
+marker, a peak-value callout and a halo on the most recent reading. Gaps in the watch history
+break the trace instead of being bridged, and `smoothPath` clamps each control point to the
+segment span so the curve never overshoots the data. The empty state is a dashed placeholder.
+Home's bar sparkline became `Sparkline`, a smoothed miniature of the same chart. The Sleep
+hypnogram now draws coloured stage runs (deep/light/REM/awake) on labelled bands instead of a
+single red step line, and the stage breakdown track is visible against the card.
+
 ## 2026-11-27 — Pull down on Home to refresh and reconnect
 
 The Home page now has a pull-to-refresh gesture: when the page is at the top, a quick downward

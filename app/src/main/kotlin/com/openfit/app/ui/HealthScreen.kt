@@ -43,12 +43,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -308,7 +311,7 @@ private fun GraphCard(state: HealthUiState) {
         shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "24-HOUR TREND",
@@ -320,7 +323,7 @@ private fun GraphCard(state: HealthUiState) {
                     modifier = Modifier.weight(1f)
                 )
                 Text(
-                    text = "15 MIN",
+                    text = "BPM · 15 MIN",
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 9.sp,
@@ -328,31 +331,24 @@ private fun GraphCard(state: HealthUiState) {
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
             if (hasData) {
                 HeartRateChart(
                     points = points,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(168.dp)
+                        .height(196.dp)
                 )
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth()) {
-                    listOf("00", "06", "12", "18", "24").forEach { label ->
-                        Text(
-                            text = label,
-                            modifier = Modifier.weight(1f),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.sp,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
             } else {
+                EmptyChart(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                )
+                Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "The watch has not sent today's heart-rate history yet. " +
-                        "It arrives after the watch binds.",
+                    text = "The watch has not sent today's heart-rate history yet. It " +
+                        "arrives after the watch binds.",
                     style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -363,96 +359,233 @@ private fun GraphCard(state: HealthUiState) {
 
 @Composable
 private fun HeartRateChart(points: List<Int?>, modifier: Modifier = Modifier) {
-    val color = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.primary
     val grid = MaterialTheme.colorScheme.outline
-    val valid = points.filterNotNull()
-    val low = ((valid.minOrNull() ?: 60) - 8).coerceAtLeast(30)
-    val high = (valid.maxOrNull() ?: 100) + 8
-    val span = (high - low).coerceAtLeast(20).toFloat()
-    val progress by animateFloatAsState(
-        targetValue = if (valid.isEmpty()) 0f else 1f,
-        animationSpec = tween(durationMillis = 720),
-        label = "heart-chart"
+    val gridFaint = MaterialTheme.colorScheme.outlineVariant
+    val soft = MaterialTheme.colorScheme.onSurfaceVariant
+    val hole = MaterialTheme.colorScheme.background
+    val measurer = rememberTextMeasurer()
+    val labelStyle = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 9.sp
     )
 
-    Canvas(modifier) {
-        val width = size.width
-        val height = size.height
-        val count = points.size.coerceAtLeast(2)
-        val step = width / (count - 1).toFloat()
-        fun x(index: Int) = step * index
-        fun y(value: Int) = height - ((value - low) / span) * height * progress
+    val valid = remember(points) { points.filterNotNull() }
+    val bounds = remember(points) { chartBounds(valid) }
+    val low = bounds[0]
+    val high = bounds[1]
+    val step = bounds[2]
+    val span = (high - low).coerceAtLeast(1)
+    val markers = remember(points) {
+        var last = -1
+        var peakIndex = -1
+        var peak = Int.MIN_VALUE
+        points.forEachIndexed { index, value ->
+            if (value != null) {
+                last = index
+                if (value > peak) {
+                    peak = value
+                    peakIndex = index
+                }
+            }
+        }
+        intArrayOf(last, peakIndex)
+    }
+    val progress by animateFloatAsState(
+        targetValue = if (valid.isEmpty()) 0f else 1f,
+        animationSpec = tween(durationMillis = 760),
+        label = "heart-chart"
+    )
+    val nowMinute = remember {
+        val now = java.time.LocalTime.now()
+        now.hour * 60 + now.minute
+    }
 
-        // Quiet horizontal guides.
-        for (fraction in listOf(0.25f, 0.5f, 0.75f)) {
+    Canvas(modifier) {
+        val leftPad = 30.dp.toPx()
+        val rightPad = 12.dp.toPx()
+        val topPad = 16.dp.toPx()
+        val bottomPad = 20.dp.toPx()
+        val plotLeft = leftPad
+        val plotRight = size.width - rightPad
+        val plotTop = topPad
+        val plotBottom = size.height - bottomPad
+        val plotWidth = (plotRight - plotLeft).coerceAtLeast(1f)
+        val plotHeight = (plotBottom - plotTop).coerceAtLeast(1f)
+        val count = points.size.coerceAtLeast(2)
+
+        fun x(index: Int): Float = plotLeft + index.toFloat() / (count - 1) * plotWidth
+        fun y(value: Int): Float =
+            plotBottom - ((value - low).toFloat() / span * progress) * plotHeight
+
+        // Horizontal value guides, labelled down the left gutter.
+        var guide = low
+        while (guide <= high) {
+            val guideY = plotBottom - ((guide - low).toFloat() / span) * plotHeight
             drawLine(
                 color = grid,
-                start = Offset(0f, height * fraction),
-                end = Offset(width, height * fraction),
+                start = Offset(plotLeft, guideY),
+                end = Offset(plotRight, guideY),
                 strokeWidth = 1.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(
-                    floatArrayOf(3.dp.toPx(), 5.dp.toPx()),
+                    floatArrayOf(2.dp.toPx(), 6.dp.toPx()),
                     0f
                 )
             )
+            val text = measurer.measure(guide.toString(), labelStyle)
+            drawText(
+                textLayoutResult = text,
+                topLeft = Offset(
+                    leftPad - text.size.width - 6.dp.toPx(),
+                    guideY - text.size.height / 2f
+                ),
+                color = soft
+            )
+            guide += step
         }
 
+        // Faint six-hour divisions.
+        for (hour in intArrayOf(6, 12, 18)) {
+            val guideX = plotLeft + hour / 24f * plotWidth
+            drawLine(
+                color = gridFaint,
+                start = Offset(guideX, plotTop),
+                end = Offset(guideX, plotBottom),
+                strokeWidth = 1.dp.toPx()
+            )
+        }
+
+        // Where the clock is now.
+        if (nowMinute in 0..1440) {
+            val nowX = plotLeft + nowMinute / 1440f * plotWidth
+            drawLine(
+                color = accent.copy(alpha = 0.35f),
+                start = Offset(nowX, plotTop),
+                end = Offset(nowX, plotBottom),
+                strokeWidth = 1.2.dp.toPx()
+            )
+        }
+
+        // The trace itself, one smooth run per unbroken stretch of readings.
         var index = 0
         while (index < points.size) {
-            val value = points[index]
-            if (value == null) {
+            if (points[index] == null) {
                 index++
                 continue
             }
-            val segment = ArrayList<Pair<Int, Int>>()
+            val offsets = ArrayList<Offset>()
             while (index < points.size && points[index] != null) {
-                segment.add(index to points[index]!!)
+                offsets.add(Offset(x(index), y(points[index]!!)))
                 index++
             }
-            if (segment.size == 1) {
-                val only = segment.first()
-                drawCircle(
-                    color = color,
-                    radius = 2.4.dp.toPx(),
-                    center = Offset(x(only.first), y(only.second))
-                )
+            if (offsets.size == 1) {
+                drawCircle(color = accent, radius = 2.6.dp.toPx(), center = offsets.first())
                 continue
             }
-            val line = Path()
             val area = Path()
-            val first = segment.first()
-            line.moveTo(x(first.first), y(first.second))
-            area.moveTo(x(first.first), height)
-            area.lineTo(x(first.first), y(first.second))
-            for (k in 1 until segment.size) {
-                val point = segment[k]
-                line.lineTo(x(point.first), y(point.second))
-                area.lineTo(x(point.first), y(point.second))
-            }
-            area.lineTo(x(segment.last().first), height)
-            area.close()
+            val line = smoothPath(offsets, area, plotBottom)
             drawPath(
                 path = area,
                 brush = Brush.verticalGradient(
-                    colors = listOf(color.copy(alpha = 0.20f), Color.Transparent),
-                    startY = 0f,
-                    endY = height
+                    colors = listOf(accent.copy(alpha = 0.24f), Color.Transparent),
+                    startY = plotTop,
+                    endY = plotBottom
                 )
             )
             drawPath(
                 path = line,
-                color = color,
-                style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
+                color = accent,
+                style = Stroke(
+                    width = 2.4.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
             )
-            segment.forEachIndexed { dotIndex, point ->
-                if (dotIndex % 4 == 0) {
-                    drawCircle(
-                        color = color,
-                        radius = 2.2.dp.toPx(),
-                        center = Offset(x(point.first), y(point.second))
-                    )
+            offsets.forEachIndexed { offsetIndex, offset ->
+                if (offsetIndex % 4 == 0) {
+                    drawCircle(color = accent, radius = 2.dp.toPx(), center = offset)
                 }
             }
+        }
+
+        // Peak label, so the day's hardest moment is readable at a glance.
+        val peakIndex = markers[1]
+        if (peakIndex in points.indices) {
+            val peakValue = points[peakIndex] ?: 0
+            val peakX = x(peakIndex)
+            val peakY = y(peakValue)
+            val text = measurer.measure(peakValue.toString(), labelStyle)
+            val labelX = (peakX - text.size.width / 2f)
+                .coerceIn(plotLeft, (plotRight - text.size.width).coerceAtLeast(plotLeft))
+            val labelY = (peakY - text.size.height - 7.dp.toPx()).coerceAtLeast(0f)
+            drawText(textLayoutResult = text, topLeft = Offset(labelX, labelY), color = accent)
+        }
+
+        // The most recent reading carries a soft halo.
+        val lastIndex = markers[0]
+        if (lastIndex in points.indices) {
+            val lastValue = points[lastIndex] ?: 0
+            val center = Offset(x(lastIndex), y(lastValue))
+            drawCircle(color = accent.copy(alpha = 0.20f), radius = 7.dp.toPx(), center = center)
+            drawCircle(color = accent, radius = 3.2.dp.toPx(), center = center)
+            drawCircle(color = hole, radius = 1.2.dp.toPx(), center = center)
+        }
+
+        // Hour labels under the plot.
+        listOf(0 to "00", 6 to "06", 12 to "12", 18 to "18", 24 to "24").forEach { (hour, label) ->
+            val labelX = plotLeft + hour / 24f * plotWidth
+            val text = measurer.measure(label, labelStyle)
+            val tx = (labelX - text.size.width / 2f)
+                .coerceIn(0f, (size.width - text.size.width).coerceAtLeast(0f))
+            drawText(
+                textLayoutResult = text,
+                topLeft = Offset(tx, plotBottom + 5.dp.toPx()),
+                color = soft
+            )
+        }
+    }
+}
+
+/** Rounds the readings into a tidy BPM window: returns [low, high, step] for the guide lines. */
+private fun chartBounds(values: List<Int>): IntArray {
+    if (values.isEmpty()) return intArrayOf(50, 150, 25)
+    val min = values.min()
+    val max = values.max()
+    var chosen = 50
+    for (step in intArrayOf(10, 20, 25, 40, 50)) {
+        val low = Math.floorDiv(min, step) * step
+        var high = ((max + step - 1) / step) * step
+        if (high <= max) high += step
+        val lines = (high - low) / step + 1
+        if (lines in 3..6) {
+            chosen = step
+            break
+        }
+    }
+    val step = chosen
+    var low = Math.floorDiv(min, step) * step
+    var high = ((max + step - 1) / step) * step
+    if (high <= max) high += step
+    while ((high - low) / step + 1 < 3) high += step
+    return intArrayOf(low, high, step)
+}
+
+/** A quiet placeholder drawn where the graph will appear before a reading arrives. */
+@Composable
+private fun EmptyChart(modifier: Modifier = Modifier) {
+    val grid = MaterialTheme.colorScheme.outline
+    Canvas(modifier) {
+        val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 6.dp.toPx()), 0f)
+        for (fraction in listOf(0.25f, 0.5f, 0.75f)) {
+            val y = size.height * fraction
+            drawLine(
+                color = grid,
+                start = Offset(0f, y),
+                end = Offset(size.width, y),
+                strokeWidth = 1.dp.toPx(),
+                pathEffect = dash
+            )
         }
     }
 }
