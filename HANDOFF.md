@@ -606,8 +606,11 @@ path uses `com.zh.ble.sa_wear.protobuf.SEWear`: `type=1`, `id=2`, `bind_account=
 The first device build sent the `sa_wear` byte sequence `10 10` for id 16. The watch read it as
 `change_mtu=16`, acked with `01 00` and did nothing, which looked like a silent account refusal.
 The corrected id-16 request is `08 10`; id 17 is `08 11 1A 04 12 02 08 01`; id 18 is
-`08 12 1A <len> 1A <len> 12 <len> <user id>`; id 19 is `08 13 1A <len> 32 <len> <token>`.
-The two codecs are kept apart in `BerrySewear` (Berry) and `SeWear` (`16186f00` / Apricot).
+`08 12 1A <len> 1A <len> 08 00 12 <len> <user id> 18 00`; id 19 is
+`08 13 1A <len> 32 <len> <token>`. The `08 00` / `18 00` are `bind_result_type=SUCCESS(0)` and
+`phone_type=ANDROID(0)`; the schemas are **proto2**, so the vendor writes those default-valued fields
+explicitly. Omitting them still gets an `error_code=0` ACK but the Watch Beat reports "pairing
+failed". The two codecs are kept apart in `BerrySewear` (Berry) and `SeWear` (`16186f00` / Apricot).
 
 **Frame magics (corrected 2026-11-18).** `BERRY_APP_REQ_DEV_HEAD_VALUE = 0x5A486666` → the phone
 sends `66 66 48 5A`; `BERRY_DEV_REQ_APP_HEAD_VALUE = 0x5A488888` → the watch sends `88 88 48 5A`.

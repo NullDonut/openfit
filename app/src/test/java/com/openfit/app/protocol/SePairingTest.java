@@ -63,18 +63,27 @@ public class SePairingTest {
         }, SePairing.bindCheckRequest());
     }
 
-    @Test public void bindResultCarriesOnlyTheUserId() {
+    @Test public void bindResultWritesTheTypeAndPhoneFieldsEvenAtTheirDefaults() {
+        // proto2 presence: the vendor sends bind_result_type=SUCCESS(0) and phone_type=ANDROID(0)
+        // explicitly, so both zero-valued fields appear in the wire form.
         assertArrayEquals(new byte[] {
                 0x08, 0x12,             // SEWear.id = 18
-                0x1A, 0x07,             // bind_account, 7 bytes
-                0x1A, 0x05,             // bind_result (3), 5 bytes
-                0x12, 0x03, 'a', 'b', 'c'
+                0x1A, 0x0B,             // bind_account, 11 bytes
+                0x1A, 0x09,             // bind_result (3), 9 bytes
+                0x08, 0x00,             // bind_result_type = SUCCESS (0)
+                0x12, 0x03, 'a', 'b', 'c', // user_id
+                0x18, 0x00              // phone_type = ANDROID (0)
         }, SePairing.bindResult("abc"));
     }
 
     @Test public void bindResultKeepsTheEmptyNestedMessage() {
-        assertArrayEquals(new byte[] {0x08, 0x12, 0x1A, 0x02, 0x1A, 0x00},
-                SePairing.bindResult(""));
+        assertArrayEquals(new byte[] {
+                0x08, 0x12,             // SEWear.id = 18
+                0x1A, 0x06,             // bind_account, 6 bytes
+                0x1A, 0x04,             // bind_result (3), 4 bytes
+                0x08, 0x00,             // bind_result_type = SUCCESS (0)
+                0x18, 0x00              // phone_type = ANDROID (0)
+        }, SePairing.bindResult(""));
     }
 
     @Test public void verifyUserNumberUsesFieldSix() {

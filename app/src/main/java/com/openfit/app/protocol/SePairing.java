@@ -15,7 +15,7 @@ import java.io.ByteArrayOutputStream;
  * id 0   wear{bleConnectParmeterConfig}                   link greeting: 9A 06 00
  * id 16  bindAccount{requestBindingStatus}                is the watch already bound?
  * id 17  bindAccount{bindCheck{deviceVerify:true}}        ask the watch to accept this phone
- * id 18  bindAccount{bindResult{userId}}                  confirm the account / user token
+ * id 18  bindAccount{bindResult{type,userId,phoneType}}   confirm the account / user token
  * id 19  bindAccount{verifyUserNumber{token}}             prove ownership on reconnect
  * </pre>
  */
@@ -141,15 +141,27 @@ public final class SePairing {
     }
 
     /**
-     * {@code SEWear{id=18, bindAccount{bindResult{userId:token}}}}. The result type SUCCESS and
-     * phone type ANDROID are both proto3 defaults, so only the user id is written.
+     * {@code SEWear{id=18, bindAccount{bindResult{bindResultType:SUCCESS, userId:token,
+     * phoneType:ANDROID}}}}.
+     *
+     * <p>These protos are proto2 (the generated classes expose {@code hasBindResultType()} /
+     * {@code hasPhoneType()} and an {@code isInitialized()} check), so an explicitly set field is
+     * serialized even when it equals the enum default. {@code SUCCESS} and {@code ANDROID} are
+     * both {@code 0}, but the vendor encoder still writes {@code 08 00} and {@code 18 00}; the
+     * watch treats the presence of those fields as part of a complete bind result. Omitting them
+     * (the old proto3-default assumption) makes the watch report "pairing failed" even though it
+     * acknowledges the frame with {@code error_code=0}.
      */
     public static byte[] bindResult(String userId) {
         ByteArrayOutputStream result = new ByteArrayOutputStream();
+        SeWear.writeTag(result, RESULT_TYPE, 0);
+        SeWear.writeVarint(result, BIND_RESULT_SUCCESS);
         if (userId != null && !userId.isEmpty()) {
             SeWear.writeMessage(result, RESULT_USER_ID,
                     userId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
+        SeWear.writeTag(result, RESULT_PHONE_TYPE, 0);
+        SeWear.writeVarint(result, 0);
         return withAccount(FUNCTION_BINDING_RESULT, ACCOUNT_BIND_RESULT, result.toByteArray());
     }
 

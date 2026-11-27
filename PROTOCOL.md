@@ -211,7 +211,14 @@ From `ControlBleTools` (`bindDevice`, `requestDeviceBindState`, `sendAppBindResu
 failure state. It is not an enum, unlike the bind result fields.
 
 Exact phone bytes: id 16 `08 10`; id 17 `08 11 1A 04 12 02 08 01`; id 18
-`08 12 1A <len> 1A <len> 12 <len> <user id>`; id 19 `08 13 1A <len> 32 <len> <token>`.
+`08 12 1A <len> 1A <len> 08 00 12 <len> <user id> 18 00`; id 19 `08 13 1A <len> 32 <len> <token>`.
+
+These schemas are **proto2**, not proto3: the generated classes carry `hasBindResultType()` /
+`hasPhoneType()` and an `isInitialized()` check, so a field set to its default value is still
+serialized. The vendor encoder writes `bind_result_type=SUCCESS(0)` and `phone_type=ANDROID(0)`
+explicitly, hence the `08 00` and `18 00` in the id-18 frame. Omitting them (a proto3-default
+assumption) leaves the frame short; the watch still acknowledges it with `error_code=0` but reports
+"pairing failed" on its own screen.
 
 NoiseFit on connect: id 16; if not bound → id 17 with `device_verify:true`; on
 `bind_check_result=SUCCESS` → id 18 with a random token; if already bound → id 19 with the token
@@ -279,12 +286,17 @@ RX 08 11 1A 42 12 40 08 00 18 00 …        bind_check{device_verify:false,
                                              device_name="NoiseFit Crew_550F"}
 ```
 
-Because `bind_check_result` is SUCCESS, the phone has to send id 18
-(`08 12 1A <len> 1A <len> 12 <len> <token>`) to finish the bind. An earlier OpenFit build treated
-the clear `device_verify` flag as a refusal, aborted, fell through to Berry (silent) and reported
-"no reply to the account commands". That gate is removed; `SePairing.allowsBindResult` encodes the
-vendor rule instead. The id-18 write path is implemented and unit-tested, with the on-device
-confirmation still pending.
+Because `bind_check_result` is SUCCESS, the phone has to send id 18 to finish the bind. An earlier
+OpenFit build treated the clear `device_verify` flag as a refusal, aborted, fell through to Berry
+(silent) and reported "no reply to the account commands". That gate is removed;
+`SePairing.allowsBindResult` encodes the vendor rule instead.
+
+The id-18 frame must include the two zero-valued proto2 fields:
+`08 12 1A <len> 1A <len> 08 00 12 <len> <token> 18 00`. The watch ACKs the shorter frame (without
+`08 00`/`18 00`) with `08 12 A0 06 00` (`error_code=0`), so the phone believed the bind succeeded,
+but the watch's own pairing screen reported "pairing failed" and a reconnect still said
+`Watch bound state · no`. Matching the vendor encoder byte-for-byte is the current fix; on-device
+confirmation is pending.
 
 **On-device status.** The transport has been confirmed repeatedly on the ColorFit Ultra Buzz
 (announce → `01 01` ready, chunks → `01 00` received, inbound announce → chunk → `0100` ack).
