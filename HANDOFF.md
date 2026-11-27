@@ -1,10 +1,39 @@
 # OpenFit handoff — Noise/ColorFit protocol reverse engineering
 
-Last updated: 2026-11-18
+Last updated: 2026-11-27
 Branch: `feature/ble-connection-handling`
-Latest code commit at time of writing: this commit (ZhBracelet/NavPlus bind on `00000002`,
-Berry-over-BLE fallback on `aa01`, corrected Berry frame magics, inbound acks, link-capability
-diagnostics, classic SPP removed, unit tests).
+
+## 2026-11-27 — navigation restructure, onboarding, launch reconnect, HR graph
+
+The bottom navigation bar is gone. `MainActivity` now keeps a tiny screen stack rooted at Home:
+Home → heart-rate page / Sleep / watch screen, with Settings reached from the icon in the
+top-left of the fixed top bar. The same slot becomes a back arrow on every sub-screen, and the
+system back gesture returns to Home. Screen changes use a short fade/slide; the Home brand row
+was removed so the top bar owns the wordmark.
+
+The old Devices tab is now an onboarding flow. When no watch is saved, the app opens a welcome
+screen with three steps and the pairing card; the watch card stays hidden until a binding exists.
+A successful `reportPairing(true)` flips `onboardingMode` off and shows Home. The watch screen is
+still reachable from the Home watch card for reconnect/forget/pairing management, so it is never
+a dead tab after connection.
+
+`onCreate()` now schedules a silent reconnect to the saved watch after the first frame, but only
+when Bluetooth is on and the required permissions are already granted; launching never opens a
+permission or Bluetooth prompt. The top-bar link dot and both Compose screens refresh through the
+existing `updateHomeWatch()` path.
+
+`HealthScreen` is now the heart-rate monitor page: DAY/WEEK/MONTH/YEAR pills, a large dot-matrix
+BPM hero with animated transitions, LOW/AVG/HIGH tiles, and a 24-hour line/area chart. The watch's
+288 five-minute `0x0D` slots are persisted (`heart_rate_slots_csv`) so points keep their clock
+position; the chart buckets every three slots, which is the 15-minute cadence the original
+NoiseFit app uses. Week/month/year show an honest "collecting history" note until enough daily
+summaries exist. Settings now labels key `0x29` as **Auto HR** and shows the 15-minute cadence.
+`writeSetting()` now runs the optimistic revert when the watch is disconnected or the stack
+rejects the frame, so a toggle cannot stay visually on after a failed write.
+
+Local verification: `javac` over `app/src/main/java/com/openfit/app/protocol/*.java` plus the JUnit
+suite in `app/src/test/...` passes (99 tests). CI still builds the APK.
+
 
 The 2026-11-18 09:45 device run answered both SE account probes with `NOT_SUPPORT`
 (`08 10 10 00 A0 06 01` and `08 11 10 00 A0 06 01`), which settles the SE question: the transport,

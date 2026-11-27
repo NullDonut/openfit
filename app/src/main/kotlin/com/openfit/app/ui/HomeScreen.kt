@@ -96,8 +96,6 @@ class HomeScreenController(private val actions: HomeActions) {
 @Composable
 private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
     Column(Modifier.fillMaxWidth()) {
-        BrandRow()
-        Spacer(Modifier.height(20.dp))
         Eyebrow(
             remember {
                 SimpleDateFormat("EEEE d MMMM", Locale.getDefault())
@@ -136,34 +134,6 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
             letterSpacing = 0.6.sp,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun BrandRow() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = "●",
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 15.sp
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = "OPENFIT",
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            fontSize = 17.sp,
-            letterSpacing = 2.sp,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = "/ DASHBOARD",
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 3.dp)
         )
     }
 }

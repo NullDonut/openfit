@@ -696,8 +696,10 @@ public final class ZhBraceletBinding {
         int daySum = 0;
         int dayCount = 0;
         int[] all = new int[288];
+        int[] slots = new int[288];
         for (int i = 0; i < 288; i++) {
             int bpm = frame[17 + i] & 0xFF;
+            slots[i] = bpm;
             if (bpm == 0) continue;
             if (bpm < 45) return null; // the vendor treats this as a corrupt array
             recent = bpm;
@@ -709,7 +711,7 @@ public final class ZhBraceletBinding {
         String date = String.format(java.util.Locale.US, "20%02d-%02d-%02d", year, month, day);
         return new HeartRateHistory(date, recent, dayMax, dayMin,
                 dayCount == 0 ? 0 : daySum / dayCount, dayCount,
-                java.util.Arrays.copyOf(all, dayCount));
+                java.util.Arrays.copyOf(all, dayCount), slots);
     }
 
     /** One decoded {@link #KEY_HEART_RATE_HISTORY} frame. */
@@ -723,9 +725,16 @@ public final class ZhBraceletBinding {
         public final int sampleCount;
         /** Nonzero readings in slot order, for the Home sparkline. */
         public final int[] samples;
+        /** All 288 five-minute slots (zeros kept) so the graph can place readings in time. */
+        public final int[] slots;
 
         public HeartRateHistory(String date, int recent, int dayMax, int dayMin,
                                 int dayAverage, int sampleCount, int[] samples) {
+            this(date, recent, dayMax, dayMin, dayAverage, sampleCount, samples, null);
+        }
+
+        public HeartRateHistory(String date, int recent, int dayMax, int dayMin,
+                                int dayAverage, int sampleCount, int[] samples, int[] slots) {
             this.date = date;
             this.recent = recent;
             this.dayMax = dayMax;
@@ -733,6 +742,7 @@ public final class ZhBraceletBinding {
             this.dayAverage = dayAverage;
             this.sampleCount = sampleCount;
             this.samples = samples;
+            this.slots = slots;
         }
 
         @Override public String toString() {

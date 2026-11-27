@@ -154,11 +154,40 @@ private fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         Spacer(Modifier.height(8.dp))
         SettingsCard {
             ToggleRow(
-                title = "Continuous heart rate",
-                subtitle = "The watch may accept this setting without streaming on this firmware.",
+                title = "Auto heart rate",
+                subtitle = "Let the watch record your pulse through the day, about every 15 minutes. This firmware may accept the setting without streaming live.",
                 checked = state.continuousHr,
                 onCheckedChange = actions::onToggleContinuousHr
             )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "Reading interval",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "The watch stores one slot every 5 minutes; the graph shows 15.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "15 MIN",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             ToggleRow(
                 title = "Sedentary reminder",

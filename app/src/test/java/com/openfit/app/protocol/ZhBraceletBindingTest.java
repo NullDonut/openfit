@@ -261,6 +261,11 @@ public class ZhBraceletBindingTest {
         assertEquals(88, history.dayAverage);
         assertEquals(2, history.sampleCount);
         assertArrayEquals(new int[] {95, 82}, history.samples);
+        // The graph needs slot positions, not just the nonzero values.
+        assertEquals(288, history.slots.length);
+        assertEquals(95, history.slots[10]);
+        assertEquals(82, history.slots[287]);
+        assertEquals(0, history.slots[0]);
     }
 
     @Test public void parseHeartRateHistoryRejectsBadFrames() {

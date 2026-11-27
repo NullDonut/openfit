@@ -100,6 +100,13 @@ public final class MainActivity extends ComponentActivity {
     private static final int C_RED = Color.rgb(245, 40, 60);
     private static final int C_ACCENT = Color.rgb(255, 255, 255);
     private static final int C_BORDER = Color.rgb(53, 53, 53);
+    // Screens are a tiny stack rooted at Home. There is no bottom bar: Settings opens from the
+    // top-left icon on Home, and every other screen carries a back arrow in the same slot.
+    private static final int SCREEN_HOME = 0;
+    private static final int SCREEN_HEALTH = 1;
+    private static final int SCREEN_SLEEP = 2;
+    private static final int SCREEN_SETTINGS = 3;
+    private static final int SCREEN_WATCH = 4;
     private static final UUID HEART_RATE_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_MEASUREMENT = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
@@ -175,6 +182,12 @@ public final class MainActivity extends ComponentActivity {
     private static final String KEY_HEART_RATE_TIME = "heart_rate_time";
     /** Nonzero heart-rate samples in slot order, comma separated, for the Home sparkline. */
     private static final String KEY_HEART_RATE_SAMPLES = "heart_rate_samples_csv";
+    /**
+     * The full 288 five-minute slots for the day (zeros included), so the heart-rate page can
+     * place each reading on a 24-hour axis. NoiseFit plots a reading every 15 minutes, which is
+     * every third slot here.
+     */
+    private static final String KEY_HEART_RATE_SLOTS = "heart_rate_slots_csv";
     /** Latest read-only sensor values the watch pushed; all prefixed to keep them apart. */
     private static final String KEY_SENSOR_STEPS = "sensor_steps_total";
     private static final String KEY_SENSOR_STEPS_DATE = "sensor_steps_date";
@@ -199,13 +212,22 @@ public final class MainActivity extends ComponentActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
     private LinearLayout page;
+    private ScrollView pageScroll;
+    private LinearLayout topBar;
+    private TextView topBarAction;
+    private TextView topBarTitle;
+    private TextView topBarStatus;
     private LinearLayout homePanel;
     private LinearLayout healthPanel;
     private LinearLayout devicePanel;
     private LinearLayout sleepPanel;
     private LinearLayout settingsPanel;
-    private LinearLayout bottomNavigation;
-    private final List<TextView> tabLabels = new ArrayList<>();
+    private LinearLayout onboardingHero;
+    private LinearLayout watchCard;
+    private TextView watchEyebrow;
+    private TextView watchLiveMark;
+    private int currentScreen = SCREEN_HOME;
+    private boolean onboardingMode;
     private HomeScreenController homeScreen;
     private TextView connectionStatus;
     private TextView deviceStatus;
@@ -240,7 +262,6 @@ public final class MainActivity extends ComponentActivity {
     private BluetoothGatt gatt;
     private ScanCallback scanCallback;
     private boolean scanning;
-    private int selectedTab;
     private Runnable scanTimeout;
     private Runnable connectionTimeout;
     private Runnable pairingTimeout;
@@ -360,6 +381,40 @@ public final class MainActivity extends ComponentActivity {
         registerBondReceiver();
         render();
         refreshConnectionState();
+        // Reloading the app should pick the saved watch back up on its own. The reconnect is
+        // silent: permissions and Bluetooth must already be granted, so launching never opens a
+        // permission dialog or a system Bluetooth prompt.
+        scheduleLaunchReconnect();
+    }
+
+    /** Reconnects to the saved watch shortly after the first frame, without prompting. */
+    private void scheduleLaunchReconnect() {
+        if (bluetoothAdapter == null) return;
+        String address = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(KEY_DEVICE_ADDRESS, null);
+        if (address == null) return;
+        if (!hasRequiredPermissions()) return;
+        if (!bluetoothAdapter.isEnabled()) return;
+        handler.postDelayed(() -> {
+            if (gatt == null && !connectionSetup && !connectionReady) reconnectSavedDevice();
+        }, 350L);
+    }
+
+    private boolean hasRequiredPermissions() {
+        for (String permission : requiredPermissions()) {
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) return false;
+        }
+        return true;
+    }
+
+    @Override public void onBackPressed() {
+        // The top-left arrow and the system back gesture do the same thing: return to Home.
+        // Onboarding is the root until a watch is saved, so back leaves the app from there.
+        if (currentScreen != SCREEN_HOME && !(onboardingMode && currentScreen == SCREEN_WATCH)) {
+            showScreen(SCREEN_HOME);
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -418,66 +473,38 @@ public final class MainActivity extends ComponentActivity {
         LinearLayout shell = new LinearLayout(this);
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setBackgroundColor(C_BG);
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setClipToPadding(false);
+
+        buildTopBar(shell);
+
+        pageScroll = new ScrollView(this);
+        pageScroll.setFillViewport(true);
+        pageScroll.setClipToPadding(false);
         page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(22), dp(24), dp(22), dp(20));
+        page.setPadding(dp(22), dp(10), dp(22), dp(28));
         page.setBackgroundColor(C_BG);
-        scroll.addView(page);
-        shell.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        pageScroll.addView(page);
+        shell.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(shell);
 
         homePanel = panel();
         page.addView(homePanel);
         homeScreen = new HomeScreenController(new HomeActions() {
-            @Override public void onManageWatch() { selectTab(2); }
-            @Override public void onViewHealth() { selectTab(1); }
-            @Override public void onViewSleep() { selectTab(3); }
+            @Override public void onManageWatch() { showScreen(SCREEN_WATCH); }
+            @Override public void onViewHealth() { showScreen(SCREEN_HEALTH); }
+            @Override public void onViewSleep() { showScreen(SCREEN_SLEEP); }
         });
         homePanel.addView(homeScreen.createView(this), lp(-1, -2));
 
         devicePanel = panel();
         page.addView(devicePanel);
-        addPanelHeading(devicePanel, "DEVICES", "Pair and manage your watch");
-        LinearLayout deviceCard = card();
-        devicePanel.addView(deviceCard, lp(-1, -2, 0, 0, 0, 13));
-        LinearLayout deviceHeading = new LinearLayout(this);
-        deviceHeading.setGravity(Gravity.CENTER_VERTICAL);
-        deviceCard.addView(deviceHeading, lp(-1, -2));
-        TextView eyebrow = text("MY WATCH", 11, C_MUTED, true);
-        eyebrow.setLetterSpacing(.13f);
-        deviceHeading.addView(eyebrow, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView liveMark = text("●  ON DEVICE", 9, C_RED, true);
-        liveMark.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        liveMark.setLetterSpacing(.04f);
-        deviceHeading.addView(liveMark, lp(-2, -2));
-        deviceStatus = text("No watch connected", 21, C_TEXT, true);
-        deviceCard.addView(deviceStatus, lp(-1, -2, 0, 18, 0, 0));
-        connectionStatus = text("Bring your ColorFit close to get started.", 13, C_MUTED, false);
-        deviceCard.addView(connectionStatus, lp(-1, -2, 0, 6, 0, 0));
-        scanStatus = text("●  READY / NEARBY DEVICE", 10, C_RED, true);
-        scanStatus.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        scanStatus.setLetterSpacing(.02f);
-        scanStatus.setOnClickListener(v -> showGattDiagnostics());
-        deviceCard.addView(scanStatus, lp(-1, -2, 0, 16, 0, 0));
-        Button pair = button("Add a device   +");
-        pair.setOnClickListener(v -> showPairingOptions());
-        deviceCard.addView(pair, lp(-1, dp(52), 0, 16, 0, 0));
-        reconnectButton = secondaryButton("Reconnect saved watch");
-        reconnectButton.setVisibility(View.GONE);
-        reconnectButton.setOnClickListener(v -> reconnectSavedDevice());
-        deviceCard.addView(reconnectButton, lp(-1, dp(48), 0, 8, 0, 0));
-        deviceResults = new LinearLayout(this);
-        deviceResults.setOrientation(LinearLayout.VERTICAL);
-        deviceCard.addView(deviceResults, lp(-1, -2, 0, 12, 0, 0));
+        buildWatchPanel(devicePanel);
 
         healthPanel = panel();
         page.addView(healthPanel);
 
-        // The Health tab is fully Compose (heading, heart card, stat tiles, data note). The other
-        // tabs keep their Views layout so the BLE screens are untouched.
+        // Every screen below Home is fully Compose. The watch/onboarding screen stays Views
+        // because it hosts the interactive BLE device list.
         healthScreen = new HealthScreenController();
         healthPanel.addView(healthScreen.createView(this), lp(-1, -2));
 
@@ -496,7 +523,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean previous = continuousHrEnabled;
                 continuousHrEnabled = on;
                 refreshSettings();
-                writeSetting("continuous HR", ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
+                writeSetting("auto HR", ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
                         ZhBraceletBinding.continuousHeartRateFrame(on),
                         () -> { continuousHrEnabled = previous; refreshSettings(); });
             }
@@ -519,31 +546,140 @@ public final class MainActivity extends ComponentActivity {
         settingsPanel.addView(settingsScreen.createView(this), lp(-1, -2));
         refreshSettings();
 
-        buildBottomNavigation(shell);
-        applySystemBarInsets(shell, scroll);
-        selectTab(0);
+        applySystemBarInsets(shell, pageScroll);
+
+        onboardingMode = !hasSavedWatch();
+        updateWatchPanel();
+        showScreen(onboardingMode ? SCREEN_WATCH : SCREEN_HOME, false);
+    }
+
+    /** Fixed top bar: Settings from Home, back everywhere else, with a quiet link indicator. */
+    private void buildTopBar(LinearLayout shell) {
+        topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setPadding(dp(14), dp(8), dp(16), dp(8));
+        topBar.setBackgroundColor(C_BG);
+
+        topBarAction = text("⚙", 19, C_TEXT, false);
+        topBarAction.setGravity(Gravity.CENTER);
+        GradientDrawable actionShape = new GradientDrawable();
+        actionShape.setShape(GradientDrawable.OVAL);
+        actionShape.setColor(C_CARD);
+        actionShape.setStroke(dp(1), C_BORDER);
+        topBarAction.setBackground(actionShape);
+        topBarAction.setContentDescription("Settings");
+        topBarAction.setOnClickListener(v -> onTopBarAction());
+        topBar.addView(topBarAction, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        topBarTitle = text("OPENFIT", 12, C_TEXT, true);
+        topBarTitle.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        topBarTitle.setLetterSpacing(.24f);
+        topBarTitle.setGravity(Gravity.CENTER);
+        topBar.addView(topBarTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        topBarStatus = text("○", 14, C_MUTED, false);
+        topBarStatus.setGravity(Gravity.CENTER);
+        topBar.addView(topBarStatus, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        shell.addView(topBar, lp(-1, dp(56)));
+    }
+
+    private void onTopBarAction() {
+        if (currentScreen == SCREEN_HOME) {
+            showScreen(SCREEN_SETTINGS);
+        } else if (onboardingMode && currentScreen == SCREEN_WATCH) {
+            // Onboarding is the root until a watch is saved; there is nowhere to go back to.
+            toast("Pair your watch to continue.");
+        } else {
+            showScreen(SCREEN_HOME);
+        }
+    }
+
+    private String screenTitle(int screen) {
+        switch (screen) {
+            case SCREEN_HEALTH: return "HEART RATE";
+            case SCREEN_SLEEP: return "SLEEP";
+            case SCREEN_SETTINGS: return "SETTINGS";
+            case SCREEN_WATCH: return "WATCH";
+            default: return "OPENFIT";
+        }
+    }
+
+    private void updateTopBar() {
+        if (topBarAction == null) return;
+        boolean home = currentScreen == SCREEN_HOME;
+        topBarAction.setText(home ? "⚙" : "←");
+        topBarAction.setContentDescription(home ? "Settings" : "Back");
+        topBarAction.setVisibility(onboardingMode && currentScreen == SCREEN_WATCH
+                ? View.INVISIBLE : View.VISIBLE);
+        topBarTitle.setText(home ? "OPENFIT" : screenTitle(currentScreen));
+        topBarStatus.setText(connectionReady ? "●" : "○");
+        topBarStatus.setTextColor(connectionReady ? C_RED : C_MUTED);
+    }
+
+    private void showScreen(int screen) {
+        showScreen(screen, true);
     }
 
     /**
-     * targetSdk 35 enforces edge-to-edge, so the window no longer reserves space for the status
-     * and navigation bars. Without this the tab eyebrow is drawn under the status-bar clock.
-     * Pad the scroll area by the top inset and grow the bottom bar by the bottom inset, instead
-     * of relying on the platform theme.
+     * Shows one screen and hides the rest. The incoming screen fades up a few dp so navigation
+     * feels continuous without the cost of a full fragment transition.
+     */
+    private void showScreen(int screen, boolean animate) {
+        View next = panelFor(screen);
+        if (next == null) return;
+        boolean changed = screen != currentScreen;
+        currentScreen = screen;
+        for (View candidate : new View[] {homePanel, healthPanel, sleepPanel, settingsPanel, devicePanel}) {
+            if (candidate != null && candidate != next) candidate.setVisibility(View.GONE);
+        }
+        next.setVisibility(View.VISIBLE);
+        if (animate && changed) {
+            next.setAlpha(0f);
+            next.setTranslationY(dp(14));
+            next.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(220L)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .start();
+        } else {
+            next.setAlpha(1f);
+            next.setTranslationY(0f);
+        }
+        updateTopBar();
+        if (pageScroll != null) pageScroll.scrollTo(0, 0);
+    }
+
+    private View panelFor(int screen) {
+        switch (screen) {
+            case SCREEN_HEALTH: return healthPanel;
+            case SCREEN_SLEEP: return sleepPanel;
+            case SCREEN_SETTINGS: return settingsPanel;
+            case SCREEN_WATCH: return devicePanel;
+            default: return homePanel;
+        }
+    }
+
+    /**
+     * targetSdk 35 enforces edge-to-edge. Reserve the status-bar height inside the top bar and
+     * the navigation-bar height below the scroll area, instead of relying on the platform theme.
      */
     private void applySystemBarInsets(LinearLayout shell, ScrollView scroll) {
         ViewCompat.setOnApplyWindowInsetsListener(shell, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
-            scroll.setPadding(0, bars.top, 0, 0);
-            if (bottomNavigation != null) {
-                bottomNavigation.setPadding(dp(8), dp(8), dp(8), dp(8) + bars.bottom);
-                ViewGroup.LayoutParams params = bottomNavigation.getLayoutParams();
-                int height = dp(66) + bars.bottom;
+            if (topBar != null) {
+                topBar.setPadding(dp(14), dp(8) + bars.top, dp(16), dp(8));
+                ViewGroup.LayoutParams params = topBar.getLayoutParams();
+                int height = dp(56) + bars.top;
                 if (params.height != height) {
                     params.height = height;
-                    bottomNavigation.setLayoutParams(params);
+                    topBar.setLayoutParams(params);
                 }
             }
+            scroll.setPadding(0, 0, 0, bars.bottom);
             return windowInsets;
         });
         ViewCompat.requestApplyInsets(shell);
@@ -556,48 +692,133 @@ public final class MainActivity extends ComponentActivity {
         return result;
     }
 
-    private void addPanelHeading(LinearLayout target, String eyebrow, String title) {
-        TextView label = text(eyebrow, 10, C_RED, true);
-        label.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        label.setLetterSpacing(.12f);
-        target.addView(label, lp(-1, -2, 0, 0, 0, 8));
-        TextView heading = text(title, 27, C_TEXT, true);
-        target.addView(heading, lp(-1, -2, 0, 0, 0, 22));
+    private void buildWatchPanel(LinearLayout target) {
+        onboardingHero = new LinearLayout(this);
+        onboardingHero.setOrientation(LinearLayout.VERTICAL);
+        target.addView(onboardingHero, lp(-1, -2));
+
+        TextView kicker = text("GET STARTED", 10, C_RED, true);
+        kicker.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        kicker.setLetterSpacing(.14f);
+        onboardingHero.addView(kicker, lp(-1, -2, 0, 2, 0, 10));
+
+        TextView heroTitle = text("Your watch, without the noise.", 32, C_TEXT, false);
+        Typeface serif = androidx.core.content.res.ResourcesCompat.getFont(
+                this, R.font.dm_serif_display);
+        if (serif != null) heroTitle.setTypeface(serif);
+        heroTitle.setLineSpacing(dp(2), 1f);
+        onboardingHero.addView(heroTitle, lp(-1, -2, 0, 0, 0, 10));
+
+        TextView heroBody = text(
+                "OpenFit reads the watch you already wear. Pair it once here, then it "
+                        + "reconnects by itself every time you open the app.",
+                13, C_MUTED, false);
+        heroBody.setLineSpacing(dp(3), 1f);
+        onboardingHero.addView(heroBody, lp(-1, -2, 0, 0, 0, 20));
+
+        addOnboardingStep(onboardingHero, "01", "Keep it close",
+                "Wake the watch and leave it near this phone.");
+        addOnboardingStep(onboardingHero, "02", "Pair once",
+                "The binding stays on this phone, even after updates.");
+        addOnboardingStep(onboardingHero, "03", "Just open the app",
+                "OpenFit reconnects and refreshes your dashboard.");
+
+        watchCard = card();
+        target.addView(watchCard, lp(-1, -2, 0, 8, 0, 0));
+        LinearLayout deviceHeading = new LinearLayout(this);
+        deviceHeading.setGravity(Gravity.CENTER_VERTICAL);
+        watchCard.addView(deviceHeading, lp(-1, -2));
+        watchEyebrow = text("MY WATCH", 11, C_MUTED, true);
+        watchEyebrow.setLetterSpacing(.13f);
+        deviceHeading.addView(watchEyebrow, new LinearLayout.LayoutParams(0, -2, 1f));
+        watchLiveMark = text("●  ON DEVICE", 9, C_RED, true);
+        watchLiveMark.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        watchLiveMark.setLetterSpacing(.04f);
+        deviceHeading.addView(watchLiveMark, lp(-2, -2));
+        deviceStatus = text("No watch connected", 21, C_TEXT, true);
+        watchCard.addView(deviceStatus, lp(-1, -2, 0, 18, 0, 0));
+        connectionStatus = text("Bring your ColorFit close to get started.", 13, C_MUTED, false);
+        connectionStatus.setLineSpacing(dp(2), 1f);
+        watchCard.addView(connectionStatus, lp(-1, -2, 0, 6, 0, 0));
+
+        LinearLayout pairCard = card();
+        target.addView(pairCard, lp(-1, -2, 0, 14, 0, 0));
+        TextView pairEyebrow = text("PAIRING", 10, C_RED, true);
+        pairEyebrow.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        pairEyebrow.setLetterSpacing(.13f);
+        pairCard.addView(pairEyebrow, lp(-1, -2, 0, 0, 0, 10));
+        scanStatus = text("●  READY / NEARBY DEVICE", 10, C_RED, true);
+        scanStatus.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        scanStatus.setLetterSpacing(.02f);
+        scanStatus.setOnClickListener(v -> showGattDiagnostics());
+        pairCard.addView(scanStatus, lp(-1, -2, 0, 0, 0, 14));
+        Button pair = button("Find my watch   +");
+        pair.setOnClickListener(v -> beginPermissionFlow());
+        pairCard.addView(pair, lp(-1, dp(52)));
+        TextView qrLink = text("SCAN A PAIRING QR CODE", 10, C_MUTED, true);
+        qrLink.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        qrLink.setLetterSpacing(.08f);
+        qrLink.setGravity(Gravity.CENTER);
+        qrLink.setPadding(0, dp(12), 0, dp(2));
+        qrLink.setOnClickListener(v -> startQrScan());
+        pairCard.addView(qrLink, lp(-1, -2));
+        reconnectButton = secondaryButton("Reconnect saved watch");
+        reconnectButton.setVisibility(View.GONE);
+        reconnectButton.setOnClickListener(v -> reconnectSavedDevice());
+        pairCard.addView(reconnectButton, lp(-1, dp(48), 0, 8, 0, 0));
+        deviceResults = new LinearLayout(this);
+        deviceResults.setOrientation(LinearLayout.VERTICAL);
+        pairCard.addView(deviceResults, lp(-1, -2, 0, 12, 0, 0));
+
+        TextView foot = text(
+                "NO ACCOUNT  ·  NO CLOUD  ·  YOUR DATA STAYS ON THIS PHONE",
+                9, C_MUTED, false);
+        foot.setTypeface(Typeface.MONOSPACE);
+        foot.setLetterSpacing(.06f);
+        foot.setGravity(Gravity.CENTER);
+        target.addView(foot, lp(-1, -2, 0, 20, 0, 0));
     }
 
-    private void buildBottomNavigation(LinearLayout shell) {
-        bottomNavigation = new LinearLayout(this);
-        bottomNavigation.setOrientation(LinearLayout.HORIZONTAL);
-        bottomNavigation.setGravity(Gravity.CENTER);
-        bottomNavigation.setPadding(dp(8), dp(8), dp(8), dp(8));
-        bottomNavigation.setBackgroundColor(C_CARD);
-        String[] labels = {"⌂\nHome", "♥\nHealth", "◉\nDevices", "◌\nSleep", "⚙\nSettings"};
-        for (int i = 0; i < labels.length; i++) {
-            final int index = i;
-            TextView item = text(labels[i], 11, C_MUTED, true);
-            item.setGravity(Gravity.CENTER);
-            item.setLineSpacing(dp(2), 1f);
-            item.setPadding(dp(4), dp(5), dp(4), dp(5));
-            item.setOnClickListener(v -> selectTab(index));
-            bottomNavigation.addView(item, new LinearLayout.LayoutParams(0, dp(50), 1f));
-            tabLabels.add(item);
-        }
-        shell.addView(bottomNavigation, lp(-1, dp(66)));
+    private void addOnboardingStep(LinearLayout parent, String index, String title, String detail) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.TOP);
+        TextView number = text(index, 11, C_RED, true);
+        number.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        row.addView(number, lp(dp(32), -2));
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.addView(text(title, 14, C_TEXT, true), lp(-1, -2));
+        TextView body = text(detail, 12, C_MUTED, false);
+        body.setLineSpacing(dp(2), 1f);
+        copy.addView(body, lp(-1, -2, 0, 3, 0, 0));
+        row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1f));
+        parent.addView(row, lp(-1, -2, 0, 0, 0, 14));
     }
 
-    private void selectTab(int tab) {
-        selectedTab = Math.max(0, Math.min(tab, 4));
-        if (homePanel == null) return;
-        homePanel.setVisibility(selectedTab == 0 ? View.VISIBLE : View.GONE);
-        healthPanel.setVisibility(selectedTab == 1 ? View.VISIBLE : View.GONE);
-        devicePanel.setVisibility(selectedTab == 2 ? View.VISIBLE : View.GONE);
-        sleepPanel.setVisibility(selectedTab == 3 ? View.VISIBLE : View.GONE);
-        settingsPanel.setVisibility(selectedTab == 4 ? View.VISIBLE : View.GONE);
-        for (int i = 0; i < tabLabels.size(); i++) {
-            tabLabels.get(i).setTextColor(i == selectedTab ? C_TEXT : C_MUTED);
-            tabLabels.get(i).setBackgroundColor(i == selectedTab ? C_CARD_ALT : Color.TRANSPARENT);
+    private boolean hasSavedWatch() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_DEVICE_ADDRESS, null) != null;
+    }
+
+    private void updateWatchPanel() {
+        if (onboardingHero != null) {
+            onboardingHero.setVisibility(onboardingMode ? View.VISIBLE : View.GONE);
         }
-        if (page != null) page.scrollTo(0, 0);
+        if (watchCard != null) {
+            // Onboarding stays focused on pairing; the watch card appears once a binding exists.
+            watchCard.setVisibility(onboardingMode ? View.GONE : View.VISIBLE);
+        }
+        if (watchEyebrow != null) {
+            watchEyebrow.setText(onboardingMode ? "YOUR WATCH" : "MY WATCH");
+        }
+        if (watchLiveMark != null) {
+            watchLiveMark.setText(connectionReady ? "●  ON DEVICE" : "○  NOT CONNECTED");
+            watchLiveMark.setTextColor(connectionReady ? C_RED : C_MUTED);
+        }
+        if (reconnectButton != null) {
+            reconnectButton.setVisibility(
+                    lastConnectAddress != null && !connectionReady ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void showGattDiagnostics() {
@@ -687,17 +908,6 @@ public final class MainActivity extends ComponentActivity {
         } catch (SecurityException | IllegalArgumentException e) {
             return "unknown";
         }
-    }
-
-    private void showPairingOptions() {
-        new AlertDialog.Builder(this)
-                .setTitle("Add your watch")
-                .setItems(new String[] {"Search for my ColorFit", "Scan a pairing QR code"}, (dialog, which) -> {
-                    if (which == 0) beginPermissionFlow();
-                    else startQrScan();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
     }
 
     private void startQrScan() {
@@ -1837,6 +2047,15 @@ public final class MainActivity extends ComponentActivity {
                 // to be stubbed out end to end. A probe here would compete with the Zh post-bind
                 // frames for the same GATT link, which is what stalled the 2026-11-19 run.
                 logPairing("SE probe skipped · the saved ZhBracelet channel is the data path");
+            }
+            // The onboarding flow ends the moment the watch is paired. Existing users who opened
+            // the watch screen from Home simply stay there.
+            if (onboardingMode) {
+                runOnUiThread(() -> {
+                    onboardingMode = false;
+                    updateWatchPanel();
+                    showScreen(SCREEN_HOME);
+                });
             }
         } else {
             connectionStatus.setText("Connected · pairing failed · " + detail);
@@ -3148,10 +3367,15 @@ public final class MainActivity extends ComponentActivity {
         long minute = now / 60_000L;
         String today = java.time.LocalDate.now().toString();
         boolean newDay = !today.equals(prefs.getString("heart_rate_day", ""));
+        int[] slots = newDay ? new int[288] : readHeartSlots(prefs);
+        Calendar clock = Calendar.getInstance();
+        int slot = (clock.get(Calendar.HOUR_OF_DAY) * 60 + clock.get(Calendar.MINUTE)) / 5;
+        if (slot >= 0 && slot < slots.length) slots[slot] = bpm;
         android.content.SharedPreferences.Editor editor = prefs.edit()
                 .putInt(KEY_HEART_RATE, bpm)
                 .putLong(KEY_HEART_RATE_TIME, now)
                 .putString("heart_rate_source", "Live reading")
+                .putString(KEY_HEART_RATE_SLOTS, joinInts(slots))
                 .putString(KEY_HEART_RATE_SAMPLES,
                         appendSample(newDay ? "" : prefs.getString(KEY_HEART_RATE_SAMPLES, ""), bpm));
         if (newDay) {
@@ -3175,7 +3399,7 @@ public final class MainActivity extends ComponentActivity {
     private void recordHeartRateHistory(ZhBraceletBinding.HeartRateHistory history) {
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         long now = System.currentTimeMillis();
-        prefs.edit()
+        android.content.SharedPreferences.Editor editor = prefs.edit()
                 .putInt(KEY_HEART_RATE, history.recent)
                 .putLong(KEY_HEART_RATE_TIME, now)
                 .putString("heart_rate_source", "Watch history")
@@ -3184,8 +3408,11 @@ public final class MainActivity extends ComponentActivity {
                 .putInt("heart_rate_max", history.dayMax)
                 .putInt("heart_rate_samples", history.sampleCount)
                 .putLong("heart_rate_sample_minute", now / 60_000L)
-                .putString(KEY_HEART_RATE_SAMPLES, joinInts(history.samples))
-                .apply();
+                .putString(KEY_HEART_RATE_SAMPLES, joinInts(history.samples));
+        if (history.slots != null) {
+            editor.putString(KEY_HEART_RATE_SLOTS, joinInts(history.slots));
+        }
+        editor.apply();
     }
 
     private void refreshHeartSummary() {
@@ -3194,10 +3421,26 @@ public final class MainActivity extends ComponentActivity {
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         List<SensorCard> sensors = buildSensorCards();
         int bpm = prefs.getInt(KEY_HEART_RATE, -1);
+        List<Integer> slots = slotList(prefs);
+        int sum = 0;
+        int count = 0;
+        int low = 0;
+        int high = 0;
+        for (int value : slots) {
+            if (value <= 0) continue;
+            sum += value;
+            count++;
+            if (low == 0 || value < low) low = value;
+            if (value > high) high = value;
+        }
+        int average = count == 0 ? 0 : sum / count;
         if (bpm < 0) {
-            healthScreen.update(new HealthUiState(-1, "", "", "", 0, 0, 0, sensors));
+            healthScreen.update(new HealthUiState(-1, "", "", "", 0, 0, 0, 0, slots, sensors));
             return;
         }
+        if (low == 0) low = prefs.getInt("heart_rate_min", bpm);
+        if (high == 0) high = prefs.getInt("heart_rate_max", bpm);
+        if (average == 0) average = bpm;
         String source = prefs.getString("heart_rate_source", "Saved reading");
         String day = prefs.getString("heart_rate_day", "");
         boolean today = java.time.LocalDate.now().toString().equals(day);
@@ -3210,9 +3453,11 @@ public final class MainActivity extends ComponentActivity {
                 source,
                 latest,
                 dayLabel,
-                prefs.getInt("heart_rate_min", bpm),
-                prefs.getInt("heart_rate_max", bpm),
-                prefs.getInt("heart_rate_samples", 1),
+                low,
+                high,
+                average,
+                prefs.getInt("heart_rate_samples", count),
+                slots,
                 sensors));
     }
 
@@ -3449,6 +3694,10 @@ public final class MainActivity extends ComponentActivity {
     private void updateHomeWatch(String ignoredName) {
         refreshHome();
         refreshSettings();
+        runOnUiThread(() -> {
+            updateTopBar();
+            updateWatchPanel();
+        });
     }
 
     /**
@@ -3504,6 +3753,27 @@ public final class MainActivity extends ComponentActivity {
             } catch (NumberFormatException ignored) { }
         }
         return samples;
+    }
+
+    /** Reads the 288-slot heart-rate array, padding with zeros when nothing is stored yet. */
+    private static int[] readHeartSlots(android.content.SharedPreferences p) {
+        int[] slots = new int[288];
+        String csv = p.getString(KEY_HEART_RATE_SLOTS, "");
+        if (csv == null || csv.isEmpty()) return slots;
+        String[] parts = csv.split(",");
+        int count = Math.min(slots.length, parts.length);
+        for (int i = 0; i < count; i++) {
+            try {
+                slots[i] = Integer.parseInt(parts[i].trim());
+            } catch (NumberFormatException ignored) { }
+        }
+        return slots;
+    }
+
+    private static List<Integer> slotList(android.content.SharedPreferences p) {
+        List<Integer> slots = new ArrayList<>(288);
+        for (int value : readHeartSlots(p)) slots.add(value);
+        return slots;
     }
 
     private static String joinInts(int[] values) {
@@ -3608,6 +3878,7 @@ public final class MainActivity extends ComponentActivity {
     private void writeSetting(String label, int ackKey, int privateSubKey,
                               byte[] frame, Runnable onRefused) {
         if (!zhFinished || !connectionReady || zhWriteChar == null) {
+            if (onRefused != null) onRefused.run();
             setSettingsStatus("Connect the watch before changing " + label + ".", true);
             return;
         }
@@ -3620,6 +3891,7 @@ public final class MainActivity extends ComponentActivity {
         logPairing("TX zh-" + label + " · " + hex(frame));
         if (!writeZh(frame)) {
             clearPendingSetting();
+            if (onRefused != null) onRefused.run();
             setSettingsStatus("The Bluetooth stack rejected " + label + ".", true);
             return;
         }
@@ -3786,7 +4058,9 @@ public final class MainActivity extends ComponentActivity {
         scanStatus.setText("●  READY / SCAN");
         updateHomeWatch("No watch connected");
         refreshSettings();
-        selectTab(2);
+        onboardingMode = true;
+        updateWatchPanel();
+        showScreen(SCREEN_WATCH);
         toast("Watch forgotten on this phone.");
     }
 
@@ -3881,16 +4155,23 @@ public final class MainActivity extends ComponentActivity {
         refreshSleepSummary();
         refreshHeartSummary();
         String address = prefs.getString(KEY_DEVICE_ADDRESS, null);
+        onboardingMode = address == null;
         if (address != null) {
             lastConnectAddress = address;
             String name = prefs.getString(KEY_DEVICE_NAME, "saved watch");
             connectedDeviceName = name;
             deviceStatus.setText(name);
             updateHomeWatch(name);
-            connectionStatus.setText("Saved watch · reconnect when nearby");
+            connectionStatus.setText("Saved watch · reconnecting…");
             reconnectButton.setText("Reconnect to " + name);
             reconnectButton.setVisibility(View.VISIBLE);
+        } else {
+            updateHomeWatch("No watch connected");
+            deviceStatus.setText("No watch connected");
+            connectionStatus.setText("Bring your ColorFit close to get started.");
         }
+        updateWatchPanel();
+        updateTopBar();
     }
 
     @SuppressWarnings("MissingPermission")
