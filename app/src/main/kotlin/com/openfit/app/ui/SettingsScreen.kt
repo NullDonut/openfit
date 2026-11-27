@@ -155,7 +155,7 @@ private fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         SettingsCard {
             ToggleRow(
                 title = "Auto heart rate",
-                subtitle = "Let the watch record your pulse through the day, about every 15 minutes. This firmware may accept the setting without streaming live.",
+                subtitle = "Let the watch record your pulse through the day, about every 15 minutes. OpenFit re-applies this setting after every reconnect.",
                 checked = state.continuousHr,
                 onCheckedChange = actions::onToggleContinuousHr
             )

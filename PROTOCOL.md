@@ -707,6 +707,30 @@ whichever heart-rate mode is open. If no reply arrives within 25 s (measurement)
 (continuous) it logs `No heart-rate reply from the watch · stopping …` and sends the stop anyway, so
 the watch's optical sensor is never left running.
 
+### Auto HR is a user setting, not a probe (2026-11-27)
+
+The one-shot `0x19` path above is only a diagnostic. The user-visible **Auto HR** switch must
+follow the vendor exactly, and the vendor's `NavPlusUpdateDeviceUnitsHandler.D0(HeartRateInterval)`
+calls only `ZhBraceletService.setContinuousHr(status)` → `service.h.setContinuousHr` →
+`service.c.g(boolean)` → `service.a.j(boolean)`, i.e. key `0x29` with one payload byte. The second
+internal call, `service.b.g(boolean)`, only writes the local pref `woint_measurement_heart`; it
+sends no frame. `D0` ignores the interval field, so no frequency command exists for Auto HR.
+
+OpenFit previously treated `0x29` as a short probe: it enabled it after a refused measurement,
+waited 45 s and then sent `0x29 = 00`. That meant a user-enabled Auto HR was silently switched
+back off about 45 s after every connect, and the choice was not persisted. The fix is:
+
+* `KEY_AUTO_HR` (`auto_hr_enabled`) stores the user's choice; `onCreate()` restores it.
+* With Auto HR on, the post-bind step skips `0x19` and re-asserts `0x29 = 01` (vendor behaviour).
+* `stopZhHeartRate()` never sends `0x29 = 00` while the setting is on, whether the stop came from
+  a live `0x0B` reading or the probe watchdog.
+* Turning the switch off writes `0x29 = 00` and persists the choice.
+
+The enable frame is byte-identical to the vendor SDK's
+`AB 00 00 06 00 00 00 00 01 00 29 00 01 01`, so the remaining evidence is whether the watch
+actually starts recording; the pairing log now records `Auto HR on · re-asserting after connect`
+and `Auto HR kept on · ...` to make that visible.
+
 ### Daily heart-rate history, key `0x0D` (recovered 2026-11-19)
 
 The 292-byte `0x0D` frame the watch pushes after every bind (and which arrives split across ~20

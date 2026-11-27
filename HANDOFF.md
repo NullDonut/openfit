@@ -3,6 +3,22 @@
 Last updated: 2026-11-27
 Branch: `feature/ble-connection-handling`
 
+## 2026-11-27 — Auto HR: persist the choice and stop switching it off
+
+The user reported that Auto HR turned on in Settings but the watch never recorded automatic
+readings. Cross-checking the NoiseFit APK again showed the vendor's Auto HR entry point
+(`NavPlusUpdateDeviceUnitsHandler.D0`) calls only `ZhBraceletService.setContinuousHr(status)`, and
+the SDK builds key `0x29` (one payload byte) — byte-for-byte the frame OpenFit already sent. The
+bug was on our side: `0x29` was used as a 45 s diagnostic probe and then switched off, and the
+choice was never stored.
+
+`MainActivity` now stores `KEY_AUTO_HR`, restores it in `onCreate()`, and re-asserts `0x29 = 01`
+after every connect when it is on. `sendZhHeartRateStart()` skips the `0x19` probe in that case,
+and `stopZhHeartRate()` refuses to send `0x29 = 00` while the setting is on, so neither a live
+reading nor the watchdog can turn it back off. Turning the switch off still sends `0x29 = 00`.
+The Settings subtitle no longer says the firmware "may accept" the setting; it explains that
+OpenFit re-applies it after reconnects, and the pairing log records re-assert/keep-on events.
+
 ## 2026-11-27 — Sleep detail page: hypnogram and stage breakdown
 
 The Sleep page was the last old-style screen: it showed only a manual "personal log" duration.

@@ -179,6 +179,8 @@ public final class MainActivity extends ComponentActivity {
     private static final String KEY_WATCH_BOUND_PREFIX = "watch_bound_";
     private static final String KEY_SLEEP_MINUTES = "sleep_minutes";
     private static final String KEY_SLEEP_DATE = "sleep_date";
+    /** The user's Auto HR choice. Survives relaunches and is re-asserted after every connect. */
+    private static final String KEY_AUTO_HR = "auto_hr_enabled";
     private static final String KEY_HEART_RATE = "heart_rate";
     private static final String KEY_HEART_RATE_TIME = "heart_rate_time";
     /** Nonzero heart-rate samples in slot order, comma separated, for the Home sparkline. */
@@ -384,6 +386,10 @@ public final class MainActivity extends ComponentActivity {
         super.onCreate(state);
         BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
+        // Auto HR is a user setting, not the post-bind diagnostic, so restore it before the UI
+        // is built and before any reconnect runs.
+        continuousHrEnabled = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_AUTO_HR, false);
         registerBondReceiver();
         render();
         refreshConnectionState();
@@ -528,10 +534,20 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onToggleContinuousHr(boolean on) {
                 boolean previous = continuousHrEnabled;
                 continuousHrEnabled = on;
+                // Keep the diagnostic flag in step so the 0x42 ack is read as the result of this
+                // toggle rather than a leftover post-bind probe.
+                zhContinuousActive = on;
+                persistAutoHr(on);
                 refreshSettings();
+                logPairing("Auto HR " + (on ? "enabled" : "disabled") + " by the user");
                 writeSetting("auto HR", ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
                         ZhBraceletBinding.continuousHeartRateFrame(on),
-                        () -> { continuousHrEnabled = previous; refreshSettings(); });
+                        () -> {
+                            continuousHrEnabled = previous;
+                            zhContinuousActive = previous;
+                            persistAutoHr(previous);
+                            refreshSettings();
+                        });
             }
             @Override public void onToggleBatterySaver(boolean on) {
                 boolean previous = batterySaverEnabled;
@@ -2171,10 +2187,18 @@ public final class MainActivity extends ComponentActivity {
      * switches to the continuous-HR setting (key {@code 0x29}), which is the only HR command
      * the vendor's NavPlus module actually calls ({@code setContinuousHr}). Both requests wait
      * {@link #ZH_MEASURE_DELAY_MS} after user info so they do not race the post-bind burst.
+     *
+     * <p>When the user has switched Auto HR on, the diagnostic is skipped: the same {@code 0x29}
+     * frame is re-asserted and left on so the watch keeps recording into its history.
      */
     private void sendZhHeartRateStart() {
         zhPostBindTask = null;
         if (zhWriteChar == null || gatt == null) return;
+        if (continuousHrEnabled) {
+            logPairing("Auto HR on · re-asserting after connect");
+            sendZhContinuousHeartRateStart("auto HR enabled");
+            return;
+        }
         byte[] frame = ZhBraceletBinding.measurementFrame(true);
         zhLastTxKey = ZhBraceletBinding.KEY_MEASUREMENT;
         logPairing("TX zh-measure-start · " + hex(frame));
@@ -2189,10 +2213,10 @@ public final class MainActivity extends ComponentActivity {
     /**
      * Turns on the watch's continuous heart-rate setting (key {@code 0x29}).
      *
-     * <p>Diagnostic probe only. This is the single HR command the vendor's NavPlus module sends,
-     * and the watch stores it as an all-day setting, so the matching stop in
-     * {@link #stopZhHeartRate(String)} restores the default (off) after the wait. Once OpenFit
-     * has a settings screen this should follow the user's choice instead of toggling.
+     * <p>This is the single HR command the vendor's NavPlus module sends, byte for byte. When
+     * the user has enabled Auto HR it is left running; otherwise it is a diagnostic probe whose
+     * matching stop in {@link #stopZhHeartRate(String)} restores the default (off) after the
+     * wait.
      */
     private void sendZhContinuousHeartRateStart(String reason) {
         if (zhWriteChar == null || gatt == null) return;
@@ -2204,6 +2228,10 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         zhContinuousActive = true;
+        if (continuousHrEnabled) {
+            logPairing("Auto HR kept on · the watch records about every 15 minutes");
+            return;
+        }
         scheduleZhHeartRateTimeout(ZH_CONTINUOUS_TIMEOUT_MS, "continuous HR");
     }
 
@@ -2224,11 +2252,17 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         if (continuous) {
-            byte[] frame = ZhBraceletBinding.continuousHeartRateFrame(false);
-            zhLastTxKey = ZhBraceletBinding.KEY_CONTINUOUS_HR;
-            logPairing("TX zh-continuous-hr-off · " + hex(frame) + " · " + reason);
-            if (!writeZh(frame)) {
-                logPairing("zh-continuous-hr write rejected by the Bluetooth stack");
+            if (continuousHrEnabled) {
+                // Auto HR is the user's setting; a live reading or the probe watchdog must not
+                // switch it back off.
+                logPairing("Auto HR kept on · " + reason);
+            } else {
+                byte[] frame = ZhBraceletBinding.continuousHeartRateFrame(false);
+                zhLastTxKey = ZhBraceletBinding.KEY_CONTINUOUS_HR;
+                logPairing("TX zh-continuous-hr-off · " + hex(frame) + " · " + reason);
+                if (!writeZh(frame)) {
+                    logPairing("zh-continuous-hr write rejected by the Bluetooth stack");
+                }
             }
         }
     }
@@ -3856,6 +3890,13 @@ public final class MainActivity extends ComponentActivity {
     // ---------------------------------------------------------------------------------------
     // Settings tab
     // ---------------------------------------------------------------------------------------
+
+    /** Stores the Auto HR choice so it survives a relaunch and is re-asserted after connect. */
+    private void persistAutoHr(boolean on) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_AUTO_HR, on)
+                .apply();
+    }
 
     /** Rebuilds the Settings state from the activity's fields and pushes it to Compose. */
     private void refreshSettings() {
