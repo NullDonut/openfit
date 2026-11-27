@@ -821,6 +821,20 @@ a secret.
     cards stay hidden until the watch has records. Raw temperature values are still needed to pin
     the display scale.
 
+11. **Home dashboard rebuild (2026-11-27, CI-green, hardware test pending).**
+    The first screen now uses the reference visual language: bundled DM Serif Display for the
+    page title, Doto for the dot-matrix hero numbers, charcoal cards, capsule progress rings, a
+    heart-rate sparkline, a sleep-stage bar and a dashed divider. `HeartRateHistory` now carries
+    the nonzero samples and `MainActivity` persists them as CSV, so the sparkline survives a
+    restart. `refreshHome()` rebuilds Home from the same persisted summary as Health, and only
+    shows today's steps/activity/sleep so a stale watch record cannot look like today's. The
+    device card taps through to Devices; the heart/sleep cards tap through to their tabs. Build
+    `89c417c` is green in CI (run 67) and the artifact is `openfit-debug-89c417c…`. On the next
+    hardware run, check: serif title renders, dot numerals are legible at 22–54 sp, the three
+    capsule rings fit inside the activity card, the 3-sample HR sparkline is not stretched, and
+    the sleep placeholder is readable. Health, Sleep and Settings still use the older layout and
+    will adopt the shared components next.
+
 ### Suggested order from here
 
 ```
@@ -836,6 +850,9 @@ pair on the watch (done, build b701e4a)
     -> parse device data on 16186f00 for the remaining health screens
     -> verify the read-only sensor cards from the post-bind burst
        (implemented, hardware test pending)
+    -> check the rebuilt Home dashboard on the watch build
+       (build 89c417c, CI-green, hardware test pending)
+    -> move Health, Sleep and Settings onto the shared serif/dot components
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```
 
