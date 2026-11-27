@@ -110,6 +110,15 @@ firmware does not implement on-demand optical measurement. The next build theref
 by 4 s so it no longer races the post-bind burst; the one-shot value remains the watch's own
 five-minute history (`0x0D`). An earlier read-only Berry probe on `aa02` was dropped — the vendor
 uses Zh after all, and Berry BLE had already stayed silent on this model.
+
+The 2026-11-19 09:07 run (build `0b4c27f`) confirmed the 4 s delay: `user info` and
+`measure-start` both landed in the same second, `0x19` was still `refused`, `0x29` was still
+`ok`, and no `0x0B` followed. That closes the live-HR question for this firmware — the watch's
+five-minute history (`0x0D`) is the only heart-rate source it exposes. The same log exposed a
+reconnect loop: the Reconnect button became visible as soon as GATT connected, and taps during
+notification setup each opened a new GATT client (seven `Connect requested` lines in five
+seconds, each restarting discovery). `connect()` now refuses while a setup is in progress, the
+button stays hidden until the link is ready, and every early exit clears the setup flag.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,
@@ -720,10 +729,10 @@ a secret.
    post-bind burst). A refused `0x19` switches to continuous HR (`0x29`); a `0x0B` reply updates
    the dashboard and is stored. The `0x0D` history frame is decoded into today's latest/min/max/avg
    and shown immediately, so the first connection already has a real heart rate. A 25 s
-   (measurement) or 45 s (continuous) guard sends the stop frame if no reading arrives. Next: confirm
-   whether a live `0x0B` ever follows the 4 s-delayed request; the vendor only ever calls
-   `setContinuousHr`, so the history frame may be the only heart-rate source this firmware offers.
-   Then add overnight step/calorie parsing from the remaining Zh burst frames.
+   (measurement) or 45 s (continuous) guard sends the stop frame if no reading arrives. The
+   2026-11-19 09:07 run confirmed no live `0x0B` follows either request, so the history frame is
+   the heart-rate source for this firmware. Next: add overnight step/calorie parsing from the
+   remaining Zh burst frames (keys `0x37` activity duration, `0x38` stress, `0x08`).
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
@@ -760,10 +769,10 @@ pair on the watch (done, build b701e4a)
     -> send the ZhBracelet time sync (key 1) and user info (key 4) (done)
     -> verify their acks on the watch (done: key 0x42, result=1)
     -> start a one-shot heart-rate measurement (key 0x19) and read key 0x0B
-       (refused by the Buzz, 2026-11-19; now delayed 4 s past the post-bind burst)
-    -> fall back to continuous HR (0x29) and read key 0x0B (accepted, no 0x0B yet)
-    -> decode the 0x0D history frame for today's latest/min/max/avg (done, build ec438d4)
-    -> read the 0x0D history for today's heart rate (working)
+       (refused by the Buzz, 2026-11-19, with and without the 4 s delay)
+    -> fall back to continuous HR (0x29) and read key 0x0B
+       (accepted, but this firmware never streams; stop asking)
+    -> decode the 0x0D history for today's heart rate (working, primary source)
     -> parse device data on 16186f00 for the remaining health screens
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```

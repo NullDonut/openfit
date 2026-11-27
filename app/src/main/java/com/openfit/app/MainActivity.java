@@ -193,6 +193,12 @@ public final class MainActivity extends Activity {
     private int connectAttempt;
     private String lastConnectAddress;
     private boolean connectionReady;
+    /**
+     * True from the moment a connection attempt starts until the link is ready or it gives up.
+     * The old guard only covered the GATT connect itself, so taps during service discovery and
+     * notification setup opened a new GATT client each time and restarted the whole handshake.
+     */
+    private boolean connectionSetup;
     private boolean notificationSetupFailed;
     private boolean bondFallbackTried;
     private String watchProfile = "unknown";
@@ -831,12 +837,13 @@ public final class MainActivity extends Activity {
     @SuppressWarnings("MissingPermission")
     private void connect(BluetoothDevice device) {
         if (device == null) return;
-        if (connectionTimeout != null) {
+        if (connectionSetup || connectionTimeout != null) {
             // Repeated taps used to open one GATT client per tap (six were once logged in two
             // seconds). The running attempt finishes or times out on its own.
-            logBle("Connect request ignored · an attempt is already running");
+            logBle("Connect request ignored · a connection is already being set up");
             return;
         }
+        connectionSetup = true;
         stopScan();
         connectAttempt = 0;
         connectionReady = false;
@@ -856,6 +863,7 @@ public final class MainActivity extends Activity {
     private void startConnectionAttempt(BluetoothDevice device) {
         cancelRetryConnection();
         closeGatt();
+        connectionSetup = true;
         // A retry starts a fresh GATT link, so any half-finished bind must run again. The account
         // token itself is persistent and is deliberately left untouched.
         preparePairingAttempt();
@@ -867,6 +875,7 @@ public final class MainActivity extends Activity {
         scanStatus.setText(retry ? "●  RETRYING / " + connectAttempt : "●  CONNECTING");
         logBle("GATT attempt " + connectAttempt + "/" + MAX_CONNECT_ATTEMPTS);
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            connectionSetup = false;
             connectionStatus.setText("Bluetooth is off · turn it on to connect");
             scanStatus.setText("●  BLUETOOTH OFF");
             logBle("Aborted: Bluetooth is off");
@@ -875,12 +884,14 @@ public final class MainActivity extends Activity {
         try {
             gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } catch (SecurityException e) {
+            connectionSetup = false;
             gatt = null;
             connectionStatus.setText("Bluetooth permission was not granted.");
             scanStatus.setText("Allow Nearby devices access, then retry");
             logBle("connectGatt SecurityException");
             return;
         } catch (IllegalArgumentException | IllegalStateException e) {
+            connectionSetup = false;
             gatt = null;
             connectionStatus.setText("Could not start the Bluetooth connection");
             scanStatus.setText("Bluetooth connection unavailable");
@@ -959,6 +970,7 @@ public final class MainActivity extends Activity {
                     abandonBleBerry("the watch link closed");
                 }
                 closeGatt();
+                connectionSetup = false;
                 return;
             }
             if (status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION
@@ -967,6 +979,7 @@ public final class MainActivity extends Activity {
             }
             if (connectionReady) {
                 connectionReady = false;
+                connectionSetup = false;
                 deviceStatus.setText("No watch connected");
                 homeWatchSummary.setText("No watch connected");
                 connectionStatus.setText(status == BluetoothGatt.GATT_SUCCESS
@@ -1002,7 +1015,9 @@ public final class MainActivity extends Activity {
                     .apply();
         } catch (SecurityException ignored) { }
         reconnectButton.setText("Reconnect to " + connectedDeviceName);
-        reconnectButton.setVisibility(View.VISIBLE);
+        // Keep the button hidden until the link is fully ready. Showing it as soon as GATT
+        // connected invited taps that restarted discovery and notification setup.
+        reconnectButton.setVisibility(View.GONE);
         connectionStatus.setText("Connected · discovering watch services…");
         scanStatus.setText("●  CONNECTED / DISCOVERING");
         boolean discovering;
@@ -1217,6 +1232,7 @@ public final class MainActivity extends Activity {
         if (connectionReady) return;
         cancelNotificationTimeout();
         connectionReady = true;
+        connectionSetup = false;
         logBle("Connection ready · profile=" + watchProfile
                 + (notificationQueue.isEmpty() ? " · no notifications"
                 : notificationSetupFailed ? " · notifications incomplete" : " · notifications enabled"));
@@ -2866,6 +2882,9 @@ public final class MainActivity extends Activity {
             handler.postDelayed(retryConnection, RETRY_DELAY_MS);
             return;
         }
+        connectionSetup = false;
+        reconnectButton.setText("Reconnect to " + connectedDeviceName);
+        reconnectButton.setVisibility(View.VISIBLE);
         int bondState = BluetoothDevice.BOND_NONE;
         try {
             if (device != null) bondState = device.getBondState();
@@ -2928,6 +2947,7 @@ public final class MainActivity extends Activity {
                         connectionReady = false;
                         lastConnectAddress = device.getAddress();
                         handler.postDelayed(() -> {
+                            if (connectionSetup) return;
                             if (lastConnectAddress != null
                                     && lastConnectAddress.equals(device.getAddress())) {
                                 startConnectionAttempt(device);
@@ -2961,6 +2981,9 @@ public final class MainActivity extends Activity {
         bondInProgress = false;
         bondRequestedByApp = false;
         pendingBondDevice = null;
+        // Bonding is part of connection setup; every bond outcome either restarts the GATT link
+        // (which sets this again) or ends the attempt.
+        connectionSetup = false;
     }
 
     /**
@@ -2985,6 +3008,7 @@ public final class MainActivity extends Activity {
             return true;
         }
         if (bondState == BluetoothDevice.BOND_BONDED) {
+            connectionSetup = false;
             connectionStatus.setText("The watch rejected the paired connection (GATT " + status
                     + ") · remove it in Android Bluetooth settings, then pair again");
             scanStatus.setText("Saved Bluetooth pairing may be out of date");
@@ -3264,6 +3288,7 @@ public final class MainActivity extends Activity {
         retryConnection = null;
         stopScan();
         closeGatt();
+        connectionSetup = false;
         berryPhase = false;
         berryWriteChunks.clear();
         berryWriteBusy = false;
