@@ -5,6 +5,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public class SeWearTest {
     @Test public void idIsFieldOne() {
@@ -46,5 +47,22 @@ public class SeWearTest {
                 SeWear.wear(16, SeWear.FIELD_BIND_ACCOUNT, new byte[0]));
         assertArrayEquals(new byte[] {0x08, 0x10, 0x1A, 0x00},
                 SeWear.wearMessage(16, SeWear.FIELD_BIND_ACCOUNT, null));
+    }
+
+    @Test public void repeatedFieldsAreCollectedInOrder() {
+        // field 1 three times, with a field-2 varint in between that must be skipped.
+        byte[] message = {
+                0x0A, 0x01, 'a',
+                0x10, 0x07,
+                0x0A, 0x01, 'b',
+                0x0A, 0x02, 'c', 'd'
+        };
+        java.util.List<byte[]> values = SeWear.readMessages(message, 1);
+        assertEquals(3, values.size());
+        assertArrayEquals(new byte[] {'a'}, values.get(0));
+        assertArrayEquals(new byte[] {'b'}, values.get(1));
+        assertArrayEquals(new byte[] {'c', 'd'}, values.get(2));
+        assertTrue(SeWear.readMessages(message, 5).isEmpty());
+        assertTrue(SeWear.readMessages(null, 1).isEmpty());
     }
 }

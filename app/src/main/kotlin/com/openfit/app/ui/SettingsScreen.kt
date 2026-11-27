@@ -74,7 +74,9 @@ data class SettingsUiState(
     val sedentary: SedentaryUi = SedentaryUi(false, 2, 9, 0, 18, 0),
     val alarms: List<AlarmUi> = emptyList(),
     val status: String = "",
-    val statusIsError: Boolean = false
+    val statusIsError: Boolean = false,
+    /** True only on the SE / Watch Beat profile, where the face commands are wired. */
+    val facesSupported: Boolean = false
 )
 
 /** Every write the Settings tab can start. The activity turns each into one Zh frame. */
@@ -89,6 +91,7 @@ interface SettingsActions {
     fun onAddAlarm()
     fun onRemoveAlarm(id: Int)
     fun onForgetWatch()
+    fun onOpenFaces()
 }
 
 class SettingsScreenController(private val actions: SettingsActions) {
@@ -268,6 +271,25 @@ private fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                 checked = state.batterySaver,
                 onCheckedChange = actions::onToggleBatterySaver
             )
+        }
+
+        if (state.facesSupported) {
+            Spacer(Modifier.height(22.dp))
+            Eyebrow("WATCH FACES", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            SettingsCard {
+                Text(
+                    text = "See the faces installed on the watch and which one is in use.",
+                    style = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton(
+                    label = "Open watch faces",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = actions::onOpenFaces
+                )
+            }
         }
 
         Spacer(Modifier.height(22.dp))

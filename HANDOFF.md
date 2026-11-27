@@ -938,6 +938,26 @@ a secret.
     find watch, and a heart-rate reading on Home after connect. If any command is silent, the
     pairing log now shows `TX <label>` and `SE command ...`/`No reply for ...`.
 
+13. **Watch faces, phase 0: read-only discovery on the Watch Beat (2026-11-27).**
+    Added the SE watch-face surface without touching the Buzz. `SeCommands` now encodes the two
+    read-only vendor requests and decodes their replies: id 80 (`GET_WATCH_FACE_LIST`) and id 85
+    (`REQUEST_DEVICE_WATCH_FACE_CONFIG`, which carries `rule_count`). `SeWear.readMessages` collects
+    repeated length-delimited fields, and the exact request/reply bytes are pinned in
+    `SeCommandsTest` (the protocol suite is green locally). The activity got a new `SCREEN_FACES`
+    panel plus `FacesScreen.kt`, reachable from a "WATCH FACES" section in Settings that only
+    appears when `seCommandProfile` is true. The screen is deliberately read-only: it lists the
+    faces the watch reports, marks the current one, and shows the current face's rule count. It
+    never sends ids 81/82/83/84/86. Opening the screen (or tapping refresh) sends id 80; the app
+    then sends one supplementary id 85 for the current face only, with no watchdog. On the watch,
+    check: the face list matches the watch's own face picker, the CURRENT tag follows the watch,
+    and no pairing or health behavior changes. If id 80 is silent the panel says "No reply for the
+    watch-face list." and nothing else is affected.
+
+    Next sub-steps, in order: (a) built-in face switching with ids 81/82 and a confirmation step;
+    (b) a capability/budget model (slots, `memory_size`/`memory_surplus`, prepare statuses) before
+    any upload; (c) custom upload (ids 83/84/86 + `startUploadBigData("watch", ...)`) only after a
+    captured vendor upload pins the image package and transfer frames.
+
 ### Suggested order from here
 
 ```
@@ -957,6 +977,9 @@ pair on the watch (done, build b701e4a)
        (build 89c417c, CI-green, hardware test pending)
     -> move Health, Sleep and Settings onto the shared serif/dot components
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
+    -> read the Watch Beat face list and current face (id 80/85, implemented)
+    -> switch built-in faces (id 81/82, next)
+    -> capture a vendor custom-face upload, then implement ids 83/84/86
 ```
 
 The QR result-to-connection gap and QR on-device retest remain separate, lower-priority items.

@@ -67,6 +67,10 @@ import com.openfit.app.ui.SettingsScreenController;
 import com.openfit.app.ui.SettingsUiState;
 import com.openfit.app.ui.SedentaryUi;
 import com.openfit.app.ui.AlarmUi;
+import com.openfit.app.ui.FacesActions;
+import com.openfit.app.ui.FacesScreenController;
+import com.openfit.app.ui.FacesUiState;
+import com.openfit.app.ui.WatchFaceUi;
 import com.openfit.app.ui.WatchInfoUi;
 import com.openfit.app.ui.SleepScreenController;
 import com.openfit.app.ui.SleepStagePoint;
@@ -111,6 +115,7 @@ public final class MainActivity extends ComponentActivity {
     private static final int SCREEN_SLEEP = 2;
     private static final int SCREEN_SETTINGS = 3;
     private static final int SCREEN_WATCH = 4;
+    private static final int SCREEN_FACES = 5;
     private static final UUID HEART_RATE_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb");
     private static final UUID HEART_RATE_MEASUREMENT = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
@@ -240,6 +245,7 @@ public final class MainActivity extends ComponentActivity {
     private LinearLayout devicePanel;
     private LinearLayout sleepPanel;
     private LinearLayout settingsPanel;
+    private LinearLayout facesPanel;
     private LinearLayout onboardingHero;
     private LinearLayout watchCard;
     private TextView watchEyebrow;
@@ -278,6 +284,16 @@ public final class MainActivity extends ComponentActivity {
     private Runnable pendingSettingTimeout;
     private String settingsStatus = "";
     private boolean settingsStatusIsError;
+    // Watch-face discovery state (SE ids 80/85). The list is written from the BLE callback and
+    // read from the UI thread, so it is copy-on-write like the alarm list.
+    private FacesScreenController facesScreen;
+    private final List<SeCommands.WatchFace> watchFaces =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+    private String facesStatus = "";
+    private boolean facesStatusIsError;
+    private boolean facesLoading;
+    private Runnable facesTimeout;
+    private int watchFaceRuleCount = -1;
     private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
@@ -691,9 +707,20 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onAddAlarm() { showAlarmEditor(); }
             @Override public void onRemoveAlarm(int id) { removeWatchAlarm(id); }
             @Override public void onForgetWatch() { confirmForgetWatch(); }
+            @Override public void onOpenFaces() { onOpenWatchFaces(); }
         });
         settingsPanel.addView(settingsScreen.createView(this), lp(-1, -2));
         refreshSettings();
+
+        // Watch faces are read-only in this build: the screen lists what SE id 80 reports and
+        // marks the current face. It never sets or removes a face yet.
+        facesPanel = panel();
+        page.addView(facesPanel);
+        facesScreen = new FacesScreenController(new FacesActions() {
+            @Override public void onRefresh() { requestWatchFaceList(); }
+        });
+        facesPanel.addView(facesScreen.createView(this), lp(-1, -2));
+        refreshFaces();
 
         applySystemBarInsets(shell, pageScroll);
 
@@ -750,6 +777,7 @@ public final class MainActivity extends ComponentActivity {
             case SCREEN_HEALTH: return "HEART RATE";
             case SCREEN_SLEEP: return "SLEEP";
             case SCREEN_SETTINGS: return "SETTINGS";
+            case SCREEN_FACES: return "WATCH FACES";
             case SCREEN_WATCH: return "WATCH";
             default: return "OPENFIT";
         }
@@ -780,7 +808,8 @@ public final class MainActivity extends ComponentActivity {
         if (next == null) return;
         boolean changed = screen != currentScreen;
         currentScreen = screen;
-        for (View candidate : new View[] {homePanel, healthPanel, sleepPanel, settingsPanel, devicePanel}) {
+        for (View candidate : new View[] {homePanel, healthPanel, sleepPanel, settingsPanel,
+                facesPanel, devicePanel}) {
             if (candidate != null && candidate != next) candidate.setVisibility(View.GONE);
         }
         next.setVisibility(View.VISIBLE);
@@ -806,6 +835,7 @@ public final class MainActivity extends ComponentActivity {
             case SCREEN_HEALTH: return healthPanel;
             case SCREEN_SLEEP: return sleepPanel;
             case SCREEN_SETTINGS: return settingsPanel;
+            case SCREEN_FACES: return facesPanel;
             case SCREEN_WATCH: return devicePanel;
             default: return homePanel;
         }
@@ -2236,6 +2266,10 @@ public final class MainActivity extends ComponentActivity {
             connectionStatus.setText("Connected · pairing failed · " + detail);
             scanStatus.setText("●  CONNECTED / PAIRING FAILED · TAP FOR DIAGNOSTICS");
         }
+        // finishPairing has already set seCommandProfile, so the Settings entry for watch faces
+        // appears as soon as the SE profile is known rather than waiting for the first reply.
+        refreshSettings();
+        refreshFaces();
     }
 
     // ----------------------------------------------------------------------------------------
@@ -2305,6 +2339,9 @@ public final class MainActivity extends ComponentActivity {
             handler.removeCallbacks(seRealtimeTimeout);
             seRealtimeTimeout = null;
         }
+        // A pending face read belongs to the old link; drop it so the next link starts clean.
+        cancelFacesTimeout();
+        facesLoading = false;
     }
 
     private void cancelSeCommandTimeout() {
@@ -2369,6 +2406,11 @@ public final class MainActivity extends ComponentActivity {
         if (error != 0) {
             String label = SeWear.errorLabel(error);
             logPairing("SE command " + id + " refused · " + label);
+            if (id == SeCommands.FUNCTION_GET_WATCH_FACE_LIST) {
+                cancelFacesTimeout();
+                facesLoading = false;
+                setFacesStatus("The watch refused the face list · " + label + ".", true);
+            }
             resolveSeCommand(id, false, label);
             return;
         }
@@ -2390,6 +2432,38 @@ public final class MainActivity extends ComponentActivity {
                     watchBattery = level;
                     refreshSettings();
                     refreshHome();
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_GET_WATCH_FACE_LIST: {
+                cancelFacesTimeout();
+                facesLoading = false;
+                List<SeCommands.WatchFace> faces = SeCommands.watchFaceList(message);
+                watchFaces.clear();
+                watchFaces.addAll(faces);
+                watchFaceRuleCount = -1;
+                String currentId = "";
+                for (SeCommands.WatchFace face : faces) {
+                    if (face.current) currentId = face.id;
+                }
+                if (faces.isEmpty()) {
+                    setFacesStatus("The watch reported no faces.", true);
+                } else {
+                    setFacesStatus(faces.size() + (faces.size() == 1 ? " face" : " faces")
+                            + (currentId.isEmpty() ? "" : " · current " + currentId), false);
+                    if (!currentId.isEmpty()) {
+                        // Supplementary read for the rule count. It is not required for the
+                        // list, so it has no watchdog: a silence is simply ignored.
+                        sendSe(SeCommands.requestWatchFaceConfig(currentId), "watch-face config");
+                    }
+                }
+                break;
+            }
+            case SeCommands.FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG: {
+                SeCommands.WatchFaceConfig config = SeCommands.watchFaceConfig(message);
+                if (config != null) {
+                    watchFaceRuleCount = config.ruleCount;
+                    refreshFaces();
                 }
                 break;
             }
@@ -3474,6 +3548,11 @@ public final class MainActivity extends ComponentActivity {
         seRealtimeHeartRate = false;
         seLastRealtimeBpm = -1;
         cancelSeCommands();
+        watchFaces.clear();
+        watchFaceRuleCount = -1;
+        facesStatus = "";
+        facesStatusIsError = false;
+        refreshFaces();
         cancelZhTimeout();
         cancelZhPostBind();
         cancelZhHeartRateTimeout();
@@ -4284,7 +4363,8 @@ public final class MainActivity extends ComponentActivity {
                         sedentaryEndHour, sedentaryEndMin),
                 new ArrayList<>(watchAlarms),
                 settingsStatus,
-                settingsStatusIsError);
+                settingsStatusIsError,
+                seCommandProfile);
         runOnUiThread(() -> settingsScreen.update(next));
     }
 
@@ -4292,6 +4372,70 @@ public final class MainActivity extends ComponentActivity {
         settingsStatus = text;
         settingsStatusIsError = error;
         refreshSettings();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Watch faces (read-only discovery: SE ids 80 and 85)
+    // ---------------------------------------------------------------------------------------
+
+    private void onOpenWatchFaces() {
+        showScreen(SCREEN_FACES);
+        requestWatchFaceList();
+    }
+
+    /** Asks the watch for its face list. Read-only: it never sets, removes or uploads a face. */
+    private void requestWatchFaceList() {
+        if (!seCommandsActive()) {
+            facesLoading = false;
+            setFacesStatus(seCommandProfile
+                    ? "Connect the watch to read its faces."
+                    : "Watch faces are not available on this watch.", true);
+            return;
+        }
+        facesLoading = true;
+        facesStatus = "Reading watch faces…";
+        facesStatusIsError = false;
+        refreshFaces();
+        logPairing("TX watch-face list · read-only");
+        sendSe(SeCommands.requestWatchFaceList(), "watch-face list");
+        cancelFacesTimeout();
+        facesTimeout = () -> {
+            facesTimeout = null;
+            facesLoading = false;
+            setFacesStatus("No reply for the watch-face list.", true);
+        };
+        handler.postDelayed(facesTimeout, SE_COMMAND_TIMEOUT_MS);
+    }
+
+    private void cancelFacesTimeout() {
+        if (facesTimeout != null) {
+            handler.removeCallbacks(facesTimeout);
+            facesTimeout = null;
+        }
+    }
+
+    private void setFacesStatus(String text, boolean error) {
+        facesStatus = text;
+        facesStatusIsError = error;
+        refreshFaces();
+    }
+
+    /** Rebuilds the Faces state from the activity's fields and pushes it to Compose. */
+    private void refreshFaces() {
+        if (facesScreen == null) return;
+        List<WatchFaceUi> rows = new ArrayList<>();
+        for (SeCommands.WatchFace face : watchFaces) {
+            rows.add(new WatchFaceUi(face.id, face.current, face.removable));
+        }
+        FacesUiState next = new FacesUiState(
+                seCommandProfile,
+                connectionReady,
+                rows,
+                watchFaceRuleCount,
+                facesStatus,
+                facesStatusIsError,
+                facesLoading);
+        runOnUiThread(() -> facesScreen.update(next));
     }
 
     /** Requests battery and firmware. The reply arrives on key 0x08. */

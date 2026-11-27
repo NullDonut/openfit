@@ -225,6 +225,65 @@ public class SeCommandsTest {
         assertEquals(72, realTime.bpm);
     }
 
+    // ------------------------------------------------------------------------------------
+    // Watch faces (read-only discovery: ids 80 and 85)
+    // ------------------------------------------------------------------------------------
+
+    @Test public void watchFaceRequestsMatchTheVendorFrames() {
+        // a.g() = a(80, null): a bare SEWear.id, no payload.
+        assertArrayEquals(new byte[] {0x08, 0x50}, SeCommands.requestWatchFaceList());
+        // a.a("abc", 85): watch_face{ watch_face_config{ id } }.
+        assertArrayEquals(new byte[] {
+                0x08, 0x55,                         // SEWear.id = 85
+                0x3A, 0x07,                         // watch_face (7), 7 bytes
+                0x3A, 0x05,                         // watch_face_config (7), 5 bytes
+                0x0A, 0x03, 'a', 'b', 'c'           // id = "abc"
+        }, SeCommands.requestWatchFaceConfig("abc"));
+    }
+
+    @Test public void watchFaceListReplyIsDecoded() {
+        byte[] reply = {
+                0x08, 0x50,                         // SEWear.id = 80
+                0x3A, 0x14,                         // watch_face (7), 20 bytes
+                0x0A, 0x12,                         // item_list (1), 18 bytes
+                0x0A, 0x07, 0x0A, 0x03, 'w', 'f', '1', 0x10, 0x01, // id=wf1, current
+                0x0A, 0x07, 0x0A, 0x03, 'w', 'f', '2', 0x18, 0x01  // id=wf2, removable
+        };
+        java.util.List<SeCommands.WatchFace> faces = SeCommands.watchFaceList(reply);
+        assertEquals(2, faces.size());
+        assertEquals("wf1", faces.get(0).id);
+        assertTrue(faces.get(0).current);
+        assertFalse(faces.get(0).removable);
+        assertEquals("wf2", faces.get(1).id);
+        assertFalse(faces.get(1).current);
+        assertTrue(faces.get(1).removable);
+        assertEquals("SEWear{id=80, error=0, faces=2, current=wf1}",
+                SeCommands.describe(reply));
+    }
+
+    @Test public void watchFaceConfigReplyIsDecoded() {
+        byte[] reply = {
+                0x08, 0x55,                         // SEWear.id = 85
+                0x3A, 0x09,                         // watch_face (7), 9 bytes
+                0x3A, 0x07,                         // watch_face_config (7), 7 bytes
+                0x0A, 0x03, 'w', 'f', '1',          // id = "wf1"
+                0x10, 0x04                          // rule_count = 4
+        };
+        SeCommands.WatchFaceConfig config = SeCommands.watchFaceConfig(reply);
+        assertNotNull(config);
+        assertEquals("wf1", config.id);
+        assertEquals(4, config.ruleCount);
+        assertEquals("SEWear{id=85, error=0, face=wf1, rules=4}", SeCommands.describe(reply));
+    }
+
+    @Test public void absentWatchFaceFieldsDoNotPretendToBeAnswers() {
+        assertTrue(SeCommands.watchFaceList(new byte[] {0x08, 0x50}).isEmpty());
+        assertEquals(null, SeCommands.watchFaceConfig(new byte[] {0x08, 0x55}));
+        assertTrue(SeCommands.isCommandReply(SeCommands.FUNCTION_GET_WATCH_FACE_LIST));
+        assertTrue(SeCommands.isCommandReply(
+                SeCommands.FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG));
+    }
+
     @Test public void absentFieldsDoNotPretendToBeAnswers() {
         assertEquals(-1, SeCommands.batteryLevel(new byte[] {0x08, 0x21}));
         assertEquals(null, SeCommands.deviceInfo(new byte[] {0x08, 0x20}));

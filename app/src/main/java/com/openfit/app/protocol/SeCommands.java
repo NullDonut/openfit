@@ -2,6 +2,8 @@ package com.openfit.app.protocol;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Commands for the <b>SE / Apricot</b> watches (the Noise Watch Beat family) on the
@@ -40,11 +42,37 @@ public final class SeCommands {
     public static final int FUNCTION_SET_REAL_TIME_HEART_RATE = 731;
     public static final int FUNCTION_REPORT_REAL_TIME_HEART_RATE = 733;
 
+    // SEFunctionId values for the watch-face surface. Only the two read-only ids are wired so
+    // far; the set / remove / install ids are listed here so the next step has one source of
+    // truth. Nothing sends them yet.
+    public static final int FUNCTION_GET_WATCH_FACE_LIST = 80;
+    public static final int FUNCTION_SET_WATCH_FACE = 81;
+    public static final int FUNCTION_REMOVE_WATCH_FACE = 82;
+    public static final int FUNCTION_PREPARE_INSTALL_WATCH_FACE = 83;
+    public static final int FUNCTION_REPORT_INSTALL_RESULT = 84;
+    public static final int FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG = 85;
+    public static final int FUNCTION_SET_DEVICE_WATCH_FACE_CONFIG = 86;
+
     // SEWear payload fields.
     public static final int WEAR_DEVICE = 4;
     public static final int WEAR_SYSTEM_TIME = 5;
     public static final int WEAR_USER_SETTINGS = 6;
+    public static final int WEAR_WATCH_FACE = 7;
     public static final int WEAR_SETTING_MENU = 15;
+
+    // SEWatchFace payload cases (oneof). 1 item_list, 7 watch_face_config.
+    public static final int WATCH_FACE_ITEM_LIST = 1;
+    public static final int WATCH_FACE_CONFIG = 7;
+
+    // SEWatchFaceItem fields (inside SEWatchFaceItem.SEList).
+    public static final int WATCH_FACE_ITEM = 1;
+    public static final int WATCH_FACE_ITEM_ID = 1;
+    public static final int WATCH_FACE_ITEM_IS_CURRENT = 2;
+    public static final int WATCH_FACE_ITEM_IS_REMOVE = 3;
+
+    // SEWatchFaceConfig fields.
+    public static final int WATCH_FACE_CONFIG_ID = 1;
+    public static final int WATCH_FACE_CONFIG_RULE_COUNT = 2;
 
     // SEDevice fields.
     public static final int DEVICE_INFO = 1;
@@ -255,6 +283,27 @@ public final class SeCommands {
         return SeWear.wear(FUNCTION_DEVICE_BATTERY);
     }
 
+    /**
+     * {@code SEWear{id=80}} — the vendor's {@code getWatchFaceList()} sends this bare frame
+     * ({@code a.g() == a(80, null)}); the reply carries a {@code SEWatchFaceItem.SEList}.
+     */
+    public static byte[] requestWatchFaceList() {
+        return SeWear.wear(FUNCTION_GET_WATCH_FACE_LIST);
+    }
+
+    /**
+     * {@code SEWear{id=85, watch_face{watch_face_config{id}}}} — the vendor's
+     * {@code getDiyWatchFaceConfig(id)} builds exactly this nested form ({@code a.a(str, 85)}).
+     */
+    public static byte[] requestWatchFaceConfig(String id) {
+        ByteArrayOutputStream config = new ByteArrayOutputStream();
+        writeString(config, WATCH_FACE_CONFIG_ID, id == null ? "" : id);
+        ByteArrayOutputStream face = new ByteArrayOutputStream();
+        SeWear.writeMessage(face, WATCH_FACE_CONFIG, config.toByteArray());
+        return SeWear.wearMessage(FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG, WEAR_WATCH_FACE,
+                face.toByteArray());
+    }
+
     // ------------------------------------------------------------------------------------
     // Parsers
     // ------------------------------------------------------------------------------------
@@ -283,6 +332,41 @@ public final class SeCommands {
                 stringOrEmpty(info, INFO_MAC),
                 stringOrEmpty(info, INFO_SERIAL),
                 battery == null ? -1 : (int) SeWear.readVarintField(battery, BATTERY_CAPACITY));
+    }
+
+    /**
+     * Decodes an id-80 reply into the watch's face list, in the order the watch reported it.
+     * An absent or malformed {@code item_list} yields an empty list rather than an exception,
+     * because the face screen must stay usable while the protocol is still being verified.
+     */
+    public static List<WatchFace> watchFaceList(byte[] sewear) {
+        List<WatchFace> faces = new ArrayList<>();
+        byte[] face = SeWear.readMessageField(sewear, WEAR_WATCH_FACE);
+        if (face == null) return faces;
+        byte[] list = SeWear.readMessageField(face, WATCH_FACE_ITEM_LIST);
+        if (list == null) return faces;
+        for (byte[] raw : SeWear.readMessages(list, WATCH_FACE_ITEM)) {
+            faces.add(new WatchFace(
+                    stringOrEmpty(raw, WATCH_FACE_ITEM_ID),
+                    SeWear.readVarintField(raw, WATCH_FACE_ITEM_IS_CURRENT) > 0,
+                    SeWear.readVarintField(raw, WATCH_FACE_ITEM_IS_REMOVE) > 0));
+        }
+        return faces;
+    }
+
+    /**
+     * Decodes the id-85 reply. Only {@code id} and {@code rule_count} are read for now; the file
+     * configs (fields 3-8) are left untouched until a real device reply pins their semantics.
+     * Returns {@code null} when the reply carries no {@code watch_face_config}.
+     */
+    public static WatchFaceConfig watchFaceConfig(byte[] sewear) {
+        byte[] face = SeWear.readMessageField(sewear, WEAR_WATCH_FACE);
+        byte[] config = face == null ? null : SeWear.readMessageField(face, WATCH_FACE_CONFIG);
+        if (config == null) return null;
+        long rules = SeWear.readVarintField(config, WATCH_FACE_CONFIG_RULE_COUNT);
+        return new WatchFaceConfig(
+                stringOrEmpty(config, WATCH_FACE_CONFIG_ID),
+                rules < 0 ? -1 : (int) rules);
     }
 
     /** True when the reply turns the all-day heart-rate monitor on. */
@@ -363,6 +447,16 @@ public final class SeCommands {
                     .append(", battery=").append(info.battery);
         } else if (id == FUNCTION_DEVICE_BATTERY) {
             out.append(", battery=").append(batteryLevel(sewear));
+        } else if (id == FUNCTION_GET_WATCH_FACE_LIST) {
+            List<WatchFace> faces = watchFaceList(sewear);
+            out.append(", faces=").append(faces.size());
+            for (WatchFace face : faces) {
+                if (face.current) out.append(", current=").append(face.id);
+            }
+        } else if (id == FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG) {
+            WatchFaceConfig config = watchFaceConfig(sewear);
+            if (config != null) out.append(", face=").append(config.id)
+                    .append(", rules=").append(config.ruleCount);
         } else if (id == FUNCTION_GET_HEART_RATE_MONITOR
                 || id == FUNCTION_SET_HEART_RATE_MONITOR) {
             out.append(", hrOn=").append(heartRateMonitorOn(sewear));
@@ -385,6 +479,8 @@ public final class SeCommands {
                 || id == FUNCTION_DEVICE_BATTERY
                 || id == FUNCTION_SET_TIME
                 || id == FUNCTION_SET_USER_PROFILE
+                || id == FUNCTION_GET_WATCH_FACE_LIST
+                || id == FUNCTION_REQUEST_DEVICE_WATCH_FACE_CONFIG
                 || id == FUNCTION_GET_HEART_RATE_MONITOR
                 || id == FUNCTION_SET_HEART_RATE_MONITOR
                 || id == FUNCTION_GET_SEDENTARY
@@ -443,6 +539,13 @@ public final class SeCommands {
         out.write((bits >>> 8) & 0xff);
         out.write((bits >>> 16) & 0xff);
         out.write((bits >>> 24) & 0xff);
+    }
+
+    private static void writeString(ByteArrayOutputStream out, int field, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        SeWear.writeTag(out, field, 2);
+        SeWear.writeVarint(out, bytes.length);
+        out.write(bytes, 0, bytes.length);
     }
 
     // ------------------------------------------------------------------------------------
@@ -519,6 +622,41 @@ public final class SeCommands {
 
         @Override public String toString() {
             return "bpm=" + bpm + " @" + timestamp;
+        }
+    }
+
+    /** One entry of the watch's face list (id 80). {@code id} is the vendor's opaque string. */
+    public static final class WatchFace {
+        public final String id;
+        public final boolean current;
+        public final boolean removable;
+
+        WatchFace(String id, boolean current, boolean removable) {
+            this.id = id;
+            this.current = current;
+            this.removable = removable;
+        }
+
+        @Override public String toString() {
+            StringBuilder out = new StringBuilder("face{id=").append(id);
+            if (current) out.append(", current");
+            if (removable) out.append(", removable");
+            return out.append('}').toString();
+        }
+    }
+
+    /** The subset of {@code SEWatchFaceConfig} decoded from an id-85 reply. */
+    public static final class WatchFaceConfig {
+        public final String id;
+        public final int ruleCount;
+
+        WatchFaceConfig(String id, int ruleCount) {
+            this.id = id;
+            this.ruleCount = ruleCount;
+        }
+
+        @Override public String toString() {
+            return "faceConfig{id=" + id + ", rules=" + ruleCount + "}";
         }
     }
 }

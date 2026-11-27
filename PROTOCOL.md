@@ -372,6 +372,48 @@ The Watch Beat has no one-shot measurement frame. OpenFit runs a bounded real-ti
 (id 731 on, 5 s interval, 30 s auto-shutdown) after connecting, records the first id-733 sample for
 Home, and turns the stream off again.
 
+#### Watch faces over SE (read-only discovery, 2026-11-27)
+
+The face commands ride the same `SEWear` envelope in field 7 (`watch_face`). OpenFit currently
+sends only the two read-only ids; the set/remove/install ids are recorded here but are not wired.
+Exact request bytes and reply parsers are pinned in `SeCommandsTest`.
+
+| id | `SEFunctionId` | OpenFit status |
+|---|---|---|
+| 80 | `GET_WATCH_FACE_LIST` | wired, read-only |
+| 81 | `SET_WATCH_FACE` | not wired (phase 1) |
+| 82 | `REMOVE_WATCH_FACE` | not wired (phase 1) |
+| 83 | `PREPARE_INSTALL_WATCH_FACE` | not wired (custom upload) |
+| 84 | `REPORT_INSTALL_RESULT` | not wired (custom upload) |
+| 85 | `REQUEST_DEVICE_WATCH_FACE_CONFIG` | wired, read-only |
+| 86 | `SET_DEVICE_WATCH_FACE_CONFIG` | not wired (custom upload) |
+
+Request shapes (from `com.zhapp.ble.a` in NoiseFit 5.9):
+
+- `getWatchFaceList()` calls `a.g() == a(80, null)`, i.e. a bare `SEWear{id=80}` → `08 50`.
+- `getDiyWatchFaceConfig(id)` calls `a.a(id, 85)`, which builds
+  `SEWear{id=85, watch_face{watch_face_config{id}}}`. With `id="abc"`:
+  `08 55 3A 07 3A 05 0A 03 61 62 63`.
+- `getDeviceWatchFace(id, fileSize, isReplace)` calls `a.a(id, fileSize, isReplace)` (id 83) and
+  builds `SEWatchFacePrepareInfo{id, target_file_size, transfer_file_size, is_replaceable}`.
+
+Reply shapes:
+
+```
+SEWear{ id:80, watch_face{ item_list{ 1: SEWatchFaceItem{ id, is_current, is_remove } ... } } }
+SEWear{ id:85, watch_face{ watch_face_config{ id, rule_count, ... } } }
+```
+
+`SEWatchFace` is a oneof: case 1 is `SEWatchFaceItem.SEList` (field 1 repeated), case 7 is
+`SEWatchFaceConfig`. `SEWatchFaceConfig` fields 3-8 carry the complex-function / background /
+thumbnail / point / number file configs. OpenFit reads only `id` and `rule_count` for now; the
+face file configs are left untouched until a real device reply pins their semantics.
+
+**Still unknown:** the custom-face *payload* (image resolution, format/compression, chunking,
+CRC, max size, slot rules) and the large-data transfer frames. A captured NoiseFit custom-face
+upload (btsnoop/HCI plus vendor logs and the exact source image) is required before ids 83/84/86
+and the generic `startUploadBigData("watch", ...)` path can be implemented safely.
+
 ### Berry SPP frame format (alternate transport)
 
 From `com.zhapp.ble.bean.berry.CmdDataBean#getCmdBytes` (multi-byte fields are

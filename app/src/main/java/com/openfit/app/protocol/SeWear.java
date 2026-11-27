@@ -2,7 +2,9 @@ package com.openfit.app.protocol;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Minimal protobuf (proto3) codec for the <b>SE / Apricot</b> {@code SEWear} envelope used on
@@ -138,6 +140,47 @@ public final class SeWear {
             if (pos > message.length) return null;
         }
         return null;
+    }
+
+    /**
+     * Collects <b>every</b> occurrence of a top-level length-delimited field, in wire order. This
+     * is the repeated-message counterpart of {@link #readMessageField}, used by the watch-face
+     * list ({@code SEWatchFaceItem.SEList.list}). Returns an empty list when the field is absent
+     * or the buffer is malformed, so a partial reply never throws.
+     */
+    public static List<byte[]> readMessages(byte[] message, int wantedField) {
+        List<byte[]> out = new ArrayList<>();
+        if (message == null) return out;
+        int pos = 0;
+        while (pos < message.length) {
+            long tag = readVarint(message, pos);
+            if (tag < 0) return out;
+            pos += varintSize(tag);
+            int field = (int) (tag >>> 3);
+            int wireType = (int) (tag & 7);
+            if (wireType == 0) {
+                long value = readVarint(message, pos);
+                if (value < 0) return out;
+                pos += varintSize(value);
+            } else if (wireType == 2) {
+                long length = readVarint(message, pos);
+                if (length < 0 || length > message.length) return out;
+                pos += varintSize(length);
+                if (pos + length > message.length) return out;
+                if (field == wantedField) {
+                    out.add(Arrays.copyOfRange(message, pos, pos + (int) length));
+                }
+                pos += (int) length;
+            } else if (wireType == 5) {
+                pos += 4;
+            } else if (wireType == 1) {
+                pos += 8;
+            } else {
+                return out;
+            }
+            if (pos > message.length) return out;
+        }
+        return out;
     }
 
     /** Returns a top-level length-delimited field decoded as UTF-8, or {@code null}. */
