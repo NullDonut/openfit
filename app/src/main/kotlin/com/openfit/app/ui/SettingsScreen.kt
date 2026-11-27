@@ -52,8 +52,12 @@ data class SedentaryUi(
     val endMin: Int
 )
 
-/** One alarm. Only one-off alarms are created here; [data] stays 128 for those. */
-data class AlarmUi(val id: Int, val hour: Int, val minute: Int)
+/**
+ * One alarm. [data] is the watch's repeat byte: 128 means one-off, any other value is the weekday
+ * mask. It is preserved from the watch so editing the list never turns a repeating alarm into a
+ * one-off.
+ */
+data class AlarmUi(val id: Int, val hour: Int, val minute: Int, val data: Int)
 
 /**
  * Everything the Settings tab renders. The activity owns the values and pushes a new state after

@@ -3422,7 +3422,7 @@ public final class MainActivity extends ComponentActivity {
                         return;
                     }
                     List<AlarmUi> before = new ArrayList<>(watchAlarms);
-                    watchAlarms.add(new AlarmUi(id, hour, minute));
+                    watchAlarms.add(new AlarmUi(id, hour, minute, 128));
                     refreshSettings();
                     sendAlarms(before);
                 }, 7, 0, true);
@@ -3447,7 +3447,7 @@ public final class MainActivity extends ComponentActivity {
         List<ZhBraceletBinding.Alarm> alarms = new ArrayList<>();
         for (AlarmUi alarm : watchAlarms) {
             alarms.add(new ZhBraceletBinding.Alarm(
-                    alarm.getId(), alarm.getHour(), alarm.getMinute(), 128));
+                    alarm.getId(), alarm.getHour(), alarm.getMinute(), alarm.getData()));
         }
         writeSetting("alarms", ZhBraceletBinding.KEY_ALARM, -1,
                 ZhBraceletBinding.alarmsFrame(alarms),
@@ -3564,7 +3564,7 @@ public final class MainActivity extends ComponentActivity {
         if (alarms != null) {
             watchAlarms.clear();
             for (ZhBraceletBinding.Alarm alarm : alarms) {
-                watchAlarms.add(new AlarmUi(alarm.id, alarm.hour, alarm.minute));
+                watchAlarms.add(new AlarmUi(alarm.id, alarm.hour, alarm.minute, alarm.data));
             }
             logPairing("alarm list · " + watchAlarms.size() + " alarm(s)");
             if (pendingSettingSubKey == ZhBraceletBinding.PRIVATE_ALARMS) {
