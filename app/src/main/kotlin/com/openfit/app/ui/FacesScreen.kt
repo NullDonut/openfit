@@ -106,7 +106,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         when {
             !state.supported -> FacesCard {
                 Text(
-                    text = "Watch faces are not available on this watch. This screen is enabled for the SE / Watch Beat profile only.",
+                    text = "Watch faces are not available on this watch. This screen is enabled for the ColorFit Ultra Buzz (ZhBracelet) and SE / Watch Beat profiles.",
                     style = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

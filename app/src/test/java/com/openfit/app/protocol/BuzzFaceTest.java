@@ -1,0 +1,76 @@
+package com.openfit.app.protocol;
+
+import org.junit.Test;
+
+import java.util.List;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class BuzzFaceTest {
+    /** A ZhBracelet GET_INSTALLED_LIST request: WearPacket{type=4, id=0}. */
+    @Test public void requestIsTypeWatchFaceAndGetInstalledList() {
+        assertArrayEquals(new byte[] {0x08, 0x04, 0x10, 0x00}, BuzzFace.requestInstalledList());
+    }
+
+    @Test public void typeMustBeWatchFace() {
+        assertTrue(BuzzFace.isWatchFace(hex("08 04 10 00")));
+        assertFalse(BuzzFace.isWatchFace(hex("08 02 10 00")));
+        assertFalse(BuzzFace.isWatchFace(null));
+    }
+
+    /**
+     * Reply with {@code WatchFace.watch_face_list} (field 1), the shape the bundled SDK's own
+     * handler reads: two items with id, name, is_current and can_remove.
+     */
+    @Test public void parsesWatchFaceItemList() {
+        byte[] reply = hex(
+                "08 04 10 00 32 26 0a 24"
+                + " 0a 11 0a 02 77 31 12 07 43 6c 61 73 73 69 63 18 01 20 00"
+                + " 0a 0f 0a 02 77 32 12 05 53 70 6f 72 74 18 00 20 01");
+        List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(reply);
+        assertEquals(2, faces.size());
+        assertEquals("w1", faces.get(0).id);
+        assertTrue(faces.get(0).current);
+        assertFalse(faces.get(0).removable);
+        assertEquals("w2", faces.get(1).id);
+        assertFalse(faces.get(1).current);
+        assertTrue(faces.get(1).removable);
+    }
+
+    /** A firmware that reports ids only may use {@code WatchFace.info_list} (field 8). */
+    @Test public void parsesWatchFaceInfoList() {
+        byte[] reply = hex(
+                "08 04 10 00 32 1c 42 1a"
+                + " 0a 0b 0a 09 62 75 69 6c 74 69 6e 2d 31"
+                + " 0a 0b 0a 09 62 75 69 6c 74 69 6e 2d 32");
+        List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(reply);
+        assertEquals(2, faces.size());
+        assertEquals("builtin-1", faces.get(0).id);
+        assertEquals("builtin-2", faces.get(1).id);
+        assertFalse(faces.get(0).current);
+        assertFalse(faces.get(1).removable);
+    }
+
+    @Test public void unexpectedOrMalformedRepliesYieldNoFaces() {
+        assertTrue(BuzzFace.parseInstalledList(new byte[0]).isEmpty());
+        assertTrue(BuzzFace.parseInstalledList(null).isEmpty());
+        // A WatchFace with no payload oneof: just type and id.
+        assertTrue(BuzzFace.parseInstalledList(hex("08 04 10 00")).isEmpty());
+        // Not a watch-face packet at all.
+        assertTrue(BuzzFace.parseInstalledList(hex("08 02 10 01")).isEmpty());
+        // Truncated nested list: skipped rather than thrown.
+        assertTrue(BuzzFace.parseInstalledList(hex("08 04 10 00 32 04 0a 02 0a 00")).isEmpty());
+    }
+
+    private static byte[] hex(String text) {
+        String clean = text.replace(" ", "");
+        byte[] out = new byte[clean.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
+    }
+}

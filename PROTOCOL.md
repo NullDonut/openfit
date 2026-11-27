@@ -1047,6 +1047,42 @@ The RC4/"Ryeex" cipher documented below belongs to a different bundled SDK (`com
 shares the same base UUIDs but is not the stack used for Ultra Buzz. The zhbraceletsdk frames are
 plaintext.
 
+### Watch faces over the ZhBracelet protobuf channel
+
+The Buzz's watch-face traffic is **not** a `0xAB` script frame. NoiseFit's
+`NavPlusUpdateDeviceUnitsHandler` calls `ZhBraceletService.getDeviceProtoWatchStatusEvent(...)`
+(`→ service.h → service.c.a(String,int) → n.m.a`), which builds a
+`com.zh.wear.protobuf.WearProtos.WearPacket` and queues it through the **same chunked big-data
+transport as the SE command set**: service `16186f00`, outbound `16186f02`, inbound `16186f01`
+(announce `00 00 00 00 <count LE16>`, ready `00 00 01 01`, chunk `<index LE16><data>`, done
+`00 00 01 03`). OpenFit's `SeGatt` already implements that framing, so the Buzz face read reuses it
+with a different payload (`BuzzFace`).
+
+`WearPacket` (proto2/nanopb): `1 type` (enum; `WATCH_FACE = 4`), `2 id` (uint32
+`WatchFace.WatchFaceID`), `6 watch_face` (`WatchFace`).
+
+`WatchFace` oneof: `1 watch_face_list` (`WatchFaceItem.List`), `2 id`, `3 path`, `4 success`,
+`5 prepare_status`, `6 prepare_info`, `7 install_result`, `8 info_list` (`WatchFaceInfo.List`),
+`11 support_data_list`, `12 edit_request`, `13 edit_response`, `14 bg_image_result`.
+
+`WatchFaceItem`: `1 id` (required string), `2 name` (required string), `3 is_current` (required
+bool), `4 can_remove`, `5 version_code`, `6 can_edit`, `7 background_color`, `8 background_image`,
+`9 style`, `10 data_list`. `WatchFaceItem.List { repeated WatchFaceItem list = 1 }`.
+`WatchFaceInfo { 1 id }`; `WatchFaceInfo.List { repeated WatchFaceInfo list = 1 }`.
+
+`WatchFaceID`: `GET_INSTALLED_LIST=0`, `SET_WATCH_FACE=1`, `REMOVE_WATCH_FACE=2`,
+`REMOVE_WATCH_FACE_PHOTO=3`, `PREPARE_INSTALL_WATCH_FACE=4`, `REPORT_INSTALL_RESULT=5`,
+`REMOVE_MULTI_WATCH_FACE=6`, `GET_SUPPORT_DATA=10`, `EDIT_WATCH_FACE=11`, `BG_IMAGE_RESULT=12`.
+
+OpenFit sends the read-only request `WearPacket{type=WATCH_FACE, id=GET_INSTALLED_LIST}`
+(`08 04 10 00`) only when the user opens Watch Faces. The bundled SDK's own inbound handler parses
+the reply from `watch_face_list` (field 1); OpenFit also accepts `info_list` (field 8) in case the
+firmware reports ids only.
+
+**Status (2026-11-27):** the message layout is decoded, but the Buzz firmware's answer to
+`GET_INSTALLED_LIST` has not been observed on hardware — the vendor app only ever installs a face
+(`PREPARE_INSTALL_WATCH_FACE`). Treat the read as a probe until a device confirms it.
+
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
 Base service `00000001-0000-1000-8000-00805f9b34fb`, write `00000002-…`, read `00000003-…`.

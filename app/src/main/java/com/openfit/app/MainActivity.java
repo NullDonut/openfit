@@ -50,6 +50,7 @@ import com.openfit.app.protocol.BerryFrame;
 import com.openfit.app.protocol.BerryFrameReader;
 import com.openfit.app.protocol.BerryProfile;
 import com.openfit.app.protocol.BerrySewear;
+import com.openfit.app.protocol.BuzzFace;
 import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SeCommands;
@@ -284,8 +285,10 @@ public final class MainActivity extends ComponentActivity {
     private Runnable pendingSettingTimeout;
     private String settingsStatus = "";
     private boolean settingsStatusIsError;
-    // Watch-face discovery state (SE ids 80/85). The list is written from the BLE callback and
-    // read from the UI thread, so it is copy-on-write like the alarm list.
+    // Watch-face discovery state. Read-only on both stacks: the SE profile (Watch Beat) answers
+    // SE ids 80/85, while the ZhBracelet profile (ColorFit Ultra Buzz) answers a WearPacket on the
+    // same 16186f00 chunked transport. The list is written from the BLE callback and read from the
+    // UI thread, so it is copy-on-write like the alarm list.
     private FacesScreenController facesScreen;
     private final List<SeCommands.WatchFace> watchFaces =
             new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -294,6 +297,11 @@ public final class MainActivity extends ComponentActivity {
     private boolean facesLoading;
     private Runnable facesTimeout;
     private int watchFaceRuleCount = -1;
+    /**
+     * True while a ZhBracelet face read is in flight. The reassembled 16186f00 payload is a
+     * WearPacket then, not an SEWear envelope, so this routes the reply to the Buzz parser.
+     */
+    private boolean buzzFacePending;
     private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
@@ -1814,7 +1822,14 @@ public final class MainActivity extends ComponentActivity {
             if (++seAnnounceRetries > 4) {
                 seAwaitingReady = false;
                 seCurrentWrite = null;
-                finishPairing(false, "the watch rejected the command announcement");
+                // Only an SE pairing may fall through to another vendor stack here. On a working
+                // ZhBracelet link (the Buzz face read) a rejected write must not restart pairing.
+                if (sePairStarted) {
+                    finishPairing(false, "the watch rejected the command announcement");
+                } else {
+                    logPairing("announce " + write.label + " dropped · link is already bound");
+                    pumpSeWrites();
+                }
                 return;
             }
             // A GATT operation from connection setup may still be in flight; Android rejects
@@ -1898,6 +1913,13 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void onSeMessage(byte[] message) {
+        // The ZhBracelet (ColorFit) profile answers face reads with a WearPacket, not an SEWear
+        // envelope. Route it before anything reads the SE id from field 1, which is the type in a
+        // WearPacket and would be misread as an SE function id.
+        if (buzzFacePending) {
+            onBuzzFaceMessage(message);
+            return;
+        }
         int id = SeWear.readId(message);
         logPairing("SEWear · " + SePairing.describe(message) + " · " + hex(message));
         if (seProbeRunning && (id == SePairing.FUNCTION_GET_DEVICE_INFO
@@ -2342,6 +2364,7 @@ public final class MainActivity extends ComponentActivity {
         // A pending face read belongs to the old link; drop it so the next link starts clean.
         cancelFacesTimeout();
         facesLoading = false;
+        buzzFacePending = false;
     }
 
     private void cancelSeCommandTimeout() {
@@ -3521,6 +3544,7 @@ public final class MainActivity extends ComponentActivity {
     private void preparePairingAttempt() {
         cancelSeTimeouts();
         seTransfer.reset();
+        buzzFacePending = false;
         seWriteQueue.clear();
         seCurrentWrite = null;
         seAwaitingReady = false;
@@ -4364,7 +4388,7 @@ public final class MainActivity extends ComponentActivity {
                 new ArrayList<>(watchAlarms),
                 settingsStatus,
                 settingsStatusIsError,
-                seCommandProfile);
+                facesSupported());
         runOnUiThread(() -> settingsScreen.update(next));
     }
 
@@ -4375,7 +4399,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Watch faces (read-only discovery: SE ids 80 and 85)
+    // Watch faces (read-only discovery: SE ids 80/85 on the Watch Beat, WearPacket on the Buzz)
     // ---------------------------------------------------------------------------------------
 
     private void onOpenWatchFaces() {
@@ -4383,25 +4407,85 @@ public final class MainActivity extends ComponentActivity {
         requestWatchFaceList();
     }
 
+    /**
+     * True when this watch's face list is reachable as a ZhBracelet WearPacket: the ColorFit
+     * profile is active, the {@code 16186f00} protobuf channel is present, and the script channel
+     * is up. The SE command profile never sets this; it takes the {@link #seCommandsActive} branch.
+     */
+    private boolean buzzFacesActive() {
+        return connectionReady && !seCommandProfile
+                && zhWriteChar != null && seWriteChar != null;
+    }
+
+    /** True when the Faces screen and its Settings entry should be offered on this watch. */
+    private boolean facesSupported() {
+        return seCommandProfile || buzzFacesActive();
+    }
+
+    /**
+     * Handles a reassembled WearPacket reply to a ZhBracelet face read. Only the installed-list
+     * shape is interpreted; any other WearPacket is logged and the read keeps waiting.
+     */
+    private void onBuzzFaceMessage(byte[] message) {
+        if (!buzzFacePending) return;
+        if (!BuzzFace.isWatchFace(message)) {
+            logPairing("WearPacket (not a watch face) · " + hex(message));
+            return;
+        }
+        buzzFacePending = false;
+        cancelFacesTimeout();
+        facesLoading = false;
+        List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(message);
+        watchFaces.clear();
+        watchFaces.addAll(faces);
+        // The rule count is an SE id-85 read; the Buzz packet does not carry it.
+        watchFaceRuleCount = -1;
+        String currentId = "";
+        for (SeCommands.WatchFace face : faces) {
+            if (face.current) currentId = face.id;
+        }
+        if (faces.isEmpty()) {
+            setFacesStatus("The watch reported no installed faces.", true);
+        } else {
+            setFacesStatus(faces.size() + (faces.size() == 1 ? " face" : " faces")
+                    + (currentId.isEmpty() ? "" : " · current " + currentId), false);
+        }
+    }
+
     /** Asks the watch for its face list. Read-only: it never sets, removes or uploads a face. */
     private void requestWatchFaceList() {
-        if (!seCommandsActive()) {
+        if (seCommandsActive()) {
+            facesLoading = true;
+            facesStatus = "Reading watch faces...";
+            facesStatusIsError = false;
+            refreshFaces();
+            logPairing("TX watch-face list · read-only");
+            sendSe(SeCommands.requestWatchFaceList(), "watch-face list");
+        } else if (buzzFacesActive()) {
+            // The Buzz carries the face list as a WearPacket on the same 16186f00 chunked
+            // transport the SE profile uses. Open that transport for this read and queue the
+            // packet; the SE command set stays off because seCommandProfile is false here.
+            facesLoading = true;
+            facesStatus = "Reading watch faces...";
+            facesStatusIsError = false;
+            buzzFacePending = true;
+            refreshFaces();
+            logPairing("TX watch-face list · WearPacket GET_INSTALLED_LIST");
+            seTransportOpen = true;
+            sendSe(BuzzFace.requestInstalledList(), "watch-face list");
+        } else {
             facesLoading = false;
-            setFacesStatus(seCommandProfile
+            setFacesStatus(seCommandProfile || zhWriteChar != null
                     ? "Connect the watch to read its faces."
                     : "Watch faces are not available on this watch.", true);
             return;
         }
-        facesLoading = true;
-        facesStatus = "Reading watch faces…";
-        facesStatusIsError = false;
-        refreshFaces();
-        logPairing("TX watch-face list · read-only");
-        sendSe(SeCommands.requestWatchFaceList(), "watch-face list");
         cancelFacesTimeout();
         facesTimeout = () -> {
             facesTimeout = null;
             facesLoading = false;
+            // A pending Buzz read belongs to this attempt; drop it so a late packet is ignored.
+            buzzFacePending = false;
             setFacesStatus("No reply for the watch-face list.", true);
         };
         handler.postDelayed(facesTimeout, SE_COMMAND_TIMEOUT_MS);
@@ -4428,7 +4512,7 @@ public final class MainActivity extends ComponentActivity {
             rows.add(new WatchFaceUi(face.id, face.current, face.removable));
         }
         FacesUiState next = new FacesUiState(
-                seCommandProfile,
+                facesSupported(),
                 connectionReady,
                 rows,
                 watchFaceRuleCount,

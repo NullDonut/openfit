@@ -75,7 +75,7 @@ data class SettingsUiState(
     val alarms: List<AlarmUi> = emptyList(),
     val status: String = "",
     val statusIsError: Boolean = false,
-    /** True only on the SE / Watch Beat profile, where the face commands are wired. */
+    /** True on the profiles where the face commands are wired (SE / Watch Beat and ZhBracelet / ColorFit). */
     val facesSupported: Boolean = false
 )
 
