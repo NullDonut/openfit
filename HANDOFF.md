@@ -637,7 +637,7 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | File | Purpose |
 |---|---|
 | `app/src/main/java/com/openfit/app/protocol/BerryFrame.java` | Frame encode/decode, magics, private command builder, 8-byte ack builder, serial wrap |
-| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus frames: key-108 bind, clock sync, profile, heart-rate measurement start/stop, `0x0B` BPM and `0x0D` daily-history parsing |
+| `app/src/main/java/com/openfit/app/protocol/ZhBraceletBinding.java` | ZhBracelet/NavPlus frames: key-108 bind, clock sync, profile, heart-rate measurement start/stop, `0x0B` BPM and `0x0D` daily-history parsing, plus the recovered settings commands (alarms, sedentary, DND, bright screen, unit, time format, find watch, device info, battery saver, `0x42` acks and `0x7F` private features) |
 | `app/src/main/java/com/openfit/app/protocol/ZhFrameReader.java` | Reassembles `0xAB` frames from split `00000003` notifications |
 | `app/src/main/java/com/openfit/app/protocol/BerryProfile.java` | GATT identifiers incl. `aa01` Berry-over-BLE and the `00000001` ZhBracelet channel |
 | `app/src/main/java/com/openfit/app/protocol/BerryBinding.java` | Vendor bind handshake: token rule, `UserIdBean`, protocol/device-info parsing, cmd 2/3/4 frames, status labels |
@@ -653,10 +653,10 @@ Ryeex opcodes, handshake, envelope and framing were **not** recovered.
 | `app/src/test/java/com/openfit/app/protocol/SeGattTest.java` | 9 tests: chunk math, announce/control golden bytes, packet prefix, out-of-order transfer reassembly |
 | `app/src/test/java/com/openfit/app/protocol/SePairingTest.java` | 13 tests: bind encoder golden bytes, bind-check parsing, result enums, malformed replies |
 | `app/src/test/java/com/openfit/app/protocol/SeWearTest.java` | 4 tests: SE envelope field numbers, empty submessage presence, error code |
-| `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 18 tests: golden bind/time-sync/profile frames, measurement and continuous-HR frames, BPM parsing, key-52 replies, split frames, resync |
+| `app/src/test/java/com/openfit/app/protocol/ZhBraceletBindingTest.java` | 27 tests: golden bind/time-sync/profile frames, measurement and continuous-HR frames, BPM parsing, key-52 replies, split frames, resync, and the settings round-trips (DND/bright/unit/time-format, find watch, step target, private selectors, sedentary, alarms, device info) |
 
 The protocol package is deliberately **Android-free** (plain Java 11), so it compiles and tests
-with `javac` + JUnit without Gradle or the Android SDK (80 tests as of this commit). `MainActivity`
+with `javac` + JUnit without Gradle or the Android SDK (82 tests as of this commit). `MainActivity`
 wires the package into the live GATT link: MTU negotiation, the SE announce/chunk write queue,
 inbound announce/ack handling, reply reassembly, the bind state machine, and per-watch token
 persistence. The SE bind write path itself has **not yet been confirmed by a physical watch**.
@@ -711,6 +711,24 @@ Connection layer added on 2026-11-17 (successful on hardware; the watch stayed u
 Existing app behavior: local dashboard, BLE discovery by recognizable Noise/ColorFit names,
 saved-watch reconnect, QR scanning for a Bluetooth MAC, SIG heart-rate measurement parsing,
 manual sleep notes. No account, analytics, network permission or cloud sync.
+
+### 8.0 Watch Settings tab (2026-11-27)
+
+A fifth Compose tab exposes the commands recovered from `com.zjw.zhbraceletsdk.service.a`:
+
+- watch card: name, address, battery, firmware and a Refresh button;
+- Sync time and Find watch;
+- do-not-disturb, bright screen, continuous HR, sedentary reminder (with a start/end time
+  picker), the alarm list (add/remove one-off alarms) and battery saver;
+- Forget watch, which clears only the local binding/token after a confirmation dialog.
+
+Every write is optimistic and serialised one command at a time. The app sets the control, queues
+the frame and arms a 5 s watchdog; a `0x42` ack (direct keys) or a `0x7F` status (private features)
+resolves it, and a refusal or silence restores the previous value. The alarm list is rewritten in
+one frame, so each alarm's repeat byte is preserved. Device info is requested on every connect;
+the stored sedentary reminder and alarm list are read only on an explicit Refresh, so the
+post-bind burst is never raced. The full key map, private selectors and packed layouts are in
+`PROTOCOL.md`. **Each command still needs an individual hardware check on the Buzz.**
 
 ### 8.1 Build and install workflow
 

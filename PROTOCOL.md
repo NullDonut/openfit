@@ -743,6 +743,101 @@ Zh frame, pumps the next one from `onCharacteristicWrite`, retries a refused fra
 and abandons a missing callback after 3 s. On the saved-binding fast path it also skips the SE
 probe so the two channels never compete for the link.
 
+### Settings commands over ZhBracelet (recovered 2026-11-27)
+
+`com.zjw.zhbraceletsdk.service.a` builds every request and `service.c.b(byte[])` dispatches every
+reply. The constants in `ZhBraceletBinding` mirror those builders byte for byte, and
+`ZhBraceletBindingTest` pins each one. Requests use the same 13-byte header:
+
+```
+AB 00 00 LL 00 00 00 00 01 00 KK PP_HI PP_LO [payload]
+```
+
+#### Outgoing keys
+
+| Key | Payload | SDK builder | Meaning |
+|---|---|---|---|
+| `0x01` | 4 packed bytes | `a.a(Calendar)` | clock sync |
+| `0x02` | 5 bytes per alarm | `a.a(List<AlarmInfo>)` | replace the whole alarm list |
+| `0x03` | 4 bytes big-endian | `a.d(int)` | daily step target |
+| `0x04` | age/height/weight | `a.a(UserInfo)` | user profile |
+| `0x07` | 4 packed bytes | `a.a(SitInfo)` | sedentary reminder |
+| `0x08` | 1 byte | `a.h(boolean)` | unit system |
+| `0x09` | 1 byte | `a.g(boolean)` | 12/24-hour clock |
+| `0x0A` | 1 byte | `a.d(boolean)` | bright screen |
+| `0x18` | none, byte 9 = `0x80` | `a.f()` | find watch |
+| `0x1C` | none | `a.k()` | device-info request |
+| `0x20` | 1 byte | `a.e(boolean)` | do not disturb |
+| `0x29` | 1 byte | `a.j(boolean)` | continuous HR |
+
+`0x18` is the only request that sets bit 7 of header byte 9; every other frame leaves it zero.
+
+#### Incoming keys used by the Settings tab
+
+| Key | Shape | Meaning |
+|---|---|---|
+| `0x08` | battery `[13]`, version `(([7]&255)<<8)|([14]&255)`, tail `[15]` | device info |
+| `0x42` | `[command key] 00 [result]` | set-state ack (`1` accepted, `0` refused) |
+| `0x7F` | `[13]=selector, [14]=status, [15..]=value` | private feature |
+
+The device-info version string is `e.a(versionNumber, tail)`:
+`N` for `<= 20000`, `R` for `10000..19999`, `D` for `20000..29999`, formatted
+`<prefix><body>.<tail/10+1>.<tail%10>` (Buzz: `N1.1.8`). Battery is the percentage in byte 13.
+
+#### Private selectors (`0x7F`)
+
+| Selector | Read | Write | Meaning |
+|---|---|---|---|
+| `0x02` | `[02 00]` | `[02 01 xx]` | quick-eye / raise-to-wake |
+| `0x12` | `[12 00]` | — | sedentary reminder (key `0x07` writes it) |
+| `0x15` | `[15 00]` | — | alarm list (key `0x02` writes it) |
+| `0x22` | `[22 00]` | `[22 01 xx]` | battery saver |
+| `0x27` | `[27 00]` | `[27 01 …]` | meal reminders |
+| `0x2A` | `[2A 00]` | `[2A 01 xx]` | body-temperature unit |
+| `0x69` | `[69 00]` | `[69 01 …]` | time zone |
+| `0x6C` | `[6C 00]` | `[6C 01 …]` | daily goal |
+
+Private replies carry the selector in byte 13 and a status in byte 14: `0` means "read result"
+(the value follows in byte 15), `1` means accepted, `2` means refused. A toggle therefore resolves
+from status `1`/`2`, while a read resolves from status `0` plus its parser.
+
+#### Packed layouts
+
+Sedentary (`0x07`), four bytes:
+
+```
+p0 = enable << 7 | period << 4 | startHour >> 1
+p1 = (startHour & 1) << 7 | startMin << 1 | endHour >> 4
+p2 = (endHour & 15) << 4 | endMin >> 2
+p3 = (endMin & 3) << 6
+```
+
+`period` is the vendor interval code (1..4), stored verbatim. The read reply repeats the same four
+bytes after the selector/status pair.
+
+Alarm record (`0x02`), five bytes:
+
+```
+p0 = yy << 2 | month >> 2
+p1 = (month & 3) << 6 | day << 1 | hour >> 4
+p2 = (hour & 15) << 4 | minute >> 2
+p3 = (minute & 3) << 6 | id << 3
+p4 = repeat byte
+```
+
+`p4 = 128` is a one-off alarm; any other value is the weekday mask. The date is the next
+occurrence: today if the time is still ahead, otherwise tomorrow. The vendor decrements `yy` for a
+repeating alarm, and OpenFit mirrors that so the watch schedules identically. The whole list is
+replaced in one frame, so OpenFit preserves each alarm's `p4` when it adds or removes one.
+
+#### What the Settings tab does
+
+Every control is optimistic and serialised one command at a time. The app sets the switch, queues
+the frame and arms a 5 s watchdog; a `0x42` ack (direct keys) or a `0x7F` status (private features)
+resolves it, and a refusal or silence restores the previous value. Device info is requested on
+every connect; the stored sedentary reminder and alarm list are read only when the user taps
+Refresh, so the post-bind burst is never raced. Find-watch has no ack and simply vibrates.
+
 ### Post-bind push burst (2026-11-18 17:45)
 
 Once the bind is accepted the watch pushes a burst on `00000003` with no request from the phone:
