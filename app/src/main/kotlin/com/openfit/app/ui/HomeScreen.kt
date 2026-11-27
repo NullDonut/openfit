@@ -70,6 +70,7 @@ interface HomeActions {
     fun onManageWatch()
     fun onViewHealth()
     fun onViewSleep()
+    fun onRefresh()
 }
 
 /**
@@ -125,7 +126,10 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
             StressCard(state)
         }
 
-        Spacer(Modifier.height(26.dp))
+        Spacer(Modifier.height(24.dp))
+        SwipeRefreshHint(onClick = actions::onRefresh)
+
+        Spacer(Modifier.height(18.dp))
         Text(
             text = "PRIVATE BY DESIGN     ·     STORED ON THIS PHONE",
             modifier = Modifier.fillMaxWidth(),
@@ -135,6 +139,58 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+/**
+ * The bottom-of-page affordance for the swipe-up gesture. It is also tappable, so the refresh and
+ * reconnect action is discoverable and accessible without the gesture.
+ */
+@Composable
+private fun SwipeRefreshHint(onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainer
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "↑",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "SWIPE UP TO REFRESH",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.3.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "Reconnect to your watch and reload today's data.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 

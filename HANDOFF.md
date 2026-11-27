@@ -3,6 +3,16 @@
 Last updated: 2026-11-27
 Branch: `feature/ble-connection-handling`
 
+## 2026-11-27 — Swipe up on Home to refresh and reconnect
+
+The Home page now has a gesture: once the page is scrolled to its end, a quick upward drag
+(≥72 dp in ≤700 ms) reloads the persisted summary and reconnects the saved watch. Starting only
+when the page is at the end keeps ordinary scrolling unchanged. `MainActivity.dispatchTouchEvent`
+observes the gesture without consuming it, debounces it for 2.5 s, and defers the reconnect past
+the touch dispatch. A tappable `SWIPE UP TO REFRESH` hint at the bottom of Home exposes the same
+action for accessibility. A fresh bind makes the watch push its `0x0D` history and sensor frames
+again, which is what actually refreshes the graph and cards.
+
 ## 2026-11-27 — Auto HR: persist the choice and stop switching it off
 
 The user reported that Auto HR turned on in Settings but the watch never recorded automatic
