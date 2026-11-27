@@ -470,19 +470,40 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onRefreshInfo() { requestWatchInfo(); }
             @Override public void onSyncTime() { syncWatchClock(); }
             @Override public void onFindWatch() { findWatch(); }
-            @Override public void onToggleDoNotDisturb(boolean on) { writeSetting("do not disturb",
-                    ZhBraceletBinding.KEY_DND, -1,
-                    ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_DND, on)); }
-            @Override public void onToggleBrightScreen(boolean on) { writeSetting("bright screen",
-                    ZhBraceletBinding.KEY_BRIGHT_SCREEN, -1,
-                    ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_BRIGHT_SCREEN, on)); }
-            @Override public void onToggleContinuousHr(boolean on) { writeSetting("continuous HR",
-                    ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
-                    ZhBraceletBinding.continuousHeartRateFrame(on)); }
-            @Override public void onToggleBatterySaver(boolean on) { writeSetting("battery saver",
-                    -1, ZhBraceletBinding.PRIVATE_BATTERY_SAVER,
-                    ZhBraceletBinding.privateToggleFrame(
-                            ZhBraceletBinding.PRIVATE_BATTERY_SAVER, on)); }
+            @Override public void onToggleDoNotDisturb(boolean on) {
+                boolean previous = dndEnabled;
+                dndEnabled = on;
+                refreshSettings();
+                writeSetting("do not disturb", ZhBraceletBinding.KEY_DND, -1,
+                        ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_DND, on),
+                        () -> { dndEnabled = previous; refreshSettings(); });
+            }
+            @Override public void onToggleBrightScreen(boolean on) {
+                boolean previous = brightScreenEnabled;
+                brightScreenEnabled = on;
+                refreshSettings();
+                writeSetting("bright screen", ZhBraceletBinding.KEY_BRIGHT_SCREEN, -1,
+                        ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_BRIGHT_SCREEN, on),
+                        () -> { brightScreenEnabled = previous; refreshSettings(); });
+            }
+            @Override public void onToggleContinuousHr(boolean on) {
+                boolean previous = continuousHrEnabled;
+                continuousHrEnabled = on;
+                refreshSettings();
+                writeSetting("continuous HR", ZhBraceletBinding.KEY_CONTINUOUS_HR, -1,
+                        ZhBraceletBinding.continuousHeartRateFrame(on),
+                        () -> { continuousHrEnabled = previous; refreshSettings(); });
+            }
+            @Override public void onToggleBatterySaver(boolean on) {
+                boolean previous = batterySaverEnabled;
+                batterySaverEnabled = on;
+                refreshSettings();
+                writeSetting("battery saver", -1,
+                        ZhBraceletBinding.PRIVATE_BATTERY_SAVER,
+                        ZhBraceletBinding.privateToggleFrame(
+                                ZhBraceletBinding.PRIVATE_BATTERY_SAVER, on),
+                        () -> { batterySaverEnabled = previous; refreshSettings(); });
+            }
             @Override public void onToggleSedentary(boolean on) { sendSedentary(on); }
             @Override public void onEditSedentaryWindow() { showSedentaryWindowEditor(); }
             @Override public void onAddAlarm() { showAlarmEditor(); }
