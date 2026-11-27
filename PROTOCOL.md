@@ -1079,9 +1079,15 @@ OpenFit sends the read-only request `WearPacket{type=WATCH_FACE, id=GET_INSTALLE
 the reply from `watch_face_list` (field 1); OpenFit also accepts `info_list` (field 8) in case the
 firmware reports ids only.
 
-**Status (2026-11-27):** the message layout is decoded, but the Buzz firmware's answer to
-`GET_INSTALLED_LIST` has not been observed on hardware — the vendor app only ever installs a face
-(`PREPARE_INSTALL_WATCH_FACE`). Treat the read as a probe until a device confirms it.
+**Confirmed on hardware (2026-11-27, ColorFit Ultra Buzz).** Opening Watch Faces produced
+`TX watch-face list · WearPacket GET_INSTALLED_LIST` (`08 04 10 00`) and the watch answered on
+`16186f01`. The reply is a `WearPacket{type=WATCH_FACE}` whose `watch_face` carries
+`watch_face_list` (field 1, **not** `info_list`): six built-in entries
+`9999120002100N000000` for `N` = 1..6, with `is_current` set on the first. So the field-1 shape
+and its `is_current` flag are verified; the `info_list` fallback remains a defensive path.
+
+This is read-only: the vendor app only ever installs a face (`PREPARE_INSTALL_WATCH_FACE`), so
+`SET_WATCH_FACE` / removal / custom upload are still unobserved.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
