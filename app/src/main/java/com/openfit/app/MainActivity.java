@@ -1,7 +1,7 @@
 package com.openfit.app;
 
 import android.Manifest;
-import android.app.Activity;
+import androidx.activity.ComponentActivity;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -50,6 +50,8 @@ import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SePairing;
 import com.openfit.app.protocol.ZhBraceletBinding;
 import com.openfit.app.protocol.ZhFrameReader;
+import com.openfit.app.ui.HealthCardController;
+import com.openfit.app.ui.HealthUiState;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
@@ -62,8 +64,14 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Original OpenFit starter UI and conservative BLE Heart Rate Service client. */
-public final class MainActivity extends Activity {
+/**
+ * Original OpenFit starter UI and conservative BLE Heart Rate Service client.
+ *
+ * <p>Extends {@link ComponentActivity} rather than the platform {@link android.app.Activity}
+ * because the Compose health card needs a {@code ViewTreeLifecycleOwner}; ComponentActivity
+ * installs one on its decor view, and it changes none of the platform APIs used here.
+ */
+public final class MainActivity extends ComponentActivity {
     private static final int REQUEST_PERMISSIONS = 10;
     private static final int REQUEST_ENABLE_BLUETOOTH = 11;
     private static final int REQUEST_QR_SCAN = 12;
@@ -162,8 +170,7 @@ public final class MainActivity extends Activity {
     private TextView homeWatchSummary;
     private TextView connectionStatus;
     private TextView deviceStatus;
-    private TextView heartRateValue;
-    private TextView heartSummary;
+    private HealthCardController healthCard;
     private TextView scanStatus;
     private TextView sleepLog;
     private LinearLayout deviceResults;
@@ -447,28 +454,10 @@ public final class MainActivity extends Activity {
         addPanelHeading(healthPanel, "HEALTH", "Your data, at a glance");
         healthPanel.addView(section, lp(-1, -2, 1, 12, 0, 10));
 
-        LinearLayout heartCard = card();
-        healthPanel.addView(heartCard, lp(-1, -2, 0, 0, 0, 12));
-        LinearLayout heartHeading = new LinearLayout(this);
-        heartHeading.setGravity(Gravity.CENTER_VERTICAL);
-        heartCard.addView(heartHeading, lp(-1, -2));
-        TextView heartTitle = text("Heart rate", 16, C_TEXT, true);
-        heartHeading.addView(heartTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView heartIcon = text("♥", 16, C_RED, true);
-        heartHeading.addView(heartIcon, lp(-2, -2));
-        LinearLayout metricRow = new LinearLayout(this);
-        metricRow.setGravity(Gravity.BOTTOM);
-        heartCard.addView(metricRow, lp(-1, -2, 0, 9, 0, 0));
-        heartRateValue = text("--", 58, C_TEXT, true);
-        metricRow.addView(heartRateValue, lp(-2, -2));
-        TextView bpm = text(" bpm", 13, C_MUTED, false);
-        metricRow.addView(bpm, lp(-2, -2, 0, 0, 0, 10));
-        TextView heartNote = text("Latest reading from your connected device", 12, C_MUTED, false);
-        heartNote.setLineSpacing(dp(2), 1f);
-        heartCard.addView(heartNote, lp(-1, -2, 0, 3, 0, 0));
-        heartSummary = text("No readings yet", 12, C_MUTED, false);
-        heartSummary.setLineSpacing(dp(2), 1f);
-        heartCard.addView(heartSummary, lp(-1, -2, 0, 10, 0, 0));
+        // The heart card is a Compose Material 3 Expressive surface; the rest of the dashboard
+        // stays on the existing Views layout so the BLE screens are untouched.
+        healthCard = new HealthCardController();
+        healthPanel.addView(healthCard.createView(this), lp(-1, -2, 0, 0, 0, 12));
 
         sleepPanel = panel();
         page.addView(sleepPanel);
@@ -2136,7 +2125,7 @@ public final class MainActivity extends Activity {
                 logPairing("ZhBracelet HR history · " + history.date + " · latest "
                         + history.recent + " bpm · " + history.sampleCount + " sample(s) · day "
                         + history.dayMin + "–" + history.dayMax + " avg " + history.dayAverage);
-                if (history.recent > 0) showHeartRate(history.recent);
+                if (history.recent > 0) showHeartRate(history.recent, history);
                 continue;
             }
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
@@ -3066,11 +3055,21 @@ public final class MainActivity extends Activity {
         showHeartRate(bpm);
     }
 
-    /** Shows and stores one reading; safe to call from any thread. */
+    /** Shows and stores one live reading; safe to call from any thread. */
     private void showHeartRate(int bpm) {
+        showHeartRate(bpm, null);
+    }
+
+    /**
+     * Stores a reading and refreshes the card. A non-null [history] replaces the local daily
+     * summary with the watch's own five-minute statistics, so one history snapshot is not
+     * described as a "minute sample".
+     */
+    private void showHeartRate(int bpm, ZhBraceletBinding.HeartRateHistory history) {
         runOnUiThread(() -> {
-            heartRateValue.setText(String.valueOf(bpm));
-            recordHeartRate(bpm);
+            if (history != null) recordHeartRateHistory(history);
+            else recordHeartRate(bpm);
+            refreshHeartSummary();
         });
     }
 
@@ -3081,7 +3080,8 @@ public final class MainActivity extends Activity {
         String today = java.time.LocalDate.now().toString();
         android.content.SharedPreferences.Editor editor = prefs.edit()
                 .putInt(KEY_HEART_RATE, bpm)
-                .putLong(KEY_HEART_RATE_TIME, now);
+                .putLong(KEY_HEART_RATE_TIME, now)
+                .putString("heart_rate_source", "Live reading");
         if (!today.equals(prefs.getString("heart_rate_day", ""))) {
             editor.putString("heart_rate_day", today)
                     .putInt("heart_rate_min", bpm)
@@ -3097,21 +3097,48 @@ public final class MainActivity extends Activity {
             }
         }
         editor.apply();
-        refreshHeartSummary();
+    }
+
+    /** Replaces the daily summary with the watch's own five-minute history statistics. */
+    private void recordHeartRateHistory(ZhBraceletBinding.HeartRateHistory history) {
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        long now = System.currentTimeMillis();
+        prefs.edit()
+                .putInt(KEY_HEART_RATE, history.recent)
+                .putLong(KEY_HEART_RATE_TIME, now)
+                .putString("heart_rate_source", "Watch history")
+                .putString("heart_rate_day", history.date)
+                .putInt("heart_rate_min", history.dayMin)
+                .putInt("heart_rate_max", history.dayMax)
+                .putInt("heart_rate_samples", history.sampleCount)
+                .putLong("heart_rate_sample_minute", now / 60_000L)
+                .apply();
     }
 
     private void refreshHeartSummary() {
+        if (healthCard == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         int bpm = prefs.getInt(KEY_HEART_RATE, -1);
-        if (bpm < 0) { heartSummary.setText("No readings yet"); return; }
-        String latest = "Latest · " + DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault())
-                .format(new Date(prefs.getLong(KEY_HEART_RATE_TIME, 0L)));
-        if (java.time.LocalDate.now().toString().equals(prefs.getString("heart_rate_day", ""))) {
-            latest += "\nToday · " + prefs.getInt("heart_rate_min", bpm) + "–"
-                    + prefs.getInt("heart_rate_max", bpm) + " bpm · "
-                    + prefs.getInt("heart_rate_samples", 1) + " minute samples";
+        if (bpm < 0) {
+            healthCard.update(new HealthUiState(-1, "", "No readings yet",
+                    "Connect your watch to read its daily heart-rate history."));
+            return;
         }
-        heartSummary.setText(latest);
+        String source = prefs.getString("heart_rate_source", "Saved reading");
+        String day = prefs.getString("heart_rate_day", "");
+        boolean today = java.time.LocalDate.now().toString().equals(day);
+        String summary;
+        if (!today) {
+            summary = "Last reading · " + (day.isEmpty() ? "unknown day" : day);
+        } else {
+            String samples = prefs.getInt("heart_rate_samples", 1)
+                    + ("Watch history".equals(source) ? " five-minute samples" : " minute samples");
+            summary = "Today · " + prefs.getInt("heart_rate_min", bpm) + "–"
+                    + prefs.getInt("heart_rate_max", bpm) + " bpm · " + samples;
+        }
+        String detail = "Latest · " + DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault())
+                .format(new Date(prefs.getLong(KEY_HEART_RATE_TIME, 0L)));
+        healthCard.update(new HealthUiState(bpm, source, summary, detail));
     }
 
     private void showSleepEditor() {

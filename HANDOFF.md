@@ -119,6 +119,15 @@ reconnect loop: the Reconnect button became visible as soon as GATT connected, a
 notification setup each opened a new GATT client (seven `Connect requested` lines in five
 seconds, each restarting discovery). `connect()` now refuses while a setup is in progress, the
 button stays hidden until the link is ready, and every early exit clears the setup flag.
+
+The first UI step landed on 2026-11-27: the Health tab's heart card is now Compose Material 3
+Expressive (`material3` 1.4.0 via BOM 2025.10.01, Kotlin 2.2.21, `MaterialExpressiveTheme` with
+`MotionScheme.expressive()`). Everything else stays on Views, and the card is hosted through
+`HealthCardController`/`ComposeView` so the BLE code is untouched. It shows a source chip
+(`Watch history` or `Live reading`) and, for history, the watch's five-minute sample count
+instead of implying continuous monitoring. The build now needs Kotlin and the Compose compiler
+plugin; CI still uses Gradle 8.9, and material3 1.5.x was deliberately avoided because it needs
+compileSdk 37 / AGP 9.1.
 Latest docs commit: this file (see `git log`)
 
 This file is the single-page handoff: what was learned, what exists, how the machine is set up,

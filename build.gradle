@@ -1,3 +1,8 @@
 plugins {
     id 'com.android.application' version '8.6.1' apply false
+    // Kotlin 2.2.21 is the newest line that still supports the project's Gradle 8.9 / AGP 8.6.1
+    // toolchain, and it matches the Compose 1.9 / material3 1.4 release train. The Compose
+    // compiler ships with Kotlin from 2.0 onward, so both versions match.
+    id 'org.jetbrains.kotlin.android' version '2.2.21' apply false
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.2.21' apply false
 }
