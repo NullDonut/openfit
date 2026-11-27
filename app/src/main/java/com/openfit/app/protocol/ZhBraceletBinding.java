@@ -414,6 +414,7 @@ public final class ZhBraceletBinding {
         String date = parseSleepDate(frame);
         if (date == null) return null;
         int deep = 0, light = 0, rem = 0, awake = 0, stayUp = 0;
+        java.util.List<SleepStage> stages = new java.util.ArrayList<>();
         for (int i = 0; i + 1 < count; i++) {
             int at = 16 + i * 2;
             int next = at + 2;
@@ -421,7 +422,9 @@ public final class ZhBraceletBinding {
             int end = recordMinutes(frame[next], frame[next + 1]);
             int minutes = end - start;
             if (minutes < 0) minutes += 24 * 60;
-            switch (frame[at + 1] & 0x0F) {
+            int stage = frame[at + 1] & 0x0F;
+            stages.add(new SleepStage(start, stage));
+            switch (stage) {
                 case 1: awake += minutes; break;
                 case 2: light += minutes; break;
                 case 3: deep += minutes; break;
@@ -430,7 +433,59 @@ public final class ZhBraceletBinding {
                 default: break;
             }
         }
-        return new SleepSummary(date, deep + light, deep, light, rem, awake, stayUp);
+        int startMinute = stages.isEmpty() ? 0 : stages.get(0).startMinute;
+        int lastAt = 16 + (count - 1) * 2;
+        int endMinute = count == 0 ? 0
+                : recordMinutes(frame[lastAt], frame[lastAt + 1]);
+        return new SleepSummary(date, deep + light, deep, light, rem, awake, stayUp,
+                startMinute, endMinute, stages);
+    }
+
+    /**
+     * Encodes the ordered stage runs as {@code start:stage} pairs joined by commas so the phone can
+     * persist the night's shape and redraw a hypnogram later without the watch frame.
+     */
+    public static String encodeSleepStages(java.util.List<SleepStage> stages) {
+        if (stages == null || stages.isEmpty()) return "";
+        StringBuilder out = new StringBuilder();
+        for (SleepStage stage : stages) {
+            if (out.length() > 0) out.append(',');
+            out.append(stage.startMinute).append(':').append(stage.stage);
+        }
+        return out.toString();
+    }
+
+    /** Reverses {@link #encodeSleepStages}; malformed entries are skipped rather than failing. */
+    public static java.util.List<SleepStage> decodeSleepStages(String csv) {
+        java.util.List<SleepStage> stages = new java.util.ArrayList<>();
+        if (csv == null || csv.isEmpty()) return stages;
+        for (String part : csv.split(",")) {
+            int colon = part.indexOf(':');
+            if (colon < 0) continue;
+            try {
+                int start = Integer.parseInt(part.substring(0, colon).trim());
+                int stage = Integer.parseInt(part.substring(colon + 1).trim());
+                stages.add(new SleepStage(start, stage));
+            } catch (NumberFormatException ignored) {
+                // A corrupt entry cannot produce a stage run, so drop just that one.
+            }
+        }
+        return stages;
+    }
+
+    /** One sleep stage run: [startMinute] is minutes since midnight, [stage] the vendor code. */
+    public static final class SleepStage {
+        public final int startMinute;
+        public final int stage;
+
+        public SleepStage(int startMinute, int stage) {
+            this.startMinute = startMinute;
+            this.stage = stage;
+        }
+
+        @Override public String toString() {
+            return startMinute + ":" + stage;
+        }
     }
 
     /** Offline SpO2 frame ({@code c.F(byte[])}): 5-byte records of time then percentage. */
@@ -787,7 +842,7 @@ public final class ZhBraceletBinding {
         }
     }
 
-    /** One decoded {@link #KEY_SLEEP_DATA} frame; every field is in minutes. */
+    /** One decoded {@link #KEY_SLEEP_DATA} frame; every duration field is in minutes. */
     public static final class SleepSummary {
         public final String date;
         /** Deep + light, matching the vendor's headline sleep duration (REM is separate). */
@@ -797,9 +852,16 @@ public final class ZhBraceletBinding {
         public final int rem;
         public final int awake;
         public final int stayUp;
+        /** Minutes since midnight of the first stage run (the night's start). */
+        public final int startMinute;
+        /** Minutes since midnight of the final record, i.e. the morning wake marker. */
+        public final int endMinute;
+        /** The ordered stage runs; each lasts until the next one begins. */
+        public final java.util.List<SleepStage> stages;
 
         public SleepSummary(String date, int total, int deep, int light, int rem,
-                            int awake, int stayUp) {
+                            int awake, int stayUp, int startMinute, int endMinute,
+                            java.util.List<SleepStage> stages) {
             this.date = date;
             this.total = total;
             this.deep = deep;
@@ -807,11 +869,15 @@ public final class ZhBraceletBinding {
             this.rem = rem;
             this.awake = awake;
             this.stayUp = stayUp;
+            this.startMinute = startMinute;
+            this.endMinute = endMinute;
+            this.stages = stages == null ? java.util.Collections.emptyList() : stages;
         }
 
         @Override public String toString() {
             return "SleepSummary{date=" + date + ", total=" + total + ", deep=" + deep
-                    + ", light=" + light + ", rem=" + rem + ", awake=" + awake + '}';
+                    + ", light=" + light + ", rem=" + rem + ", awake=" + awake
+                    + ", stages=" + stages.size() + '}';
         }
     }
 

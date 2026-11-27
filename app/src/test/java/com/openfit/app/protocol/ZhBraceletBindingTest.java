@@ -470,6 +470,43 @@ public class ZhBraceletBindingTest {
         assertEquals(0, sleep.awake);
     }
 
+    @Test public void parseSleepKeepsTheStageTimeline() {
+        // Same night: the runs and the wake marker are exposed so the app can draw a hypnogram.
+        byte[] frame = reply(ZhBraceletBinding.KEY_SLEEP_DATA, new byte[] {
+            0x35, 0x7B, 0x04,
+            (byte) 0xB8, 0x02,
+            0x03, (byte) 0xC3,
+            0x0B, (byte) 0xC4,
+            0x10, 0x01
+        });
+        ZhBraceletBinding.SleepSummary sleep = ZhBraceletBinding.parseSleep(frame);
+        assertNotNull(sleep);
+        assertEquals(1380, sleep.startMinute); // 23:00
+        assertEquals(120, sleep.endMinute);    // 02:00
+        assertEquals(3, sleep.stages.size());
+        assertEquals(1380, sleep.stages.get(0).startMinute);
+        assertEquals(2, sleep.stages.get(0).stage);
+        assertEquals(30, sleep.stages.get(1).startMinute);
+        assertEquals(3, sleep.stages.get(1).stage);
+        assertEquals(90, sleep.stages.get(2).startMinute);
+        assertEquals(4, sleep.stages.get(2).stage);
+    }
+
+    @Test public void sleepStageEncodingRoundTripsAndSkipsJunk() {
+        java.util.List<ZhBraceletBinding.SleepStage> stages = new java.util.ArrayList<>();
+        stages.add(new ZhBraceletBinding.SleepStage(1380, 2));
+        stages.add(new ZhBraceletBinding.SleepStage(30, 3));
+        String encoded = ZhBraceletBinding.encodeSleepStages(stages);
+        assertEquals("1380:2,30:3", encoded);
+        java.util.List<ZhBraceletBinding.SleepStage> back =
+                ZhBraceletBinding.decodeSleepStages(encoded);
+        assertEquals(2, back.size());
+        assertEquals(1380, back.get(0).startMinute);
+        assertEquals(2, back.get(0).stage);
+        assertEquals(3, back.get(1).stage);
+        assertTrue(ZhBraceletBinding.decodeSleepStages("garbage,,7:x").isEmpty());
+    }
+
     @Test public void parseSleepRollsTheDateOverNewYear() {
         // Packed 2026-12-31 -> the vendor labels the morning as 2027-01-01.
         byte[] frame = reply(ZhBraceletBinding.KEY_SLEEP_DATA, new byte[] {

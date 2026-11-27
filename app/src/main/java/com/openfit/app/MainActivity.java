@@ -67,6 +67,7 @@ import com.openfit.app.ui.SedentaryUi;
 import com.openfit.app.ui.AlarmUi;
 import com.openfit.app.ui.WatchInfoUi;
 import com.openfit.app.ui.SleepScreenController;
+import com.openfit.app.ui.SleepStagePoint;
 import com.openfit.app.ui.SleepUiState;
 
 import java.text.DateFormat;
@@ -197,7 +198,12 @@ public final class MainActivity extends ComponentActivity {
     private static final String KEY_SENSOR_SLEEP_DEEP = "sensor_sleep_deep";
     private static final String KEY_SENSOR_SLEEP_LIGHT = "sensor_sleep_light";
     private static final String KEY_SENSOR_SLEEP_REM = "sensor_sleep_rem";
+    private static final String KEY_SENSOR_SLEEP_AWAKE = "sensor_sleep_awake";
+    private static final String KEY_SENSOR_SLEEP_STAY_UP = "sensor_sleep_stay_up";
     private static final String KEY_SENSOR_SLEEP_DATE = "sensor_sleep_date";
+    private static final String KEY_SENSOR_SLEEP_START = "sensor_sleep_start";
+    private static final String KEY_SENSOR_SLEEP_END = "sensor_sleep_end";
+    private static final String KEY_SENSOR_SLEEP_STAGES = "sensor_sleep_stages";
     private static final String KEY_SENSOR_SPO2 = "sensor_spo2_value";
     private static final String KEY_SENSOR_SPO2_TIME = "sensor_spo2_time";
     private static final String KEY_SENSOR_STRESS = "sensor_stress_value";
@@ -3498,9 +3504,16 @@ public final class MainActivity extends ComponentActivity {
                     .putInt(KEY_SENSOR_SLEEP_DEEP, sleep.deep)
                     .putInt(KEY_SENSOR_SLEEP_LIGHT, sleep.light)
                     .putInt(KEY_SENSOR_SLEEP_REM, sleep.rem)
+                    .putInt(KEY_SENSOR_SLEEP_AWAKE, sleep.awake)
+                    .putInt(KEY_SENSOR_SLEEP_STAY_UP, sleep.stayUp)
                     .putString(KEY_SENSOR_SLEEP_DATE, sleep.date)
+                    .putInt(KEY_SENSOR_SLEEP_START, sleep.startMinute)
+                    .putInt(KEY_SENSOR_SLEEP_END, sleep.endMinute)
+                    .putString(KEY_SENSOR_SLEEP_STAGES,
+                            ZhBraceletBinding.encodeSleepStages(sleep.stages))
                     .apply();
             refreshSensorCards();
+            runOnUiThread(this::refreshSleepSummary);
             return true;
         }
         List<ZhBraceletBinding.SensorSample> spo2 = ZhBraceletBinding.parseSpo2(frame);
@@ -3682,12 +3695,48 @@ public final class MainActivity extends ComponentActivity {
     private void refreshSleepSummary() {
         if (sleepScreen == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        int watchTotal = prefs.getInt(KEY_SENSOR_SLEEP, 0);
+        if (watchTotal > 0) {
+            // The watch pushed a real night; prefer it and add back the saved hypnogram shape.
+            sleepScreen.update(new SleepUiState(
+                    watchTotal,
+                    prefs.getInt(KEY_SENSOR_SLEEP_DEEP, 0),
+                    prefs.getInt(KEY_SENSOR_SLEEP_LIGHT, 0),
+                    prefs.getInt(KEY_SENSOR_SLEEP_REM, 0),
+                    prefs.getInt(KEY_SENSOR_SLEEP_AWAKE, 0),
+                    prefs.getInt(KEY_SENSOR_SLEEP_STAY_UP, 0),
+                    sleepLabel(prefs.getString(KEY_SENSOR_SLEEP_DATE, "")),
+                    true,
+                    prefs.getInt(KEY_SENSOR_SLEEP_START, 0),
+                    prefs.getInt(KEY_SENSOR_SLEEP_END, 0),
+                    toSleepStagePoints(ZhBraceletBinding.decodeSleepStages(
+                            prefs.getString(KEY_SENSOR_SLEEP_STAGES, "")))));
+            return;
+        }
         int duration = prefs.getInt(KEY_SLEEP_MINUTES, 0);
-        if (duration <= 0) { sleepScreen.update(new SleepUiState(0, "")); return; }
-        String date = prefs.getString(KEY_SLEEP_DATE, "");
-        String label = date.equals(java.time.LocalDate.now().toString())
+        if (duration <= 0) {
+            sleepScreen.update(new SleepUiState(0, 0, 0, 0, 0, 0, "", false, 0, 0,
+                    new ArrayList<>()));
+            return;
+        }
+        sleepScreen.update(new SleepUiState(duration, 0, 0, 0, 0, 0,
+                sleepLabel(prefs.getString(KEY_SLEEP_DATE, "")), false, 0, 0,
+                new ArrayList<>()));
+    }
+
+    private static String sleepLabel(String date) {
+        if (date == null || date.isEmpty()) return "";
+        return date.equals(java.time.LocalDate.now().toString())
                 ? "LAST NIGHT" : date.toUpperCase(Locale.ROOT);
-        sleepScreen.update(new SleepUiState(duration, label));
+    }
+
+    private static List<SleepStagePoint> toSleepStagePoints(
+            List<ZhBraceletBinding.SleepStage> stages) {
+        List<SleepStagePoint> points = new ArrayList<>();
+        for (ZhBraceletBinding.SleepStage stage : stages) {
+            points.add(new SleepStagePoint(stage.startMinute, stage.stage));
+        }
+        return points;
     }
 
     /** Keeps the Compose Home tab in sync; safe to call from a BLE callback thread. */

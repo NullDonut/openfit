@@ -3,6 +3,26 @@
 Last updated: 2026-11-27
 Branch: `feature/ble-connection-handling`
 
+## 2026-11-27 — Sleep detail page: hypnogram and stage breakdown
+
+The Sleep page was the last old-style screen: it showed only a manual "personal log" duration.
+It now mirrors the Health page. `ZhBraceletBinding.parseSleep` keeps the ordered stage runs
+(`SleepStage`) plus the night's start/end minutes in `SleepSummary` instead of discarding them
+once the totals are summed; the new `encodeSleepStages`/`decodeSleepStages` persist that timeline
+as CSV so the night's shape survives a restart. `MainActivity` stores the extra fields
+(`KEY_SENSOR_SLEEP_START`, `KEY_SENSOR_SLEEP_END`, `KEY_SENSOR_SLEEP_STAGES`, plus awake/stay-up)
+when the `0x03` frame arrives, and posts `refreshSleepSummary()` to the UI thread because the
+frame is handled on the BLE callback thread.
+
+`SleepScreen.kt` now shows a dot-matrix hour/minute hero, a FROM WATCH / PHONE NOTE pill, a
+stacked stage bar with a DEEP/LIGHT/REM/AWAKE legend, and a hypnogram (a stepped line across the
+night's clock axis over faint band guides). When the watch has not pushed a night, the page falls
+back to the manual note and keeps the "Add sleep duration" editor. The headline total is still the
+vendor's deep + light, with REM reported separately.
+
+Local verification: the protocol suite now runs 101 tests (two new — the stage timeline, and the
+stage-CSV round trip). CI builds the APK.
+
 ## 2026-11-27 — navigation restructure, onboarding, launch reconnect, HR graph
 
 The bottom navigation bar is gone. `MainActivity` now keeps a tiny screen stack rooted at Home:
