@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.sp
  *
  * Built in Java from the persisted heart-rate summary, so Compose stays a pure presentation
  * layer and the BLE code keeps owning the data. [bpm] of -1 means "no reading yet".
+ * [sensors] holds the read-only history frames the watch pushes (steps, sleep, SpO2, ...);
+ * an empty list hides that section entirely.
  */
 data class HealthUiState(
     val bpm: Int,
@@ -45,7 +47,19 @@ data class HealthUiState(
     val dayLabel: String,
     val low: Int,
     val high: Int,
-    val samples: Int
+    val samples: Int,
+    val sensors: List<SensorCard> = emptyList()
+)
+
+/**
+ * One read-only watch-history value. [value] is already formatted for display; [unit] may be
+ * empty. [detail] says where the number came from (a date, or "LAST <time>").
+ */
+data class SensorCard(
+    val label: String,
+    val value: String,
+    val unit: String,
+    val detail: String
 )
 
 /**
@@ -110,8 +124,69 @@ private fun HealthScreen(state: HealthUiState) {
             }
         }
 
+        if (state.sensors.isNotEmpty()) {
+            Spacer(Modifier.height(22.dp))
+            Eyebrow("WATCH HISTORY")
+            Spacer(Modifier.height(8.dp))
+            state.sensors.chunked(2).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    row.forEach { SensorTile(it, Modifier.weight(1f)) }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+
         Spacer(Modifier.height(14.dp))
         AboutCard()
+    }
+}
+
+@Composable
+private fun SensorTile(card: SensorCard, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text(
+                text = card.label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.1.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = card.value,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (card.unit.isNotEmpty()) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = card.unit,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 3.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = card.detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -245,8 +320,11 @@ private fun AboutCard() {
             Eyebrow("ABOUT THIS DATA")
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "Your watch records a heart rate every five minutes. OpenFit shows the " +
-                    "samples it receives; gaps mean the watch was off or not worn. " +
+                text = "Your watch records a heart rate every five minutes and keeps its own " +
+                    "history for steps, sleep, SpO2, stress, wrist temperature and blood " +
+                    "pressure. OpenFit only reads what the watch sends after it connects; " +
+                    "gaps mean the watch was off or not worn. Wrist temperature is shown as " +
+                    "the watch's raw value because its scale is not published. " +
                     "This is not a medical device.",
                 style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant

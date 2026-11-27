@@ -59,6 +59,7 @@ import com.openfit.app.ui.HealthUiState;
 import com.openfit.app.ui.HomeActions;
 import com.openfit.app.ui.HomeScreenController;
 import com.openfit.app.ui.HomeUiState;
+import com.openfit.app.ui.SensorCard;
 import com.openfit.app.ui.SettingsActions;
 import com.openfit.app.ui.SettingsScreenController;
 import com.openfit.app.ui.SettingsUiState;
@@ -172,6 +173,26 @@ public final class MainActivity extends ComponentActivity {
     private static final String KEY_SLEEP_DATE = "sleep_date";
     private static final String KEY_HEART_RATE = "heart_rate";
     private static final String KEY_HEART_RATE_TIME = "heart_rate_time";
+    /** Latest read-only sensor values the watch pushed; all prefixed to keep them apart. */
+    private static final String KEY_SENSOR_STEPS = "sensor_steps_total";
+    private static final String KEY_SENSOR_STEPS_DATE = "sensor_steps_date";
+    private static final String KEY_SENSOR_ACTIVITY = "sensor_activity_minutes";
+    private static final String KEY_SENSOR_ACTIVITY_DATE = "sensor_activity_date";
+    private static final String KEY_SENSOR_SLEEP = "sensor_sleep_total";
+    private static final String KEY_SENSOR_SLEEP_DEEP = "sensor_sleep_deep";
+    private static final String KEY_SENSOR_SLEEP_LIGHT = "sensor_sleep_light";
+    private static final String KEY_SENSOR_SLEEP_REM = "sensor_sleep_rem";
+    private static final String KEY_SENSOR_SLEEP_DATE = "sensor_sleep_date";
+    private static final String KEY_SENSOR_SPO2 = "sensor_spo2_value";
+    private static final String KEY_SENSOR_SPO2_TIME = "sensor_spo2_time";
+    private static final String KEY_SENSOR_STRESS = "sensor_stress_value";
+    private static final String KEY_SENSOR_STRESS_TIME = "sensor_stress_time";
+    private static final String KEY_SENSOR_TEMP = "sensor_temp_raw";
+    private static final String KEY_SENSOR_TEMP_TIME = "sensor_temp_time";
+    private static final String KEY_SENSOR_BP_SYS = "sensor_bp_sys";
+    private static final String KEY_SENSOR_BP_DIA = "sensor_bp_dia";
+    private static final String KEY_SENSOR_BP_PULSE = "sensor_bp_pulse";
+    private static final String KEY_SENSOR_BP_TIME = "sensor_bp_time";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
@@ -2169,6 +2190,7 @@ public final class MainActivity extends ComponentActivity {
                 if (history.recent > 0) showHeartRate(history.recent, history);
                 continue;
             }
+            if (handleSensorFrame(frame)) continue;
             ZhBraceletBinding.BindInfo info = ZhBraceletBinding.parseBindInfo(frame);
             if (info == null) {
                 ZhBraceletBinding.Ack ack = ZhBraceletBinding.parseAck(frame);
@@ -3162,9 +3184,10 @@ public final class MainActivity extends ComponentActivity {
     private void refreshHeartSummary() {
         if (healthScreen == null) return;
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        List<SensorCard> sensors = buildSensorCards();
         int bpm = prefs.getInt(KEY_HEART_RATE, -1);
         if (bpm < 0) {
-            healthScreen.update(new HealthUiState(-1, "", "", "", 0, 0, 0));
+            healthScreen.update(new HealthUiState(-1, "", "", "", 0, 0, 0, sensors));
             return;
         }
         String source = prefs.getString("heart_rate_source", "Saved reading");
@@ -3181,7 +3204,187 @@ public final class MainActivity extends ComponentActivity {
                 dayLabel,
                 prefs.getInt("heart_rate_min", bpm),
                 prefs.getInt("heart_rate_max", bpm),
-                prefs.getInt("heart_rate_samples", 1)));
+                prefs.getInt("heart_rate_samples", 1),
+                sensors));
+    }
+
+    /**
+     * Decodes the read-only sensor-history frames the watch pushes after a bind. Each value is
+     * stored so the Health tab still has it after a restart. Returns true when the frame was a
+     * sensor frame, so the caller stops trying the other parsers.
+     */
+    private boolean handleSensorFrame(byte[] frame) {
+        ZhBraceletBinding.Steps steps = ZhBraceletBinding.parseSteps(frame);
+        if (steps != null) {
+            logPairing("ZhBracelet steps · " + steps.date + " · " + steps.total + " steps");
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putInt(KEY_SENSOR_STEPS, steps.total)
+                    .putString(KEY_SENSOR_STEPS_DATE, steps.date)
+                    .apply();
+            refreshSensorCards();
+            return true;
+        }
+        ZhBraceletBinding.Activity activity = ZhBraceletBinding.parseActivity(frame);
+        if (activity != null) {
+            logPairing("ZhBracelet activity · " + activity.date + " · "
+                    + activity.totalMinutes + " active min");
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putInt(KEY_SENSOR_ACTIVITY, activity.totalMinutes)
+                    .putString(KEY_SENSOR_ACTIVITY_DATE, activity.date)
+                    .apply();
+            refreshSensorCards();
+            return true;
+        }
+        ZhBraceletBinding.SleepSummary sleep = ZhBraceletBinding.parseSleep(frame);
+        if (sleep != null) {
+            logPairing("ZhBracelet sleep · " + sleep.date + " · " + sleep.total
+                    + " min (deep " + sleep.deep + ", light " + sleep.light
+                    + ", REM " + sleep.rem + ")");
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putInt(KEY_SENSOR_SLEEP, sleep.total)
+                    .putInt(KEY_SENSOR_SLEEP_DEEP, sleep.deep)
+                    .putInt(KEY_SENSOR_SLEEP_LIGHT, sleep.light)
+                    .putInt(KEY_SENSOR_SLEEP_REM, sleep.rem)
+                    .putString(KEY_SENSOR_SLEEP_DATE, sleep.date)
+                    .apply();
+            refreshSensorCards();
+            return true;
+        }
+        List<ZhBraceletBinding.SensorSample> spo2 = ZhBraceletBinding.parseSpo2(frame);
+        if (spo2 != null) {
+            if (!spo2.isEmpty()) {
+                ZhBraceletBinding.SensorSample latest = spo2.get(spo2.size() - 1);
+                logPairing("ZhBracelet SpO2 · " + spo2.size() + " record(s) · latest "
+                        + latest.value + "% at " + latest.time);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putInt(KEY_SENSOR_SPO2, latest.value)
+                        .putString(KEY_SENSOR_SPO2_TIME, latest.time)
+                        .apply();
+                refreshSensorCards();
+            }
+            return true;
+        }
+        List<ZhBraceletBinding.SensorSample> stress = ZhBraceletBinding.parseStress(frame);
+        if (stress != null) {
+            if (!stress.isEmpty()) {
+                ZhBraceletBinding.SensorSample latest = stress.get(stress.size() - 1);
+                logPairing("ZhBracelet stress · " + stress.size() + " record(s) · latest "
+                        + latest.value + " at " + latest.time);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putInt(KEY_SENSOR_STRESS, latest.value)
+                        .putString(KEY_SENSOR_STRESS_TIME, latest.time)
+                        .apply();
+                refreshSensorCards();
+            }
+            return true;
+        }
+        List<ZhBraceletBinding.TempSample> temps = ZhBraceletBinding.parseBodyTemperature(frame);
+        if (temps != null) {
+            if (!temps.isEmpty()) {
+                ZhBraceletBinding.TempSample latest = temps.get(temps.size() - 1);
+                logPairing("ZhBracelet temperature · " + temps.size() + " record(s) · latest raw "
+                        + latest.raw + " (diff " + latest.difference + ") at " + latest.time);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putInt(KEY_SENSOR_TEMP, latest.raw)
+                        .putString(KEY_SENSOR_TEMP_TIME, latest.time)
+                        .apply();
+                refreshSensorCards();
+            }
+            return true;
+        }
+        List<ZhBraceletBinding.BloodPressureSample> bp =
+                ZhBraceletBinding.parseOfflineBloodPressure(frame);
+        if (bp != null) {
+            if (!bp.isEmpty()) {
+                ZhBraceletBinding.BloodPressureSample latest = bp.get(bp.size() - 1);
+                logPairing("ZhBracelet blood pressure · " + bp.size() + " record(s) · latest "
+                        + latest.systolic + "/" + latest.diastolic + " · pulse " + latest.pulse
+                        + " at " + latest.time);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putInt(KEY_SENSOR_BP_SYS, latest.systolic)
+                        .putInt(KEY_SENSOR_BP_DIA, latest.diastolic)
+                        .putInt(KEY_SENSOR_BP_PULSE, latest.pulse)
+                        .putString(KEY_SENSOR_BP_TIME, latest.time)
+                        .apply();
+                refreshSensorCards();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** Rebuilds the Health tab from the BLE thread; Compose state is only touched on the UI thread. */
+    private void refreshSensorCards() {
+        runOnUiThread(this::refreshHeartSummary);
+    }
+
+    /** Read-only sensor cards from the last values the watch pushed. */
+    private List<SensorCard> buildSensorCards() {
+        android.content.SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        List<SensorCard> cards = new ArrayList<>();
+        if (p.contains(KEY_SENSOR_STEPS)) {
+            cards.add(new SensorCard("STEPS",
+                    java.text.NumberFormat.getIntegerInstance(Locale.getDefault())
+                            .format(p.getInt(KEY_SENSOR_STEPS, 0)),
+                    "steps", dayDetail(p.getString(KEY_SENSOR_STEPS_DATE, ""))));
+        }
+        if (p.contains(KEY_SENSOR_ACTIVITY)) {
+            cards.add(new SensorCard("ACTIVE",
+                    String.valueOf(p.getInt(KEY_SENSOR_ACTIVITY, 0)),
+                    "min", dayDetail(p.getString(KEY_SENSOR_ACTIVITY_DATE, ""))));
+        }
+        if (p.getInt(KEY_SENSOR_SLEEP, 0) > 0) {
+            int rem = p.getInt(KEY_SENSOR_SLEEP_REM, 0);
+            String detail = dayDetail(p.getString(KEY_SENSOR_SLEEP_DATE, ""));
+            if (rem > 0) {
+                detail = detail.isEmpty()
+                        ? "REM " + formatMinutes(rem) : detail + " · REM " + formatMinutes(rem);
+            }
+            cards.add(new SensorCard("SLEEP",
+                    formatMinutes(p.getInt(KEY_SENSOR_SLEEP, 0)), "", detail));
+        }
+        if (p.getInt(KEY_SENSOR_SPO2, 0) > 0) {
+            cards.add(new SensorCard("SPO2",
+                    p.getInt(KEY_SENSOR_SPO2, 0) + "%", "",
+                    lastDetail(p.getString(KEY_SENSOR_SPO2_TIME, ""))));
+        }
+        if (p.getInt(KEY_SENSOR_STRESS, 0) > 0) {
+            cards.add(new SensorCard("STRESS",
+                    String.valueOf(p.getInt(KEY_SENSOR_STRESS, 0)), "",
+                    lastDetail(p.getString(KEY_SENSOR_STRESS_TIME, ""))));
+        }
+        if (p.getInt(KEY_SENSOR_TEMP, 0) > 0) {
+            cards.add(new SensorCard("WRIST TEMP",
+                    String.valueOf(p.getInt(KEY_SENSOR_TEMP, 0)), "raw",
+                    lastDetail(p.getString(KEY_SENSOR_TEMP_TIME, ""))));
+        }
+        if (p.getInt(KEY_SENSOR_BP_SYS, 0) > 0) {
+            cards.add(new SensorCard("BLOOD PRESSURE",
+                    p.getInt(KEY_SENSOR_BP_SYS, 0) + "/" + p.getInt(KEY_SENSOR_BP_DIA, 0),
+                    "mmHg", lastDetail(p.getString(KEY_SENSOR_BP_TIME, ""))));
+        }
+        return cards;
+    }
+
+    private String dayDetail(String date) {
+        if (date.isEmpty()) return "";
+        return java.time.LocalDate.now().toString().equals(date) ? "TODAY" : date;
+    }
+
+    private String lastDetail(String time) {
+        if (time.isEmpty()) return "";
+        int space = time.indexOf(' ');
+        String clock = space > 0 ? time.substring(space + 1) : time;
+        if (clock.length() >= 5) clock = clock.substring(0, 5);
+        return "LAST " + clock;
+    }
+
+    private String formatMinutes(int minutes) {
+        int h = minutes / 60;
+        int m = minutes % 60;
+        if (h == 0) return m + "m";
+        if (m == 0) return h + "h";
+        return h + "h " + m + "m";
     }
 
     private void showSleepEditor() {

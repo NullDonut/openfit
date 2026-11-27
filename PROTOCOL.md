@@ -743,6 +743,50 @@ Zh frame, pumps the next one from `onCharacteristicWrite`, retries a refused fra
 and abandons a missing callback after 3 s. On the saved-binding fast path it also skips the SE
 probe so the two channels never compete for the link.
 
+### Read-only sensor history (recovered 2026-11-27)
+
+The post-bind burst also carries the watch's offline health history. OpenFit **only reads these
+frames**; it never requests them, so a parser bug cannot change watch state. Every parser lives in
+`ZhBraceletBinding` and requires the watch direction byte (`0x03`), because keys `0x02` and `0x03`
+are also used by outgoing alarm and step-target writes.
+
+| Key | Vendor handler | Layout | OpenFit parser |
+| --- | --- | --- | --- |
+| `0x02` | `c.i` → `a.a(byte[],float,float)` | packed date `b13-14`, slot count `b16 & 31`, big-endian 16-bit step counts from `b17` | `parseSteps` |
+| `0x03` | `c.o` → `a.d(byte[])` | packed date `b13-14`, record count `b15`, 2-byte stage records from `b16` | `parseSleep` |
+| `0x10` | `c.k` → `a.b(byte[])` | count `b15`, 7-byte records from `b16`: time `b0-3`, pulse, SYS, DIA | `parseOfflineBloodPressure` |
+| `0x27` | `c.F` | count `b15`, 5-byte records from `b16`: time `b0-3`, SpO2 percent | `parseSpo2` |
+| `0x28` | `c.E` → `c.s` | difference `b14`, count `b15`, 5-byte records from `b16`: time `b0-3`, raw wrist temp | `parseBodyTemperature` |
+| `0x37` | `c.t` | packed date `b13-14`, slot count `b16 & 31`, one active-minute byte per slot from `b17` | `parseActivity` |
+| `0x38` | `c.G` | count `b15`, 5-byte records from `b16`: time `b0-3`, stress index | `parseStress` |
+
+Shared helpers:
+
+* **Packed date** (`e.e(byte[])`): `year = 2000 + ((b13 & 0x7E) >> 1)`,
+  `month = ((b13 & 1) << 3) | ((b14 & 0xE0) >> 5)`, `day = b14 & 0x1F`.
+* **Sleep date** (`e.d(e.e(...))`): the vendor adds one day to the packed date, so the frame carries
+  the night's start and the app labels the morning. OpenFit does the same.
+* **Record time** (`c.r(byte[])`): `year = 2000 + (b0 >> 2)`,
+  `month = ((b0 & 3) << 2) | (b1 >> 6)`, `day = (b1 >> 1) & 31`,
+  `hour = ((b1 & 1) << 4) | (b2 >> 4)`, `minute = ((b2 & 15) << 2) | (b3 >> 6)`,
+  `second = b3 & 63`.
+* **Sleep record**: `hour = (b0 & 0xF8) >> 3`, `minute = ((b0 & 7) << 3) | ((b1 & 0xE0) >> 5)`,
+  `type = b1 & 0x0F`. A stage runs from its record to the next record, so the last record is the
+  end marker. Types: `1` awake, `2` light, `3` deep, `4` REM, `6` stay-up. The vendor's headline
+  `SleepTotalTime` is **deep + light**; REM is a separate field, so OpenFit keeps `total` as
+  deep + light and shows REM beside it.
+
+Notes and limits:
+
+* The vendor CRC-checks `0x02`, `0x03`, `0x0D` and `0x10` (`e.a(frame, G)`); OpenFit does not, but
+  every parser bounds-checks the declared count against the frame length and rejects invalid dates.
+* The body-temperature byte is kept **raw**. The vendor stores it as an unscaled integer string
+  (`c.s` → `measureWristTemp`), and no published scale exists, so the Health card labels it `raw`
+  instead of guessing °C.
+* Blood-pressure records with any zero field are dropped, matching `a.b(byte[])`.
+* Steps, activity, sleep and BP carry a date; SpO2, stress and temperature carry a full timestamp.
+  The Health tab shows the latest record plus the date or time it came from.
+
 ### Settings commands over ZhBracelet (recovered 2026-11-27)
 
 `com.zjw.zhbraceletsdk.service.a` builds every request and `service.c.b(byte[])` dispatches every
@@ -851,9 +895,10 @@ key `0x31` (payload `00 F7 00 3F 01 FC`; the same frame also arrives on connect 
 `0x02` (52 bytes, mostly zero), `0x37` (28 bytes), `0x0D` (292 bytes, spread over several
 notifications), `0x27` and `0x38` (3 bytes each), `0x08` (22 bytes), `0x09` (6 bytes containing
 the raw watch MAC `D4 27 1D 30 44 9B`), then the key-4 echo and the two key-0x42 acks. The `0x0D`
-frame is now decoded as today's heart-rate history (see above); the remaining frames are plaintext
-status/settings blobs that OpenFit logs and ignores. The `0x09` MAC reply is confirmed and could be
-used to validate the saved binding.
+frame is decoded as today's heart-rate history and `0x02`/`0x03`/`0x10`/`0x27`/`0x28`/`0x37`/`0x38`
+as read-only sensor history (see above). The remaining frames are plaintext status/settings blobs
+that OpenFit logs and ignores. The `0x09` MAC reply is confirmed and could be used to validate the
+saved binding.
 
 ### Validated on hardware (2026-11-18 11:49, build `b701e4a`)
 

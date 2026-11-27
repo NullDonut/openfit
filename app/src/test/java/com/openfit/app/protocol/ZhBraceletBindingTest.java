@@ -406,6 +406,136 @@ public class ZhBraceletBindingTest {
                 new byte[] {frame[13], frame[14], frame[15], frame[16]});
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Sensor history parsers
+    // ---------------------------------------------------------------------------------------
+
+    @Test public void parseStepsSumsTheBigEndianSlots() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_SPORT_DATA, new byte[] {
+            0x35, 0x7B, 0x00, 0x03,
+            0x00, 0x64,   // 100
+            0x00, (byte) 0xC8, // 200
+            0x01, 0x2C    // 300
+        });
+        ZhBraceletBinding.Steps steps = ZhBraceletBinding.parseSteps(frame);
+        assertNotNull(steps);
+        assertEquals("2026-11-27", steps.date);
+        assertEquals(600, steps.total);
+        assertEquals(3, steps.slots.length);
+        assertEquals(300, steps.slots[2]);
+    }
+
+    @Test public void parseStepsIgnoresPhoneDirection() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_SPORT_DATA, new byte[] {
+            0x35, 0x7B, 0x00, 0x01, 0x00, 0x64
+        });
+        frame[8] = (byte) ZhBraceletBinding.DIRECTION_PHONE; // an outgoing alarm frame, not steps
+        assertNull(ZhBraceletBinding.parseSteps(frame));
+    }
+
+    @Test public void parseActivitySumsTheMinuteSlots() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_ACTIVITY_DURATION, new byte[] {
+            0x35, 0x7B, 0x00, 0x03,
+            0x05, 0x0A, 0x0F
+        });
+        ZhBraceletBinding.Activity activity = ZhBraceletBinding.parseActivity(frame);
+        assertNotNull(activity);
+        assertEquals("2026-11-27", activity.date);
+        assertEquals(30, activity.totalMinutes);
+        assertEquals(3, activity.slots.length);
+    }
+
+    @Test public void parseSleepRunsEachStageToTheNextRecord() {
+        // 23:00 light (90m), 00:30 deep (60m), 01:30 REM (30m), 02:00 end marker.
+        byte[] frame = reply(ZhBraceletBinding.KEY_SLEEP_DATA, new byte[] {
+            0x35, 0x7B, 0x04,
+            (byte) 0xB8, 0x02,
+            0x03, (byte) 0xC3,
+            0x0B, (byte) 0xC4,
+            0x10, 0x01
+        });
+        ZhBraceletBinding.SleepSummary sleep = ZhBraceletBinding.parseSleep(frame);
+        assertNotNull(sleep);
+        assertEquals("2026-11-28", sleep.date);
+        assertEquals(90, sleep.light);
+        assertEquals(60, sleep.deep);
+        assertEquals(30, sleep.rem);
+        assertEquals(150, sleep.total);
+        assertEquals(0, sleep.awake);
+    }
+
+    @Test public void parseSleepRollsTheDateOverNewYear() {
+        // Packed 2026-12-31 -> the vendor labels the morning as 2027-01-01.
+        byte[] frame = reply(ZhBraceletBinding.KEY_SLEEP_DATA, new byte[] {
+            0x35, (byte) 0x9F, 0x01,
+            0x10, 0x01
+        });
+        ZhBraceletBinding.SleepSummary sleep = ZhBraceletBinding.parseSleep(frame);
+        assertNotNull(sleep);
+        assertEquals("2027-01-01", sleep.date);
+    }
+
+    @Test public void parseSpo2ReadsTimestampedRecords() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_OFFLINE_SPO2, new byte[] {
+            0x00, 0x00, 0x01,
+            0x6A, (byte) 0xF6, (byte) 0xC8, (byte) 0xB8, 0x62
+        });
+        List<ZhBraceletBinding.SensorSample> samples = ZhBraceletBinding.parseSpo2(frame);
+        assertNotNull(samples);
+        assertEquals(1, samples.size());
+        assertEquals("2026-11-27 12:34:56", samples.get(0).time);
+        assertEquals(98, samples.get(0).value);
+    }
+
+    @Test public void parseStressUsesTheSameRecordShape() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_OFFLINE_STRESS, new byte[] {
+            0x00, 0x00, 0x01,
+            0x6A, (byte) 0xF6, (byte) 0xC8, (byte) 0xB8, 0x2A
+        });
+        List<ZhBraceletBinding.SensorSample> samples = ZhBraceletBinding.parseStress(frame);
+        assertNotNull(samples);
+        assertEquals(1, samples.size());
+        assertEquals(42, samples.get(0).value);
+    }
+
+    @Test public void parseBodyTemperatureKeepsTheRawByteAndDifference() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_OFFLINE_TEMP, new byte[] {
+            0x00, 0x05, 0x01,
+            0x6A, (byte) 0xF6, (byte) 0xC8, (byte) 0xB8, 0x6E
+        });
+        List<ZhBraceletBinding.TempSample> samples = ZhBraceletBinding.parseBodyTemperature(frame);
+        assertNotNull(samples);
+        assertEquals(1, samples.size());
+        assertEquals(110, samples.get(0).raw);
+        assertEquals(5, samples.get(0).difference);
+    }
+
+    @Test public void parseBloodPressureDropsEmptyRecords() {
+        byte[] frame = reply(ZhBraceletBinding.KEY_OFFLINE_BP, new byte[] {
+            0x00, 0x00, 0x02,
+            0x6A, (byte) 0xF6, (byte) 0xC8, (byte) 0xB8, 0x48, 0x78, 0x50,
+            0x6A, (byte) 0xF6, (byte) 0xC8, (byte) 0xB8, 0x00, 0x00, 0x00
+        });
+        List<ZhBraceletBinding.BloodPressureSample> samples =
+                ZhBraceletBinding.parseOfflineBloodPressure(frame);
+        assertNotNull(samples);
+        assertEquals(1, samples.size());
+        assertEquals(72, samples.get(0).pulse);
+        assertEquals(120, samples.get(0).systolic);
+        assertEquals(80, samples.get(0).diastolic);
+    }
+
+    @Test public void parseRecordTimeRejectsAnInvalidMonth() {
+        // month 0 -> parseRecordTime returns null, so the record is skipped.
+        byte[] frame = reply(ZhBraceletBinding.KEY_OFFLINE_SPO2, new byte[] {
+            0x00, 0x00, 0x01,
+            0x68, 0x36, (byte) 0xC8, (byte) 0xB8, 0x62
+        });
+        List<ZhBraceletBinding.SensorSample> samples = ZhBraceletBinding.parseSpo2(frame);
+        assertNotNull(samples);
+        assertTrue(samples.isEmpty());
+    }
+
     private static byte[] privateReply(byte[] payload) {
         return reply(ZhBraceletBinding.KEY_PRIVATE_FEATURE, payload);
     }

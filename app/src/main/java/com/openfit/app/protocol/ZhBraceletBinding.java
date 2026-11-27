@@ -61,6 +61,23 @@ public final class ZhBraceletBinding {
     public static final int KEY_HEART_RATE = 0x0B;
     /** Daily heart-rate history: packed date then 288 five-minute samples. */
     public static final int KEY_HEART_RATE_HISTORY = 0x0D;
+    /** Offline blood pressure: count byte then 7-byte records (time, pulse, SYS, DIA). */
+    public static final int KEY_OFFLINE_BP = 0x10;
+    /** Offline SpO2: count byte then 5-byte records (time, percent). */
+    public static final int KEY_OFFLINE_SPO2 = 0x27;
+    /** Offline body temperature: count and difference bytes, then 5-byte records. */
+    public static final int KEY_OFFLINE_TEMP = 0x28;
+    /** Activity duration: packed date, slot count, one byte of active minutes per slot. */
+    public static final int KEY_ACTIVITY_DURATION = 0x37;
+    /** Offline stress: count byte then 5-byte records (time, index). */
+    public static final int KEY_OFFLINE_STRESS = 0x38;
+    /**
+     * Today's sport frame. Same value as the outgoing alarm key, so the parser checks the
+     * direction byte; the watch sends this one, the phone never does.
+     */
+    public static final int KEY_SPORT_DATA = 0x02;
+    /** Sleep frame. Same value as the outgoing step-target key; direction distinguishes them. */
+    public static final int KEY_SLEEP_DATA = 0x03;
     /** {@code openMeasurement()} / {@code closeMeasurement()}: 1-byte payload, 1 = start. */
     public static final int KEY_MEASUREMENT = 0x19;
     /** {@code setContinuousHr(boolean)}: 1-byte payload, 1 = continuous HR on. */
@@ -337,6 +354,210 @@ public final class ZhBraceletBinding {
         return new DeviceInfo(battery, versionNumber, formatVersion(versionNumber, versionTail));
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Sensor history frames (read-only; the watch pushes these after a bind)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Today's sport frame ({@code c.i(byte[])} → {@code a.a(byte[],float,float)}). The payload
+     * carries the packed date in bytes 13-14, a slot count in byte 16 and that many big-endian
+     * 16-bit step counts from byte 17. The vendor sums the slots into the daily step total.
+     */
+    public static Steps parseSteps(byte[] frame) {
+        if (!isWatchFrame(frame, KEY_SPORT_DATA) || frame.length < 17) return null;
+        int count = frame[16] & 31;
+        if (frame.length < 17 + count * 2) return null;
+        String date = parsePackedDate(frame);
+        if (date == null) return null;
+        int total = 0;
+        int[] slots = new int[count];
+        for (int i = 0; i < count; i++) {
+            int value = ((frame[17 + i * 2] & 0xFF) << 8) | (frame[18 + i * 2] & 0xFF);
+            slots[i] = value;
+            total += value;
+        }
+        return new Steps(date, total, slots);
+    }
+
+    /**
+     * Activity-duration frame ({@code c.t(byte[])}): the same packed date, a slot count in byte
+     * 16 and one unsigned byte of active minutes per slot from byte 17.
+     */
+    public static Activity parseActivity(byte[] frame) {
+        if (!isWatchFrame(frame, KEY_ACTIVITY_DURATION) || frame.length < 17) return null;
+        int count = frame[16] & 31;
+        if (frame.length < 17 + count) return null;
+        String date = parsePackedDate(frame);
+        if (date == null) return null;
+        int total = 0;
+        int[] slots = new int[count];
+        for (int i = 0; i < count; i++) {
+            int value = frame[17 + i] & 0xFF;
+            slots[i] = value;
+            total += value;
+        }
+        return new Activity(date, total, slots);
+    }
+
+    /**
+     * Sleep frame ({@code c.o(byte[])} → {@code a.d(byte[])}). Byte 15 is the record count; each
+     * record is two bytes holding a start time and a stage code. A record's stage runs until the
+     * next record's start, so the last record is the end marker. Stages: 1 awake, 2 light,
+     * 3 deep, 4 REM, 6 stay-up. The vendor's headline sleep total is deep + light; REM is
+     * reported separately, so {@link SleepSummary#total} matches it rather than adding REM in.
+     * The date is the packed date plus one day, as the vendor labels the morning.
+     */
+    public static SleepSummary parseSleep(byte[] frame) {
+        if (!isWatchFrame(frame, KEY_SLEEP_DATA) || frame.length < 16) return null;
+        int count = frame[15] & 0xFF;
+        if (frame.length < 16 + count * 2) return null;
+        String date = parseSleepDate(frame);
+        if (date == null) return null;
+        int deep = 0, light = 0, rem = 0, awake = 0, stayUp = 0;
+        for (int i = 0; i + 1 < count; i++) {
+            int at = 16 + i * 2;
+            int next = at + 2;
+            int start = recordMinutes(frame[at], frame[at + 1]);
+            int end = recordMinutes(frame[next], frame[next + 1]);
+            int minutes = end - start;
+            if (minutes < 0) minutes += 24 * 60;
+            switch (frame[at + 1] & 0x0F) {
+                case 1: awake += minutes; break;
+                case 2: light += minutes; break;
+                case 3: deep += minutes; break;
+                case 4: rem += minutes; break;
+                case 6: stayUp += minutes; break;
+                default: break;
+            }
+        }
+        return new SleepSummary(date, deep + light, deep, light, rem, awake, stayUp);
+    }
+
+    /** Offline SpO2 frame ({@code c.F(byte[])}): 5-byte records of time then percentage. */
+    public static java.util.List<SensorSample> parseSpo2(byte[] frame) {
+        return parseFiveByteSamples(frame, KEY_OFFLINE_SPO2);
+    }
+
+    /** Offline stress frame ({@code c.G(byte[])}): the same 5-byte record shape. */
+    public static java.util.List<SensorSample> parseStress(byte[] frame) {
+        return parseFiveByteSamples(frame, KEY_OFFLINE_STRESS);
+    }
+
+    /**
+     * Offline body-temperature frame ({@code c.E(byte[])}): byte 14 is the vendor's difference
+     * value, byte 15 the count, then 5-byte records of time and a raw wrist-temperature byte.
+     */
+    public static java.util.List<TempSample> parseBodyTemperature(byte[] frame) {
+        if (!isWatchFrame(frame, KEY_OFFLINE_TEMP) || frame.length < 16) return null;
+        int count = frame[15] & 0xFF;
+        int difference = frame[14] & 0xFF;
+        if (frame.length < 16 + count * 5) return null;
+        java.util.List<TempSample> samples = new java.util.ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            int at = 16 + i * 5;
+            String time = parseRecordTime(frame[at], frame[at + 1], frame[at + 2], frame[at + 3]);
+            if (time == null) continue;
+            samples.add(new TempSample(time, frame[at + 4] & 0xFF, difference));
+        }
+        return samples;
+    }
+
+    /**
+     * Offline blood-pressure frame ({@code a.b(byte[])}): count byte then 7-byte records of time,
+     * pulse, systolic and diastolic. The vendor drops records with a zero field.
+     */
+    public static java.util.List<BloodPressureSample> parseOfflineBloodPressure(byte[] frame) {
+        if (!isWatchFrame(frame, KEY_OFFLINE_BP) || frame.length < 16) return null;
+        int count = frame[15] & 0xFF;
+        if (frame.length < 16 + count * 7) return null;
+        java.util.List<BloodPressureSample> samples = new java.util.ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            int at = 16 + i * 7;
+            String time = parseRecordTime(frame[at], frame[at + 1], frame[at + 2], frame[at + 3]);
+            int pulse = frame[at + 4] & 0xFF;
+            int systolic = frame[at + 5] & 0xFF;
+            int diastolic = frame[at + 6] & 0xFF;
+            if (time == null || pulse <= 0 || systolic <= 0 || diastolic <= 0) continue;
+            samples.add(new BloodPressureSample(time, pulse, systolic, diastolic));
+        }
+        return samples;
+    }
+
+    private static java.util.List<SensorSample> parseFiveByteSamples(byte[] frame, int key) {
+        if (!isWatchFrame(frame, key) || frame.length < 16) return null;
+        int count = frame[15] & 0xFF;
+        if (frame.length < 16 + count * 5) return null;
+        java.util.List<SensorSample> samples = new java.util.ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            int at = 16 + i * 5;
+            String time = parseRecordTime(frame[at], frame[at + 1], frame[at + 2], frame[at + 3]);
+            if (time == null) continue;
+            samples.add(new SensorSample(time, frame[at + 4] & 0xFF));
+        }
+        return samples;
+    }
+
+    private static boolean isWatchFrame(byte[] frame, int key) {
+        return frame != null && frame.length >= 13
+                && (frame[0] & 0xFF) == MAGIC
+                && (frame[8] & 0xFF) == DIRECTION_WATCH
+                && (frame[10] & 0xFF) == key;
+    }
+
+    /** Packed date in bytes 13-14 ({@code e.e(byte[])}), or {@code null} when invalid. */
+    private static String parsePackedDate(byte[] frame) {
+        int year = 2000 + ((frame[13] & 0x7E) >> 1);
+        int month = ((frame[13] & 1) << 3) | ((frame[14] & 0xE0) >> 5);
+        int day = frame[14] & 0x1F;
+        if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+        return String.format(java.util.Locale.US, "%04d-%02d-%02d", year, month, day);
+    }
+
+    /**
+     * Sleep date, which the vendor reports as the packed date plus one day
+     * ({@code e.d(e.e(byte[]))}): the frame carries the night's start, the app labels the morning.
+     */
+    private static String parseSleepDate(byte[] frame) {
+        int year = 2000 + ((frame[13] & 0x7E) >> 1);
+        int month = ((frame[13] & 1) << 3) | ((frame[14] & 0xE0) >> 5);
+        int day = frame[14] & 0x1F;
+        if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+        int[] monthDays = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        boolean leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+        int maxDay = monthDays[month - 1] + (month == 2 && leap ? 1 : 0);
+        day++;
+        if (day > maxDay) {
+            day = 1;
+            month++;
+            if (month > 12) { month = 1; year++; }
+        }
+        return String.format(java.util.Locale.US, "%04d-%02d-%02d", year, month, day);
+    }
+
+    /** Start of a sleep record, in minutes since midnight. */
+    private static int recordMinutes(byte b0, byte b1) {
+        return ((b0 & 0xF8) >> 3) * 60 + (((b0 & 7) << 3) | ((b1 & 0xE0) >> 5));
+    }
+
+    /**
+     * Timestamp of a 5- or 7-byte sensor record ({@code c.r(byte[])}), or {@code null} when the
+     * packed fields are out of range.
+     */
+    private static String parseRecordTime(byte b0, byte b1, byte b2, byte b3) {
+        int year = 2000 + ((b0 & 0xFF) >> 2);
+        int month = ((b0 & 3) << 2) | ((b1 & 0xFF) >> 6);
+        int day = (b1 & 0x3E) >> 1;
+        int hour = ((b1 & 1) << 4) | ((b2 & 0xFF) >> 4);
+        int minute = ((b2 & 15) << 2) | ((b3 & 0xFF) >> 6);
+        int second = b3 & 63;
+        if (month < 1 || month > 12 || day < 1 || day > 31
+                || hour > 23 || minute > 59 || second > 59) {
+            return null;
+        }
+        return String.format(java.util.Locale.US, "%04d-%02d-%02d %02d:%02d:%02d",
+                year, month, day, hour, minute, second);
+    }
+
     private static String formatVersion(int number, int tail) {
         String prefix;
         int body;
@@ -513,6 +734,123 @@ public final class ZhBraceletBinding {
             return "HeartRateHistory{date=" + date + ", recent=" + recent
                     + ", min=" + dayMin + ", max=" + dayMax + ", avg=" + dayAverage
                     + ", samples=" + sampleCount + '}';
+        }
+    }
+
+    /** One decoded {@link #KEY_SPORT_DATA} frame: daily step total plus the per-slot counts. */
+    public static final class Steps {
+        public final String date;
+        public final int total;
+        public final int[] slots;
+
+        public Steps(String date, int total, int[] slots) {
+            this.date = date;
+            this.total = total;
+            this.slots = slots;
+        }
+
+        @Override public String toString() {
+            return "Steps{date=" + date + ", total=" + total + ", slots=" + slots.length + '}';
+        }
+    }
+
+    /** One decoded {@link #KEY_ACTIVITY_DURATION} frame: active minutes plus per-slot values. */
+    public static final class Activity {
+        public final String date;
+        public final int totalMinutes;
+        public final int[] slots;
+
+        public Activity(String date, int totalMinutes, int[] slots) {
+            this.date = date;
+            this.totalMinutes = totalMinutes;
+            this.slots = slots;
+        }
+
+        @Override public String toString() {
+            return "Activity{date=" + date + ", minutes=" + totalMinutes
+                    + ", slots=" + slots.length + '}';
+        }
+    }
+
+    /** One decoded {@link #KEY_SLEEP_DATA} frame; every field is in minutes. */
+    public static final class SleepSummary {
+        public final String date;
+        /** Deep + light, matching the vendor's headline sleep duration (REM is separate). */
+        public final int total;
+        public final int deep;
+        public final int light;
+        public final int rem;
+        public final int awake;
+        public final int stayUp;
+
+        public SleepSummary(String date, int total, int deep, int light, int rem,
+                            int awake, int stayUp) {
+            this.date = date;
+            this.total = total;
+            this.deep = deep;
+            this.light = light;
+            this.rem = rem;
+            this.awake = awake;
+            this.stayUp = stayUp;
+        }
+
+        @Override public String toString() {
+            return "SleepSummary{date=" + date + ", total=" + total + ", deep=" + deep
+                    + ", light=" + light + ", rem=" + rem + ", awake=" + awake + '}';
+        }
+    }
+
+    /** One timestamped single-value sensor record: SpO2 percent or stress index. */
+    public static final class SensorSample {
+        /** Local wall-clock time of the reading, {@code yyyy-MM-dd HH:mm:ss}. */
+        public final String time;
+        public final int value;
+
+        public SensorSample(String time, int value) {
+            this.time = time;
+            this.value = value;
+        }
+
+        @Override public String toString() {
+            return "SensorSample{" + time + " = " + value + '}';
+        }
+    }
+
+    /** One timestamped wrist-temperature record. {@code raw} is the watch byte, un-scaled. */
+    public static final class TempSample {
+        public final String time;
+        public final int raw;
+        /** Vendor difference byte from the frame header, kept for the display scale. */
+        public final int difference;
+
+        public TempSample(String time, int raw, int difference) {
+            this.time = time;
+            this.raw = raw;
+            this.difference = difference;
+        }
+
+        @Override public String toString() {
+            return "TempSample{" + time + " raw=" + raw + ", diff=" + difference + '}';
+        }
+    }
+
+    /** One timestamped offline blood-pressure record. */
+    public static final class BloodPressureSample {
+        public final String time;
+        public final int pulse;
+        public final int systolic;
+        public final int diastolic;
+
+        public BloodPressureSample(String time, int pulse, int systolic, int diastolic) {
+            this.time = time;
+            this.pulse = pulse;
+            this.systolic = systolic;
+            this.diastolic = diastolic;
+        }
+
+        @Override public String toString() {
+            return "BloodPressureSample{" + time + ", " + systolic + '/' + diastolic
+                    + ", pulse=" + pulse + '}';
         }
     }
 

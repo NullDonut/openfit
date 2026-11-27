@@ -779,8 +779,8 @@ a secret.
    and shown immediately, so the first connection already has a real heart rate. A 25 s
    (measurement) or 45 s (continuous) guard sends the stop frame if no reading arrives. The
    2026-11-19 09:07 run confirmed no live `0x0B` follows either request, so the history frame is
-   the heart-rate source for this firmware. Next: add overnight step/calorie parsing from the
-   remaining Zh burst frames (keys `0x37` activity duration, `0x38` stress, `0x08`).
+   the heart-rate source for this firmware. The remaining burst frames are now decoded as
+   read-only sensor history (see item 10).
 7. **Retest QR on the fixed APK:** the 2026-11-17 on-device run only exercised Bluetooth
    (connect + Berry notification setup, both successful). Tap "Scan a pairing QR code" on a build
    after `16d8bba`; if it still fails, open Devices → status line → **Copy**. The report now
@@ -809,6 +809,16 @@ a secret.
    recovered yet. On reconnect the same watch should answer id 16 with `bound=true` and take the
    id-19 `verify_user_number` path with the stored token.
 
+10. **Read-only sensor history (2026-11-27, implemented, hardware test pending).**
+    `ZhBraceletBinding` now parses the frames the watch already pushes: steps (`0x02`), sleep
+    (`0x03`), offline blood pressure (`0x10`), SpO2 (`0x27`), body temperature (`0x28`), activity
+    duration (`0x37`) and stress (`0x38`). `MainActivity.handleSensorFrame()` stores the latest
+    value per sensor and the Health tab renders a card for each; nothing is requested from the
+    watch. Wrist temperature is shown as the raw byte until its scale is confirmed, sleep totals
+    follow the vendor (deep + light, REM separate) and the sleep date is the packed date + 1. On
+    the next hardware run, confirm the post-bind burst produces each card and note the raw
+    temperature values so the scale can be pinned down.
+
 ### Suggested order from here
 
 ```
@@ -822,6 +832,8 @@ pair on the watch (done, build b701e4a)
        (accepted, but this firmware never streams; stop asking)
     -> decode the 0x0D history for today's heart rate (working, primary source)
     -> parse device data on 16186f00 for the remaining health screens
+    -> verify the read-only sensor cards from the post-bind burst
+       (implemented, hardware test pending)
     -> bind the Noise Watch Beat through SE id 18 (implemented, retest pending)
 ```
 
