@@ -809,15 +809,17 @@ a secret.
    recovered yet. On reconnect the same watch should answer id 16 with `bound=true` and take the
    id-19 `verify_user_number` path with the stored token.
 
-10. **Read-only sensor history (2026-11-27, implemented, hardware test pending).**
+10. **Read-only sensor history (2026-11-27, hardware-tested).**
     `ZhBraceletBinding` now parses the frames the watch already pushes: steps (`0x02`), sleep
     (`0x03`), offline blood pressure (`0x10`), SpO2 (`0x27`), body temperature (`0x28`), activity
     duration (`0x37`) and stress (`0x38`). `MainActivity.handleSensorFrame()` stores the latest
     value per sensor and the Health tab renders a card for each; nothing is requested from the
-    watch. Wrist temperature is shown as the raw byte until its scale is confirmed, sleep totals
-    follow the vendor (deep + light, REM separate) and the sleep date is the packed date + 1. On
-    the next hardware run, confirm the post-bind burst produces each card and note the raw
-    temperature values so the scale can be pinned down.
+    watch. Hardware run 2026-11-27 16:25 (build `a6847c7`) confirmed steps (`0x02`, 24 slots) and
+    activity (`0x37`, 24 slots) parse and match the watch (both zero that day), and heart-rate
+    history still decodes (latest 81 bpm, 3 samples). SpO2 (`0x27`) and stress (`0x38`) arrived
+    with count 0, and no temperature (`0x28`) or BP (`0x10`) frames were in the burst, so those
+    cards stay hidden until the watch has records. Raw temperature values are still needed to pin
+    the display scale.
 
 ### Suggested order from here
 
