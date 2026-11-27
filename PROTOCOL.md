@@ -772,6 +772,12 @@ AB 00 00 LL 00 00 00 00 01 00 KK PP_HI PP_LO [payload]
 
 `0x18` is the only request that sets bit 7 of header byte 9; every other frame leaves it zero.
 
+`0x0A` (bright screen) and `0x20` (do not disturb) are built by `ZhBraceletBinding` but are **not
+shown in the Settings tab**. The Buzz acknowledges or silently ignores both frames and does not
+change its behaviour, so the rows were removed; the builders and their golden-byte tests stay for
+firmware that implements them. The SDK does read a bright-screen flag back, but stores it under an
+unrelated preference key, which is why an ack alone is not evidence that the setting took effect.
+
 #### Incoming keys used by the Settings tab
 
 | Key | Shape | Meaning |

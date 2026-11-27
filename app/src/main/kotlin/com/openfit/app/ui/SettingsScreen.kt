@@ -62,11 +62,13 @@ data class AlarmUi(val id: Int, val hour: Int, val minute: Int, val data: Int)
 /**
  * Everything the Settings tab renders. The activity owns the values and pushes a new state after
  * every watch reply, so the switches always reflect what the watch last reported.
+ *
+ * DND and bright screen are deliberately absent: the Buzz acknowledges or ignores their vendor
+ * frames without changing anything, and the SDK stores the bright-screen flag under the key
+ * "taiwan". Their builders stay in ZhBraceletBinding for models that implement them.
  */
 data class SettingsUiState(
     val watch: WatchInfoUi,
-    val doNotDisturb: Boolean = false,
-    val brightScreen: Boolean = false,
     val continuousHr: Boolean = false,
     val batterySaver: Boolean = false,
     val sedentary: SedentaryUi = SedentaryUi(false, 2, 9, 0, 18, 0),
@@ -80,8 +82,6 @@ interface SettingsActions {
     fun onRefreshInfo()
     fun onSyncTime()
     fun onFindWatch()
-    fun onToggleDoNotDisturb(on: Boolean)
-    fun onToggleBrightScreen(on: Boolean)
     fun onToggleContinuousHr(on: Boolean)
     fun onToggleBatterySaver(on: Boolean)
     fun onToggleSedentary(on: Boolean)
@@ -146,25 +146,6 @@ private fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                 label = "Find watch",
                 modifier = Modifier.weight(1f),
                 onClick = actions::onFindWatch
-            )
-        }
-
-        Spacer(Modifier.height(22.dp))
-        Eyebrow("DISPLAY", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(8.dp))
-        SettingsCard {
-            ToggleRow(
-                title = "Do not disturb",
-                subtitle = "Silence calls and notifications on the watch.",
-                checked = state.doNotDisturb,
-                onCheckedChange = actions::onToggleDoNotDisturb
-            )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            ToggleRow(
-                title = "Bright screen",
-                subtitle = "Raise the backlight level.",
-                checked = state.brightScreen,
-                onCheckedChange = actions::onToggleBrightScreen
             )
         }
 
@@ -279,7 +260,7 @@ private fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
         Spacer(Modifier.height(26.dp))
         Text(
-            text = "SETTINGS ARE SENT AS SINGLE COMMANDS\nEACH REPLY IS SHOWN ABOVE",
+            text = "SETTINGS ARE SENT AS SINGLE COMMANDS\nEACH REPLY IS SHOWN ABOVE\nDND AND BRIGHT SCREEN ARE NOT SUPPORTED BY THIS FIRMWARE",
             modifier = Modifier.fillMaxWidth(),
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,

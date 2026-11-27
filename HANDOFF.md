@@ -718,9 +718,15 @@ A fifth Compose tab exposes the commands recovered from `com.zjw.zhbraceletsdk.s
 
 - watch card: name, address, battery, firmware and a Refresh button;
 - Sync time and Find watch;
-- do-not-disturb, bright screen, continuous HR, sedentary reminder (with a start/end time
-  picker), the alarm list (add/remove one-off alarms) and battery saver;
+- continuous HR, sedentary reminder (with a start/end time picker), the alarm list
+  (add/remove one-off alarms) and battery saver;
 - Forget watch, which clears only the local binding/token after a confirmation dialog.
+
+Do-not-disturb (key `0x20`) and bright screen (key `0x0A`) were exposed first and then removed
+from the tab: the Buzz acknowledges or ignores those frames without a visible effect, and the
+firmware does not implement them. `ZhBraceletBinding` still builds both, and
+`ZhBraceletBindingTest` still pins their bytes, so a model that does implement them needs only
+the UI rows back.
 
 Every write is optimistic and serialised one command at a time. The app sets the control, queues
 the frame and arms a 5 s watchdog; a `0x42` ack (direct keys) or a `0x7F` status (private features)

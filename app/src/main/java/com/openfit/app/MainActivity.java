@@ -192,8 +192,6 @@ public final class MainActivity extends ComponentActivity {
     private SettingsScreenController settingsScreen;
     private int watchBattery;
     private String watchFirmware = "";
-    private boolean dndEnabled;
-    private boolean brightScreenEnabled;
     private boolean continuousHrEnabled;
     private boolean batterySaverEnabled;
     private boolean sedentaryEnabled;
@@ -470,22 +468,6 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onRefreshInfo() { requestWatchInfo(); }
             @Override public void onSyncTime() { syncWatchClock(); }
             @Override public void onFindWatch() { findWatch(); }
-            @Override public void onToggleDoNotDisturb(boolean on) {
-                boolean previous = dndEnabled;
-                dndEnabled = on;
-                refreshSettings();
-                writeSetting("do not disturb", ZhBraceletBinding.KEY_DND, -1,
-                        ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_DND, on),
-                        () -> { dndEnabled = previous; refreshSettings(); });
-            }
-            @Override public void onToggleBrightScreen(boolean on) {
-                boolean previous = brightScreenEnabled;
-                brightScreenEnabled = on;
-                refreshSettings();
-                writeSetting("bright screen", ZhBraceletBinding.KEY_BRIGHT_SCREEN, -1,
-                        ZhBraceletBinding.toggleFrame(ZhBraceletBinding.KEY_BRIGHT_SCREEN, on),
-                        () -> { brightScreenEnabled = previous; refreshSettings(); });
-            }
             @Override public void onToggleContinuousHr(boolean on) {
                 boolean previous = continuousHrEnabled;
                 continuousHrEnabled = on;
@@ -3274,8 +3256,6 @@ public final class MainActivity extends ComponentActivity {
                         connectionReady,
                         watchBattery,
                         watchFirmware),
-                dndEnabled,
-                brightScreenEnabled,
                 continuousHrEnabled,
                 batterySaverEnabled,
                 new SedentaryUi(sedentaryEnabled, sedentaryPeriod,
@@ -3506,8 +3486,6 @@ public final class MainActivity extends ComponentActivity {
         watchBattery = 0;
         watchFirmware = "";
         watchAlarms.clear();
-        dndEnabled = false;
-        brightScreenEnabled = false;
         continuousHrEnabled = false;
         batterySaverEnabled = false;
         sedentaryEnabled = false;
