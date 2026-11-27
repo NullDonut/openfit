@@ -173,7 +173,7 @@ public final class MainActivity extends ComponentActivity {
     private static final long BERRY_WRITE_TIMEOUT_MS = 1_500L;
     private static final long SE_CHUNK_GAP_MS = 15L;
     private static final long SE_BUSY_DELAY_MS = 300L;
-    /** An at-bottom upward drag this far, this fast, refreshes and reconnects. */
+    /** An at-top downward drag this far, this fast, refreshes and reconnects. */
     private static final int SWIPE_REFRESH_MIN_DP = 72;
     private static final long SWIPE_REFRESH_MAX_MS = 700L;
     /** One reconnect per gesture; ignore repeats while the link is already being rebuilt. */
@@ -411,9 +411,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     /**
-     * Observes touch gestures before they reach the view tree. On Home, once the page is scrolled
-     * to the bottom, a quick upward drag reloads the summary and reconnects the saved watch. The
-     * gesture is only observed — normal dispatch still runs, so scrolling and taps are unchanged.
+     * Observes touch gestures before they reach the view tree. On Home, when the page is at the
+     * top, a quick downward drag reloads the summary and reconnects the saved watch. The gesture
+     * is only observed — normal dispatch still runs, so scrolling and taps are unchanged.
      */
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
         trackSwipeRefresh(event);
@@ -426,26 +426,26 @@ public final class MainActivity extends ComponentActivity {
                 swipeStartY = event.getY();
                 swipeLastY = swipeStartY;
                 swipeStartedAt = System.currentTimeMillis();
-                // Only start tracking when the page is already at its end, so an ordinary
-                // scroll-to-the-bottom never fires a refresh.
+                // Only start tracking when the page is already at the top, so an ordinary
+                // scroll-down never fires a refresh.
                 swipeRefreshTracking = currentScreen == SCREEN_HOME
                         && pageScroll != null
-                        && !pageScroll.canScrollVertically(1);
+                        && !pageScroll.canScrollVertically(-1);
                 break;
             case MotionEvent.ACTION_MOVE:
                 if (swipeRefreshTracking) swipeLastY = event.getY();
                 break;
             case MotionEvent.ACTION_UP:
                 if (swipeRefreshTracking) {
-                    float distance = swipeStartY - swipeLastY; // positive when the finger moves up
+                    float distance = swipeLastY - swipeStartY; // positive when the finger moves down
                     long elapsed = System.currentTimeMillis() - swipeStartedAt;
                     if (distance >= dp(SWIPE_REFRESH_MIN_DP)
                             && elapsed <= SWIPE_REFRESH_MAX_MS
                             && pageScroll != null
-                            && !pageScroll.canScrollVertically(1)) {
+                            && !pageScroll.canScrollVertically(-1)) {
                         // Defer past this dispatch so reconnecting never mutates the view tree
                         // while the touch is still being routed.
-                        handler.post(this::onSwipeUpRefresh);
+                        handler.post(this::onPullRefresh);
                     }
                 }
                 swipeRefreshTracking = false;
@@ -456,7 +456,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    private void onSwipeUpRefresh() {
+    private void onPullRefresh() {
         long now = System.currentTimeMillis();
         if (now - lastSwipeRefreshAt < SWIPE_REFRESH_COOLDOWN_MS) return;
         lastSwipeRefreshAt = now;
@@ -464,7 +464,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     /**
-     * Swipe-up refresh: reload the persisted summary immediately, then reconnect the saved watch.
+     * Pull-to-refresh: reload the persisted summary immediately, then reconnect the saved watch.
      * A fresh bind is what makes the watch push its daily history and sensor frames again, so the
      * heart-rate graph and the cards pick up anything recorded while the app was away.
      */
@@ -477,7 +477,7 @@ public final class MainActivity extends ComponentActivity {
             toast("Pair a watch first.");
             return;
         }
-        logBle("Swipe refresh · reconnecting to the saved watch");
+        logBle("Pull to refresh · reconnecting to the saved watch");
         toast("Refreshing and reconnecting...");
         reconnectSavedDevice();
     }
@@ -591,7 +591,7 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onManageWatch() { showScreen(SCREEN_WATCH); }
             @Override public void onViewHealth() { showScreen(SCREEN_HEALTH); }
             @Override public void onViewSleep() { showScreen(SCREEN_SLEEP); }
-            @Override public void onRefresh() { onSwipeUpRefresh(); }
+            @Override public void onRefresh() { onPullRefresh(); }
         });
         homePanel.addView(homeScreen.createView(this), lp(-1, -2));
 

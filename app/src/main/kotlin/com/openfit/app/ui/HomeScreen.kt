@@ -113,7 +113,10 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
+        PullRefreshHint(onClick = actions::onRefresh)
+
+        Spacer(Modifier.height(14.dp))
         DeviceCard(state, actions)
         Spacer(Modifier.height(14.dp))
         ActivityCard(state)
@@ -126,10 +129,7 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
             StressCard(state)
         }
 
-        Spacer(Modifier.height(24.dp))
-        SwipeRefreshHint(onClick = actions::onRefresh)
-
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(26.dp))
         Text(
             text = "PRIVATE BY DESIGN     ·     STORED ON THIS PHONE",
             modifier = Modifier.fillMaxWidth(),
@@ -143,54 +143,36 @@ private fun HomeScreen(state: HomeUiState, actions: HomeActions) {
 }
 
 /**
- * The bottom-of-page affordance for the swipe-up gesture. It is also tappable, so the refresh and
+ * The top-of-page affordance for pull-to-refresh. It is also tappable, so the refresh and
  * reconnect action is discoverable and accessible without the gesture.
  */
 @Composable
-private fun SwipeRefreshHint(onClick: () -> Unit) {
-    Surface(
+private fun PullRefreshHint(onClick: () -> Unit) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = MaterialTheme.shapes.extraLarge,
-        color = MaterialTheme.colorScheme.surfaceContainer
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "↑",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimary
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = "SWIPE UP TO REFRESH",
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.sp,
-                    letterSpacing = 1.3.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = "Reconnect to your watch and reload today's data.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        Text(
+            text = "↓",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.width(9.dp))
+        Text(
+            text = "SWIPE DOWN OR TAP TO REFRESH",
+            modifier = Modifier.weight(1f),
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+            letterSpacing = 1.2.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
