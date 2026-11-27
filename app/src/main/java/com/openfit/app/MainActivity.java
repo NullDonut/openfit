@@ -2235,7 +2235,11 @@ public final class MainActivity extends ComponentActivity {
         scheduleZhHeartRateTimeout(ZH_CONTINUOUS_TIMEOUT_MS, "continuous HR");
     }
 
-    /** Stops whichever heart-rate mode is open; safe to call when none is. */
+    /**
+     * Ends the one-shot measurement and, when Auto HR is not the user's choice, restores the
+     * continuous setting to off. Safe to call when no mode is open. With Auto HR on, the
+     * {@code 0x29} setting is deliberately left running.
+     */
     private void stopZhHeartRate(String reason) {
         cancelZhHeartRateTimeout();
         boolean measurement = zhMeasureActive;
