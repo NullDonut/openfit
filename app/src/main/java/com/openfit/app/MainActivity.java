@@ -581,6 +581,13 @@ public final class MainActivity extends ComponentActivity {
             toast("Pair a watch first.");
             return;
         }
+        // Never tear the link down mid-install: the watch keeps its upload session open and then
+        // refuses the next prepare with "busy" until it is restarted. Let the install finish.
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            logBle("Pull to refresh ignored · a face install is running");
+            toast("A face install is running. Let it finish before reconnecting.");
+            return;
+        }
         logBle("Pull to refresh · reconnecting to the saved watch");
         toast("Refreshing and reconnecting...");
         reconnectSavedDevice();
@@ -4947,8 +4954,13 @@ public final class MainActivity extends ComponentActivity {
     private void retryBuzzPrepareAfterBusy() {
         if (!buzzUploadActive || !buzzUploadPrepPending || buzzUploadPrepareBusyScheduled) return;
         if (buzzUploadPrepareBusyRetries >= BUZZ_UPLOAD_PREPARE_BUSY_MAX_RETRIES) {
-            logPairing("custom-face prepare · still busy after "
+            // The watch keeps a face-upload session open after an interrupted install and refuses
+            // every new prepare with "busy" until it is power-cycled. Stop early with a real fix
+            // instead of waiting out the watchdog and blaming a missing reply.
+            logPairing("custom-face prepare · watch still busy after "
                     + buzzUploadPrepareBusyRetries + " retries");
+            failBuzzUpload("The watch is still busy with an earlier install. "
+                    + "Restart the watch, then try again.");
             return;
         }
         buzzUploadPrepareBusyScheduled = true;
