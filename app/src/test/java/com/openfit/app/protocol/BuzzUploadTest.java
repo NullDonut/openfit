@@ -8,6 +8,7 @@ import java.util.zip.CRC32;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class BuzzUploadTest {
@@ -89,6 +90,26 @@ public class BuzzUploadTest {
         assertEquals(BuzzUpload.ACK_NONE, BuzzUpload.classifyAck(hex("00 00 01 02 00 00")));
         assertEquals(BuzzUpload.ACK_NONE, BuzzUpload.classifyAck(new byte[0]));
         assertEquals(BuzzUpload.ACK_NONE, BuzzUpload.classifyAck(null));
+    }
+
+    @Test public void recognisesTheDialContainer() {
+        // A minimal but self-consistent AF AF AF 02 dial: 26 header + 2 table + 4 payload bytes.
+        byte[] dial = new byte[BuzzUpload.DIAL_HEADER_BYTES + 2 + 4];
+        dial[0] = (byte) 0xaf;
+        dial[1] = (byte) 0xaf;
+        dial[2] = (byte) 0xaf;
+        dial[3] = 0x02;
+        dial[4] = 0x40;  // raw dial length, 64
+        dial[12] = 0x04; // compressed payload length, 4
+        dial[24] = 0x01; // one block
+        assertTrue(BuzzUpload.isDialContainer(dial));
+        // Wrong magic, a truncated body and an inconsistent length are all rejected.
+        dial[3] = 0x01;
+        assertFalse(BuzzUpload.isDialContainer(dial));
+        dial[3] = 0x02;
+        assertFalse(BuzzUpload.isDialContainer(Arrays.copyOf(dial, dial.length - 1)));
+        assertFalse(BuzzUpload.isDialContainer(new byte[0]));
+        assertFalse(BuzzUpload.isDialContainer(null));
     }
 
     @Test public void emptyPayloadStillFrames() {

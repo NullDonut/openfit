@@ -27,6 +27,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -51,6 +52,7 @@ import com.openfit.app.protocol.BerryFrameReader;
 import com.openfit.app.protocol.BerryProfile;
 import com.openfit.app.protocol.BerrySewear;
 import com.openfit.app.protocol.BuzzFace;
+import com.openfit.app.protocol.BuzzUpload;
 import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SeCommands;
@@ -78,6 +80,9 @@ import com.openfit.app.ui.SleepStagePoint;
 import com.openfit.app.ui.SleepUiState;
 
 import java.text.DateFormat;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -101,6 +106,7 @@ public final class MainActivity extends ComponentActivity {
     private static final int REQUEST_ENABLE_BLUETOOTH = 11;
     private static final int REQUEST_QR_SCAN = 12;
     private static final int REQUEST_CAMERA_PERMISSION = 13;
+    private static final int REQUEST_FACE_FILE = 14;
     private static final int C_BG = Color.rgb(8, 8, 8);
     private static final int C_CARD = Color.rgb(17, 17, 17);
     private static final int C_CARD_ALT = Color.rgb(27, 27, 27);
@@ -181,6 +187,17 @@ public final class MainActivity extends ComponentActivity {
     private static final long BERRY_WRITE_TIMEOUT_MS = 1_500L;
     private static final long SE_CHUNK_GAP_MS = 15L;
     private static final long SE_BUSY_DELAY_MS = 300L;
+    /**
+     * Custom-face upload pacing. The Buzz streams the dial over {@code 16186f04} one block at a
+     * time and acknowledges each block, so these are watchdogs rather than transfer timings.
+     */
+    private static final long BUZZ_UPLOAD_ACK_TIMEOUT_MS = 6_000L;
+    private static final long BUZZ_UPLOAD_CHUNK_GAP_MS = 12L;
+    private static final long BUZZ_UPLOAD_PREPARE_TIMEOUT_MS = 15_000L;
+    private static final long BUZZ_UPLOAD_NOTIFY_TIMEOUT_MS = 5_000L;
+    private static final long BUZZ_UPLOAD_SETTLE_MS = 2_000L;
+    /** A Buzz dial is ~200 KB; refuse anything absurd rather than buffering it on a weak phone. */
+    private static final int BUZZ_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
     /** A settings write the watch does not answer is reported instead of leaving the UI stuck. */
     private static final long SE_COMMAND_TIMEOUT_MS = 6_000L;
     /** An at-top downward drag this far, this fast, refreshes and reconnects. */
@@ -306,6 +323,26 @@ public final class MainActivity extends ComponentActivity {
     private boolean buzzFaceSetPending;
     /** The face id the in-flight set request asked for, echoed in the log line. */
     private String buzzFaceSetId = "";
+    // Buzz custom-face upload. Each field stays idle until the user explicitly installs a face,
+    // so the list and set paths are untouched when no upload is running.
+    private BluetoothGattCharacteristic seLargeDataChar;   // 16186f04: big-data upload + block ACKs
+    private boolean seLargeDataNotifyEnabled;              // subscribed lazily on first install
+    private Runnable buzzUploadNotifyPending;              // start the upload once the CCCD is set
+    private Runnable buzzUploadNotifyTimeout;
+    private Runnable buzzUploadTimeout;
+    private boolean buzzUploadActive;                      // streaming or waiting on the watch
+    private boolean buzzUploadPrepPending;                 // prepare reply still owed
+    private byte[] buzzUploadContainer;                    // the AF AF AF 02 file as picked
+    private byte[] buzzUploadFramed;                       // header + container + CRC32
+    private List<byte[]> buzzUploadBlockFrames;            // chunks of the block in flight
+    private int buzzUploadChunk = 20;
+    private int buzzUploadTotalBlocks;
+    private int buzzUploadBlock;
+    private int buzzUploadBlockChunks;
+    private int buzzUploadChunkIndex;
+    private boolean buzzUploadAwaitingGoAhead;
+    private boolean buzzUploadBlockDone;
+    private int buzzUploadProgress = -1;
     private LinearLayout deviceResults;
     private Button reconnectButton;
     private BluetoothAdapter bluetoothAdapter;
@@ -589,6 +626,14 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_FACE_FILE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                readFaceFile(data.getData());
+            } else {
+                setFacesStatus("Install cancelled.", false);
+            }
+            return;
+        }
         if (requestCode == REQUEST_QR_SCAN) {
             try {
                 IntentResult result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
@@ -731,6 +776,7 @@ public final class MainActivity extends ComponentActivity {
         facesScreen = new FacesScreenController(new FacesActions() {
             @Override public void onRefresh() { requestWatchFaceList(); }
             @Override public void onSetFace(String id) { confirmSetFace(id); }
+            @Override public void onInstallCustomFace() { onInstallCustomFace(); }
         });
         facesPanel.addView(facesScreen.createView(this), lp(-1, -2));
         refreshFaces();
@@ -1513,9 +1559,13 @@ public final class MainActivity extends ComponentActivity {
         if (berry != null) {
             watchProfile = "Noise";
             seWriteChar = berry.getCharacteristic(BerryProfile.CHAR_WRITE);
-            // Only 6f01 (inbound transfer/ACks) and 6f02 (control) carry the SE exchange. The
-            // other three (large data, side/Alexa) are not used, and every CCCD write is slow on
-            // this watch, so skipping them shortens the link setup.
+            // 6f04 carries the custom-face big-data upload and its block ACKs. It is stored here
+            // but not subscribed yet: the CCCD is written lazily on the first explicit install, so
+            // the normal connection setup stays exactly as fast as before.
+            seLargeDataChar = berry.getCharacteristic(BerryProfile.CHAR_LARGE_DATA);
+            // Only 6f01 (inbound transfer/ACks) and 6f02 (control) carry the SE exchange at setup.
+            // The other three (large data, side/Alexa) are not subscribed until they are needed,
+            // and every CCCD write is slow on this watch.
             for (UUID uuid : new UUID[] {BerryProfile.CHAR_BULK, BerryProfile.CHAR_WRITE}) {
                 BluetoothGattCharacteristic characteristic = berry.getCharacteristic(uuid);
                 if (characteristic != null && isNotifiable(characteristic)
@@ -1657,6 +1707,24 @@ public final class MainActivity extends ComponentActivity {
     private void handleDescriptorWrite(BluetoothGatt source, BluetoothGattDescriptor descriptor, int status) {
         if (source != gatt) return;
         if (!CLIENT_CONFIGURATION.equals(descriptor.getUuid())) return;
+        BluetoothGattCharacteristic target = descriptor.getCharacteristic();
+        if (target != null && seLargeDataChar != null
+                && target.getUuid().equals(seLargeDataChar.getUuid())) {
+            // This CCCD is written lazily only when the user starts a custom-face install, so it
+            // never advances the connection-setup queue.
+            cancelBuzzUploadNotifyTimeout();
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                buzzUploadNotifyPending = null;
+                failBuzzUpload("The watch refused face-upload notifications.");
+                return;
+            }
+            seLargeDataNotifyEnabled = true;
+            logBle("notifications: enabled 16186f04 for the custom-face upload");
+            Runnable pending = buzzUploadNotifyPending;
+            buzzUploadNotifyPending = null;
+            if (pending != null) pending.run();
+            return;
+        }
         if (status != BluetoothGatt.GATT_SUCCESS) {
             notificationSetupFailed = true;
             logBle("Descriptor write failed for "
@@ -1918,6 +1986,12 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void onSeMessage(byte[] message) {
+        // A custom-face prepare reply is also a WearPacket, and it must win over the list/set
+        // router while the install handshake is running.
+        if (buzzUploadPrepPending) {
+            onBuzzPrepareReply(message);
+            return;
+        }
         // The ZhBracelet (ColorFit) profile answers face reads and set-face requests with a
         // WearPacket, not an SEWear envelope. Route it before anything reads the SE id from field
         // 1, which is the type in a WearPacket and would be misread as an SE function id.
@@ -3464,7 +3538,13 @@ public final class MainActivity extends ComponentActivity {
         if (characteristic == null || value == null) return;
         BluetoothGattService service = characteristic.getService();
         if (service != null && BerryProfile.SERVICE.equals(service.getUuid())) {
-            handleSeNotification(characteristic, value);
+            // 6f04 carries the custom-face block ACKs, not the command transport. Route it
+            // separately so its control words never disturb an in-flight face list read.
+            if (BerryProfile.CHAR_LARGE_DATA.equals(characteristic.getUuid())) {
+                handleBuzzUploadNotification(value);
+            } else {
+                handleSeNotification(characteristic, value);
+            }
         } else if (service != null && BerryProfile.AA01_SERVICE.equals(service.getUuid())) {
             // Only while the BLE Berry attempt owns the shared frame reader. The classic socket
             // has its own stream, and mixing the two would corrupt reassembly.
@@ -3554,6 +3634,7 @@ public final class MainActivity extends ComponentActivity {
         buzzFacePending = false;
         buzzFaceSetPending = false;
         buzzFaceSetId = "";
+        resetBuzzUploadState();
         seWriteQueue.clear();
         seCurrentWrite = null;
         seAwaitingReady = false;
@@ -4413,7 +4494,9 @@ public final class MainActivity extends ComponentActivity {
 
     private void onOpenWatchFaces() {
         showScreen(SCREEN_FACES);
-        requestWatchFaceList();
+        // Re-entering during an install must not replace the upload progress with a list read.
+        if (buzzUploadActive || buzzUploadPrepPending) refreshFaces();
+        else requestWatchFaceList();
     }
 
     /**
@@ -4489,6 +4572,10 @@ public final class MainActivity extends ComponentActivity {
 
     /** Asks the watch for its face list. Read-only: it never sets, removes or uploads a face. */
     private void requestWatchFaceList() {
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            setFacesStatus("A face install is running; wait for it to finish.", true);
+            return;
+        }
         if (seCommandsActive()) {
             facesLoading = true;
             facesStatus = "Reading watch faces...";
@@ -4539,6 +4626,10 @@ public final class MainActivity extends ComponentActivity {
      */
     private void confirmSetFace(String id) {
         if (!buzzFacesActive() || id == null || id.isEmpty()) return;
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            setFacesStatus("A face install is running; wait for it to finish.", true);
+            return;
+        }
         new AlertDialog.Builder(this)
                 .setTitle("Set watch face")
                 .setMessage("Make this face current on the watch?\n\n" + id)
@@ -4549,6 +4640,10 @@ public final class MainActivity extends ComponentActivity {
 
     private void sendSetFace(String id) {
         if (!buzzFacesActive() || id == null || id.isEmpty()) return;
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            setFacesStatus("A face install is running; wait for it to finish.", true);
+            return;
+        }
         // A set supersedes any list read still in flight; both share the reply router.
         buzzFacePending = false;
         facesLoading = true;
@@ -4583,6 +4678,8 @@ public final class MainActivity extends ComponentActivity {
         for (SeCommands.WatchFace face : watchFaces) {
             rows.add(new WatchFaceUi(face.id, face.current, face.removable));
         }
+        boolean canInstall = buzzFacesActive() && seLargeDataChar != null
+                && !facesLoading && !buzzUploadActive && !buzzUploadPrepPending;
         FacesUiState next = new FacesUiState(
                 facesSupported(),
                 connectionReady,
@@ -4591,8 +4688,385 @@ public final class MainActivity extends ComponentActivity {
                 facesStatus,
                 facesStatusIsError,
                 facesLoading,
-                buzzFacesActive());
+                buzzFacesActive(),
+                canInstall,
+                buzzUploadProgress);
         runOnUiThread(() -> facesScreen.update(next));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Buzz custom-face upload (16186f04). Opt-in only: nothing here runs until the user picks a
+    // dial file and confirms the install. The list and set-face paths keep working when idle.
+    // ---------------------------------------------------------------------------------------
+
+    /** Opens the file picker. Uploading is never automatic; the user must choose a file. */
+    private void onInstallCustomFace() {
+        if (!buzzFacesActive() || seLargeDataChar == null) {
+            setFacesStatus("Connect the watch before installing a face.", true);
+            return;
+        }
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            setFacesStatus("A face install is already running.", true);
+            return;
+        }
+        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+        pick.setType("*/*");
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(pick, "Pick a watch-face file"),
+                    REQUEST_FACE_FILE);
+        } catch (RuntimeException e) {
+            setFacesStatus("No file picker is available on this phone.", true);
+        }
+    }
+
+    /** Reads the picked file off the UI thread, then asks for confirmation before any traffic. */
+    private void readFaceFile(Uri uri) {
+        String name = uri.getLastPathSegment();
+        setFacesStatus("Reading the face file...", false);
+        logPairing("face file · reading " + name);
+        new Thread(() -> {
+            byte[] bytes = null;
+            String failure = null;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new IOException("no stream");
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buffer = new byte[16 * 1024];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                    if (out.size() > BUZZ_UPLOAD_MAX_BYTES) {
+                        throw new IOException("file is larger than 8 MB");
+                    }
+                }
+                bytes = out.toByteArray();
+            } catch (IOException | SecurityException e) {
+                failure = e.getMessage();
+            }
+            final byte[] data = bytes;
+            final String error = failure;
+            runOnUiThread(() -> {
+                if (error != null) {
+                    setFacesStatus("Could not read the face file: " + error, true);
+                } else if (!BuzzUpload.isDialContainer(data)) {
+                    setFacesStatus(
+                            "That is not a NoiseFit dial file (it must start AF AF AF 02).", true);
+                } else {
+                    confirmCustomFace(name == null ? "watch-face file" : name, data);
+                }
+            });
+        }, "face-file-read").start();
+    }
+
+    private void confirmCustomFace(String name, byte[] data) {
+        new AlertDialog.Builder(this)
+                .setTitle("Install custom face")
+                .setMessage("Upload \"" + name + "\" (" + readableSize(data.length)
+                        + ") to the watch?\n\nThe watch installs it as a new face and keeps the "
+                        + "current one, so this is reversible. Keep the watch close and the app "
+                        + "open until it finishes.")
+                .setNegativeButton("Cancel", (dialog, which) ->
+                        setFacesStatus("Install cancelled.", false))
+                .setPositiveButton("Upload", (dialog, which) -> startBuzzUpload(data))
+                .show();
+    }
+
+    private void startBuzzUpload(byte[] container) {
+        if (!buzzFacesActive() || container == null || container.length == 0) {
+            setFacesStatus("Connect the watch before installing a face.", true);
+            return;
+        }
+        if (buzzUploadActive || buzzUploadPrepPending) return;
+        if (!BuzzUpload.isDialContainer(container)) {
+            setFacesStatus("That is not a NoiseFit dial file.", true);
+            return;
+        }
+        // A list read or set that is still in flight shares the reply router; drop it.
+        cancelFacesTimeout();
+        buzzFacePending = false;
+        buzzFaceSetPending = false;
+        buzzFaceSetId = "";
+        facesLoading = false;
+        buzzUploadActive = true;
+        buzzUploadPrepPending = false;
+        buzzUploadProgress = 0;
+        buzzUploadContainer = container;
+        logPairing("custom-face install requested · " + container.length + " B");
+        setFacesStatus("Preparing the watch for the face...", false);
+        // The upload stream's notifications are enabled only now, never during setup.
+        ensureLargeDataReady(() -> sendBuzzPrepare(container));
+    }
+
+    /** Enables the {@code 16186f04} CCCD on first use, then continues with the prepare packet. */
+    @SuppressWarnings("MissingPermission")
+    private void ensureLargeDataReady(Runnable onReady) {
+        if (seLargeDataChar == null) {
+            failBuzzUpload("This watch does not expose the face-upload channel.");
+            return;
+        }
+        if (seLargeDataNotifyEnabled) {
+            onReady.run();
+            return;
+        }
+        BluetoothGatt source = gatt;
+        if (source == null) {
+            failBuzzUpload("Connect the watch before installing a face.");
+            return;
+        }
+        BluetoothGattDescriptor descriptor = seLargeDataChar.getDescriptor(CLIENT_CONFIGURATION);
+        if (descriptor == null) {
+            failBuzzUpload("This watch cannot notify on the face-upload channel.");
+            return;
+        }
+        buzzUploadNotifyPending = onReady;
+        boolean requested;
+        try {
+            requested = source.setCharacteristicNotification(seLargeDataChar, true);
+            if (requested) {
+                byte[] configuration = (seLargeDataChar.getProperties()
+                        & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                        ? ENABLE_NOTIFICATION : ENABLE_INDICATION;
+                if (Build.VERSION.SDK_INT >= 33) {
+                    requested = source.writeDescriptor(descriptor, configuration)
+                            == BluetoothGatt.GATT_SUCCESS;
+                } else {
+                    descriptor.setValue(configuration);
+                    requested = source.writeDescriptor(descriptor);
+                }
+            }
+        } catch (SecurityException e) {
+            requested = false;
+        }
+        if (!requested) {
+            buzzUploadNotifyPending = null;
+            failBuzzUpload("Could not enable face-upload notifications.");
+            return;
+        }
+        cancelBuzzUploadNotifyTimeout();
+        buzzUploadNotifyTimeout = () -> {
+            buzzUploadNotifyTimeout = null;
+            buzzUploadNotifyPending = null;
+            failBuzzUpload("The watch did not enable face-upload notifications.");
+        };
+        handler.postDelayed(buzzUploadNotifyTimeout, BUZZ_UPLOAD_NOTIFY_TIMEOUT_MS);
+    }
+
+    private void sendBuzzPrepare(byte[] container) {
+        if (!buzzUploadActive) return;
+        buzzUploadPrepPending = true;
+        seTransportOpen = true;
+        logPairing("TX custom-face prepare · id 170 · " + container.length + " B");
+        sendSe(BuzzFace.requestPrepareInstall("170", container.length), "custom-face prepare");
+        armBuzzUploadTimeout("No reply from the watch to the face install.",
+                BUZZ_UPLOAD_PREPARE_TIMEOUT_MS);
+    }
+
+    /** Handles the prepare reply: only {@code READY} proceeds to streaming the file. */
+    private void onBuzzPrepareReply(byte[] message) {
+        if (!buzzUploadPrepPending) return;
+        if (!BuzzFace.isWatchFace(message)) return; // not ours; keep waiting for the prepare reply
+        int status = BuzzFace.parsePrepareStatus(message);
+        if (status < 0) {
+            // A late list/set reply can share the router; only a real status advances the install.
+            logPairing("custom-face prepare · ignoring a WatchFace packet without a status");
+            return;
+        }
+        buzzUploadPrepPending = false;
+        cancelBuzzUploadTimeout();
+        if (status != BuzzFace.PREPARE_STATUS_READY) {
+            failBuzzUpload("The watch cannot take the face right now: "
+                    + BuzzFace.prepareStatusLabel(status) + ".");
+            return;
+        }
+        logPairing("custom-face prepare · READY");
+        beginBuzzUpload();
+    }
+
+    private void beginBuzzUpload() {
+        byte[] container = buzzUploadContainer;
+        if (container == null) {
+            failBuzzUpload("The face file was lost before the upload started.");
+            return;
+        }
+        buzzUploadFramed = BuzzUpload.frameWatch(container);
+        buzzUploadChunk = BuzzUpload.chunkSize(seMtu);
+        buzzUploadTotalBlocks = BuzzUpload.totalBlocks(buzzUploadFramed.length, buzzUploadChunk);
+        buzzUploadBlock = 1;
+        buzzUploadProgress = 0;
+        logPairing("custom-face upload · " + container.length + " B · framed "
+                + buzzUploadFramed.length + " B · " + buzzUploadTotalBlocks + " block(s) · chunk "
+                + buzzUploadChunk);
+        setFacesStatus("Uploading the face · keep the app open.", false);
+        sendBuzzBlock();
+    }
+
+    /** Announces one block and waits for the watch's go-ahead before sending its chunks. */
+    private void sendBuzzBlock() {
+        if (!buzzUploadActive) return;
+        if (buzzUploadBlock > buzzUploadTotalBlocks) {
+            finishBuzzUpload();
+            return;
+        }
+        if (seLargeDataChar == null) {
+            failBuzzUpload("The face-upload channel disappeared.");
+            return;
+        }
+        buzzUploadBlockFrames = BuzzUpload.blockChunks(
+                buzzUploadFramed, buzzUploadChunk, buzzUploadBlock);
+        buzzUploadBlockChunks = buzzUploadBlockFrames.size();
+        buzzUploadChunkIndex = 0;
+        buzzUploadAwaitingGoAhead = true;
+        buzzUploadBlockDone = false;
+        logPairing("upload block " + buzzUploadBlock + "/" + buzzUploadTotalBlocks
+                + " · announce " + buzzUploadBlockChunks + " chunk(s)");
+        if (!writeBuzzData(BuzzUpload.announceBlock(buzzUploadBlockChunks))) {
+            failBuzzUpload("The Bluetooth stack rejected a face-upload block.");
+            return;
+        }
+        armBuzzUploadTimeout("The watch stopped answering during the face upload.",
+                BUZZ_UPLOAD_ACK_TIMEOUT_MS);
+    }
+
+    private void sendNextBuzzChunk() {
+        if (!buzzUploadActive || buzzUploadBlockFrames == null) return;
+        if (buzzUploadChunkIndex >= buzzUploadBlockFrames.size()) {
+            armBuzzUploadTimeout("The watch did not finish the face-upload block.",
+                    BUZZ_UPLOAD_ACK_TIMEOUT_MS);
+            return;
+        }
+        if (!writeBuzzData(buzzUploadBlockFrames.get(buzzUploadChunkIndex))) {
+            // A no-response write can be refused while the controller queue is full.
+            handler.postDelayed(this::sendNextBuzzChunk, 40L);
+            return;
+        }
+        buzzUploadChunkIndex++;
+        armBuzzUploadTimeout("The watch stopped answering during the face upload.",
+                BUZZ_UPLOAD_ACK_TIMEOUT_MS);
+        if (buzzUploadChunkIndex < buzzUploadBlockFrames.size()) {
+            handler.postDelayed(this::sendNextBuzzChunk, BUZZ_UPLOAD_CHUNK_GAP_MS);
+        }
+    }
+
+    /** One notification from {@code 16186f04}: go-ahead, block complete, or resend a chunk. */
+    private void handleBuzzUploadNotification(byte[] value) {
+        if (value == null || value.length == 0) return;
+        logPairing("RX 6f04 · " + hex(value));
+        if (!buzzUploadActive) return;
+        int ack = BuzzUpload.classifyAck(value);
+        if (ack == BuzzUpload.ACK_GO_AHEAD) {
+            if (!buzzUploadAwaitingGoAhead) return;
+            buzzUploadAwaitingGoAhead = false;
+            cancelBuzzUploadTimeout();
+            logPairing("upload block " + buzzUploadBlock + " · go-ahead");
+            sendNextBuzzChunk();
+        } else if (ack == BuzzUpload.ACK_RESEND) {
+            int index = BuzzUpload.resendIndex(value);
+            logPairing("upload block " + buzzUploadBlock + " · resend chunk " + index);
+            resendBuzzChunk(index);
+        } else if (ack == BuzzUpload.ACK_BLOCK_DONE) {
+            onBuzzBlockDone();
+        }
+    }
+
+    private void resendBuzzChunk(int index) {
+        if (!buzzUploadActive || buzzUploadBlockFrames == null || index < 1) return;
+        int at = index - 1;
+        if (at >= buzzUploadBlockFrames.size()) return;
+        writeBuzzData(buzzUploadBlockFrames.get(at));
+        armBuzzUploadTimeout("The watch stopped answering during the face upload.",
+                BUZZ_UPLOAD_ACK_TIMEOUT_MS);
+    }
+
+    private void onBuzzBlockDone() {
+        if (!buzzUploadActive || buzzUploadBlockDone) return;
+        // A block-complete before every chunk was written is a protocol surprise; do not advance.
+        if (buzzUploadAwaitingGoAhead || buzzUploadChunkIndex < buzzUploadBlockChunks) return;
+        buzzUploadBlockDone = true;
+        cancelBuzzUploadTimeout();
+        int done = buzzUploadBlock;
+        buzzUploadProgress = (int) ((done * 100L) / buzzUploadTotalBlocks);
+        logPairing("upload block " + done + "/" + buzzUploadTotalBlocks + " · done");
+        setFacesStatus("Uploading the face · " + buzzUploadProgress + "%", false);
+        buzzUploadBlock++;
+        handler.postDelayed(this::sendBuzzBlock, BUZZ_UPLOAD_CHUNK_GAP_MS);
+    }
+
+    private void finishBuzzUpload() {
+        buzzUploadActive = false;
+        cancelBuzzUploadTimeout();
+        buzzUploadFramed = null;
+        buzzUploadBlockFrames = null;
+        buzzUploadContainer = null;
+        buzzUploadProgress = 100;
+        logPairing("custom-face upload complete · re-reading the face list");
+        setFacesStatus("Face uploaded. The watch is installing it; re-reading the list...", false);
+        handler.postDelayed(() -> {
+            buzzUploadProgress = -1;
+            if (buzzFacesActive()) requestWatchFaceList();
+            else refreshFaces();
+        }, BUZZ_UPLOAD_SETTLE_MS);
+    }
+
+    /** Stops an upload after any failure or timeout, leaving the watch to reset on its own. */
+    private void failBuzzUpload(String message) {
+        boolean wasRunning = buzzUploadActive || buzzUploadPrepPending;
+        buzzUploadActive = false;
+        buzzUploadPrepPending = false;
+        cancelBuzzUploadTimeout();
+        buzzUploadContainer = null;
+        buzzUploadFramed = null;
+        buzzUploadBlockFrames = null;
+        buzzUploadProgress = -1;
+        if (wasRunning) logPairing("custom-face upload aborted · " + message);
+        setFacesStatus(message, true);
+    }
+
+    private boolean writeBuzzData(byte[] value) {
+        return writeGattValue(seLargeDataChar, value);
+    }
+
+    private void armBuzzUploadTimeout(String message, long delayMs) {
+        cancelBuzzUploadTimeout();
+        buzzUploadTimeout = () -> {
+            buzzUploadTimeout = null;
+            failBuzzUpload(message);
+        };
+        handler.postDelayed(buzzUploadTimeout, delayMs);
+    }
+
+    private void cancelBuzzUploadTimeout() {
+        if (buzzUploadTimeout != null) {
+            handler.removeCallbacks(buzzUploadTimeout);
+            buzzUploadTimeout = null;
+        }
+    }
+
+    private void cancelBuzzUploadNotifyTimeout() {
+        if (buzzUploadNotifyTimeout != null) {
+            handler.removeCallbacks(buzzUploadNotifyTimeout);
+            buzzUploadNotifyTimeout = null;
+        }
+    }
+
+    /** Drops every upload field, used when the link is rebuilt. */
+    private void resetBuzzUploadState() {
+        buzzUploadActive = false;
+        buzzUploadPrepPending = false;
+        cancelBuzzUploadTimeout();
+        cancelBuzzUploadNotifyTimeout();
+        buzzUploadNotifyPending = null;
+        buzzUploadContainer = null;
+        buzzUploadFramed = null;
+        buzzUploadBlockFrames = null;
+        buzzUploadProgress = -1;
+        seLargeDataNotifyEnabled = false;
+        seLargeDataChar = null;
+    }
+
+    private static String readableSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024) + " KB";
+        return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
     /** Requests battery and firmware. The reply arrives on key 0x08. */
@@ -5036,6 +5510,7 @@ public final class MainActivity extends ComponentActivity {
         zhContinuousActive = false;
         clearZhWriteQueue();
         cancelSeTimeouts();
+        resetBuzzUploadState();
         seWriteQueue.clear();
         seCurrentWrite = null;
         seAwaitingReady = false;

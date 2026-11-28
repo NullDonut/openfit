@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,13 +49,18 @@ data class FacesUiState(
     val statusIsError: Boolean,
     val loading: Boolean,
     /** True only on the ZhBracelet / ColorFit profile, where setting a current face is wired. */
-    val canSet: Boolean = false
+    val canSet: Boolean = false,
+    /** True only when a custom dial can be installed right now (Buzz, connected, idle). */
+    val canInstall: Boolean = false,
+    /** 0..100 while a custom-face upload is streaming, else -1. */
+    val uploadProgress: Int = -1
 )
 
 /** Every action the Faces screen can start. */
 interface FacesActions {
     fun onRefresh()
     fun onSetFace(id: String)
+    fun onInstallCustomFace()
 }
 
 class FacesScreenController(private val actions: FacesActions) {
@@ -97,10 +103,17 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = if (state.canSet) {
-                "Tap a face to make it current. The watch confirms the change; you can undo it on the watch."
-            } else {
-                "Read-only for now. This lists the faces the watch reports and marks the one it is using."
+            text = when {
+                state.canInstall ->
+                    "Tap a face to make it current, or install a custom dial from this phone. " +
+                        "Nothing is uploaded until you pick a file and confirm; the current face " +
+                        "is kept."
+                state.canSet ->
+                    "Tap a face to make it current. The watch confirms the change; you can undo " +
+                        "it on the watch."
+                else ->
+                    "Read-only for now. This lists the faces the watch reports and marks the one " +
+                        "it is using."
             },
             style = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -158,10 +171,50 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
                 }
                 Spacer(Modifier.height(12.dp))
                 SecondaryButton(
-                    label = if (state.loading) "Reading…" else "Refresh faces",
+                    label = when {
+                        state.loading -> "Reading…"
+                        state.uploadProgress >= 0 -> "Installing…"
+                        else -> "Refresh faces"
+                    },
                     modifier = Modifier.fillMaxWidth(),
-                    onClick = { if (!state.loading) actions.onRefresh() }
+                    onClick = {
+                        if (!state.loading && state.uploadProgress < 0) actions.onRefresh()
+                    }
                 )
+                if (state.canInstall) {
+                    Spacer(Modifier.height(8.dp))
+                    SecondaryButton(
+                        label = if (state.uploadProgress >= 0) {
+                            "Installing face..."
+                        } else {
+                            "Install custom face"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            if (!state.loading && state.uploadProgress < 0) {
+                                actions.onInstallCustomFace()
+                            }
+                        }
+                    )
+                }
+                if (state.uploadProgress >= 0) {
+                    Spacer(Modifier.height(14.dp))
+                    LinearProgressIndicator(
+                        progress = { state.uploadProgress.coerceIn(0, 100) / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "UPLOADING CUSTOM FACE  " +
+                            state.uploadProgress.coerceIn(0, 100) + "%",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        letterSpacing = 0.6.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
 
@@ -178,10 +231,13 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
 
         Spacer(Modifier.height(26.dp))
         Text(
-            text = if (state.canSet) {
-                "TAP A FACE TO MAKE IT CURRENT\nSETTING A FACE IS LIVE · CUSTOM UPLOAD COMES NEXT"
-            } else {
-                "READ-ONLY DISCOVERY\nFACE SWITCHING AND CUSTOM UPLOAD COME NEXT"
+            text = when {
+                state.canInstall ->
+                    "TAP A FACE TO MAKE IT CURRENT\nINSTALL CUSTOM FACE IS LIVE · IT ASKS FIRST"
+                state.canSet ->
+                    "TAP A FACE TO MAKE IT CURRENT\nSETTING A FACE IS LIVE"
+                else ->
+                    "READ-ONLY DISCOVERY\nFACE SWITCHING AND CUSTOM UPLOAD COME NEXT"
             },
             modifier = Modifier.fillMaxWidth(),
             fontFamily = FontFamily.Monospace,

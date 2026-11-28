@@ -51,6 +51,11 @@ public final class BuzzUpload {
     /** {@code startUploadBigData("watch", ...)} framing type. */
     public static final int TYPE_WATCH = 16;
 
+    /** Magic at the start of every ZhBracelet dial container ({@code mergeDialFile} output). */
+    public static final byte[] DIAL_MAGIC = {(byte) 0xaf, (byte) 0xaf, (byte) 0xaf, 0x02};
+    /** Fixed dial header before the per-block size table. */
+    public static final int DIAL_HEADER_BYTES = 26;
+
     /** The acknowledged results of one {@code 16186f04} frame. */
     public static final int ACK_NONE = 0;
     public static final int ACK_GO_AHEAD = 1;   // 00 00 01 01 00 00: send this block's chunks
@@ -77,6 +82,23 @@ public final class BuzzUpload {
         crc.update(frame, 0, HEADER_BYTES + body.length);
         writeLe32(frame, HEADER_BYTES + body.length, (int) crc.getValue());
         return frame;
+    }
+
+    /**
+     * True when {@code data} is a self-consistent {@code AF AF AF 02} ZhBracelet dial: the magic,
+     * a positive block count and payload length, and a length that exactly matches the header,
+     * the two-byte-per-block table and the compressed payload. This is the same container
+     * {@code LzoUtils.mergeDialFile} produces, so it is accepted and uploaded as-is.
+     */
+    public static boolean isDialContainer(byte[] data) {
+        if (data == null || data.length < DIAL_HEADER_BYTES) return false;
+        if ((data[0] & 0xff) != 0xaf || (data[1] & 0xff) != 0xaf
+                || (data[2] & 0xff) != 0xaf || (data[3] & 0xff) != 0x02) return false;
+        int blocks = (data[24] & 0xff) | ((data[25] & 0xff) << 8);
+        long payloadLength = readLe32(data, 12) & 0xffffffffL;
+        if (blocks <= 0 || payloadLength <= 0) return false;
+        long expected = (long) DIAL_HEADER_BYTES + 2L * blocks + payloadLength;
+        return expected == data.length;
     }
 
     /** Usable chunk length at the given GATT MTU: {@code max(20, mtu - 3)}. */
@@ -186,6 +208,13 @@ public final class BuzzUpload {
     public static int resendIndex(byte[] value) {
         if (value == null || value.length < 6) return 0;
         return (value[4] & 0xff) | ((value[5] & 0xff) << 8);
+    }
+
+    private static int readLe32(byte[] data, int offset) {
+        return (data[offset] & 0xff)
+                | ((data[offset + 1] & 0xff) << 8)
+                | ((data[offset + 2] & 0xff) << 16)
+                | ((data[offset + 3] & 0xff) << 24);
     }
 
     private static void writeLe32(byte[] out, int offset, int value) {

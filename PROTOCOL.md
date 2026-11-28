@@ -1217,15 +1217,19 @@ per-chunk packet-number prefix.
 
 **OpenFit status.** The prepare packet, the prepare-status / install-result parsers and the
 big-data framing are implemented and unit-tested (`BuzzFace.requestPrepareInstall`,
-`BuzzFace.parsePrepareStatus`, and `BuzzUpload`), but **not wired**: prepare and upload have never
-been sent to hardware, so the read and set commands above are still the only face traffic OpenFit
-emits. The custom-face container is now known: the `AF AF AF 02` file is a ZhBracelet "dial" built
-by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to `DiyDialUtilsFather` as
-`onDialData(id, bytes)`, so it is exactly the payload the upload streams — magic + raw length + raw
-CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and the LZO
-blocks, with `26 + 2*blocks + payloadLen` equal to the file length. On the saved-binding Buzz path
-`seMtu` stays 23, so an implementation would get `chunk = 20` (`chunksPerBlock = 200`,
-`blockBytes = 3596`) unless it requests a larger MTU first.
+`BuzzFace.parsePrepareStatus`, and `BuzzUpload`), and the transport is now wired end to end behind
+an explicit **Install custom face** action on the Faces screen. Nothing is uploaded automatically:
+the user picks a file, OpenFit checks the `AF AF AF 02` container, shows a confirmation, and only
+then enables the `16186f04` notifications (lazily, never during connection setup), sends prepare and
+streams the file once the reply is `READY`. The read and set commands above are unchanged. The
+upload has **not been hardware-confirmed yet**. The custom-face container is known: the
+`AF AF AF 02` file is a ZhBracelet "dial" built by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile`
+and handed to `DiyDialUtilsFather` as `onDialData(id, bytes)`, so it is exactly the payload the
+upload streams — magic + raw length + raw CRC + compressed length + payload CRC + block count, then
+a two-byte-per-block table and the LZO blocks, with `26 + 2*blocks + payloadLen` equal to the file
+length. On the saved-binding Buzz path `seMtu` stays 23, so the uploader uses `chunk = 20`
+(`chunksPerBlock = 200`, `blockBytes = 3596`) unless a larger MTU is negotiated; the supplied test
+dial is 199732 B, framed to 199758 B, which is 56 blocks at that chunk size.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
