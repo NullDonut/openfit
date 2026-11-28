@@ -32,6 +32,8 @@ import java.util.Locale
 /** One face the watch reported on SE id 80. [id] is the watch's own opaque string. */
 data class WatchFaceUi(
     val id: String,
+    /** Optional friendly label the watch may report; empty when it only sends ids. */
+    val name: String = "",
     val current: Boolean,
     val removable: Boolean
 )
@@ -164,7 +166,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
                                         color = MaterialTheme.colorScheme.outlineVariant
                                     )
                                 }
-                                FaceRow(face, state.canSet && !state.loading, actions)
+                                FaceRow(index, face, state.canSet && !state.loading, actions)
                             }
                         }
                     }
@@ -250,7 +252,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
 }
 
 @Composable
-private fun FaceRow(face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
+private fun FaceRow(index: Int, face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
     // Only a non-current face on the set-capable profile is tappable; the activity confirms.
     val settable = canSet && !face.current
     Row(
@@ -260,10 +262,9 @@ private fun FaceRow(face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val label = if (face.id.isEmpty()) "UNKNOWN" else face.id.uppercase(Locale.ROOT)
         Column(Modifier.weight(1f)) {
             Text(
-                text = "FACE " + label,
+                text = faceTitle(index, face),
                 style = MaterialTheme.typography.bodyMedium,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
@@ -271,7 +272,7 @@ private fun FaceRow(face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = if (face.removable) "Stored on the watch" else "Built in",
+                text = faceSubtitle(face),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -291,6 +292,30 @@ private fun FaceRow(face: WatchFaceUi, canSet: Boolean, actions: FacesActions) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/** The face's friendly name when the watch reports one, else a stable positional label. */
+private fun faceTitle(index: Int, face: WatchFaceUi): String {
+    val name = face.name.trim()
+    return if (name.isNotEmpty()) name else "Face " + (index + 1)
+}
+
+/** Secondary line: built-in vs custom, with a shortened id so custom faces stay distinct. */
+private fun faceSubtitle(face: WatchFaceUi): String {
+    if (!face.removable) return "Built in"
+    val short = shortFaceId(face.id)
+    return if (short.isEmpty()) "Custom face" else "Custom face · " + short
+}
+
+private fun shortFaceId(id: String): String {
+    val trimmed = id.trim()
+    if (trimmed.isEmpty()) return ""
+    return if (trimmed.length <= 12) {
+        trimmed.lowercase(Locale.ROOT)
+    } else {
+        trimmed.substring(0, 4).lowercase(Locale.ROOT) + "…" +
+            trimmed.substring(trimmed.length - 4).lowercase(Locale.ROOT)
     }
 }
 

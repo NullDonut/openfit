@@ -625,20 +625,31 @@ public final class SeCommands {
         }
     }
 
-    /** One entry of the watch's face list (id 80). {@code id} is the vendor's opaque string. */
+    /**
+     * One entry of the watch's face list (id 80). {@code id} is the vendor's opaque string.
+     * {@code name} is the optional human-readable label the Buzz carries in {@code WatchFaceItem}
+     * field 2; it is empty on replies (or profiles) that only report ids, so the UI numbers those.
+     */
     public static final class WatchFace {
         public final String id;
+        public final String name;
         public final boolean current;
         public final boolean removable;
 
         WatchFace(String id, boolean current, boolean removable) {
+            this(id, "", current, removable);
+        }
+
+        WatchFace(String id, String name, boolean current, boolean removable) {
             this.id = id;
+            this.name = name == null ? "" : name;
             this.current = current;
             this.removable = removable;
         }
 
         @Override public String toString() {
             StringBuilder out = new StringBuilder("face{id=").append(id);
+            if (!name.isEmpty()) out.append(", name=").append(name);
             if (current) out.append(", current");
             if (removable) out.append(", removable");
             return out.append('}').toString();

@@ -34,9 +34,11 @@ public class BuzzFaceTest {
         List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(reply);
         assertEquals(2, faces.size());
         assertEquals("w1", faces.get(0).id);
+        assertEquals("Classic", faces.get(0).name);
         assertTrue(faces.get(0).current);
         assertFalse(faces.get(0).removable);
         assertEquals("w2", faces.get(1).id);
+        assertEquals("Sport", faces.get(1).name);
         assertFalse(faces.get(1).current);
         assertTrue(faces.get(1).removable);
     }
@@ -50,7 +52,9 @@ public class BuzzFaceTest {
         List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(reply);
         assertEquals(2, faces.size());
         assertEquals("builtin-1", faces.get(0).id);
+        assertEquals("", faces.get(0).name);
         assertEquals("builtin-2", faces.get(1).id);
+        assertEquals("", faces.get(1).name);
         assertFalse(faces.get(0).current);
         assertFalse(faces.get(1).removable);
     }

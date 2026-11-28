@@ -4697,7 +4697,7 @@ public final class MainActivity extends ComponentActivity {
         if (facesScreen == null) return;
         List<WatchFaceUi> rows = new ArrayList<>();
         for (SeCommands.WatchFace face : watchFaces) {
-            rows.add(new WatchFaceUi(face.id, face.current, face.removable));
+            rows.add(new WatchFaceUi(face.id, face.name, face.current, face.removable));
         }
         boolean canInstall = buzzFacesActive() && seLargeDataChar != null
                 && !facesLoading && !buzzUploadActive && !buzzUploadPrepPending;

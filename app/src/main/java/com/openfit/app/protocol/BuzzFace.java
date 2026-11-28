@@ -79,6 +79,7 @@ public final class BuzzFace {
     private static final int PREPARE_INFO_FIELD_VERSION_CODE = 3;
 
     private static final int ITEM_FIELD_ID = 1;
+    private static final int ITEM_FIELD_NAME = 2;
     private static final int ITEM_FIELD_IS_CURRENT = 3;
     private static final int ITEM_FIELD_CAN_REMOVE = 4;
 
@@ -227,9 +228,10 @@ public final class BuzzFace {
             for (byte[] item : SeWear.readMessages(items, LIST_FIELD)) {
                 String id = SeWear.readStringField(item, ITEM_FIELD_ID);
                 if (id == null || id.isEmpty()) continue;
+                String name = SeWear.readStringField(item, ITEM_FIELD_NAME);
                 boolean current = SeWear.readVarintField(item, ITEM_FIELD_IS_CURRENT) == 1;
                 boolean removable = SeWear.readVarintField(item, ITEM_FIELD_CAN_REMOVE) == 1;
-                faces.add(new SeCommands.WatchFace(id, current, removable));
+                faces.add(new SeCommands.WatchFace(id, name == null ? "" : name, current, removable));
             }
             return faces;
         }
