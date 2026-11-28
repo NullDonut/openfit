@@ -68,7 +68,6 @@ public final class Lzo1x {
         Arrays.fill(dict, 0);
         final int dstBase = dstOff;
         final int ipEnd = srcOff + srcLen - 20;
-        final int srcEnd = srcOff + srcLen;
         int op = dstOff;
         int ip = srcOff + 4; // the reference starts four bytes in, then advances once before hashing
         int ii = srcOff;
@@ -127,28 +126,26 @@ public final class Lzo1x {
                 }
             }
 
-            // Extend the match exactly like the reference's 64-bit fast path: compare eight
-            // bytes at a time and stop as soon as the hashing window ends.
+            // Extend the match exactly like the reference's 64-bit fast path (the Buzz phone is
+            // arm64, so the vendor's native lzo takes this branch): compare eight bytes at a time
+            // and stop once the hashing window ends.
             int mLen = 4;
-            int v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
+            long v = le64(src, ip + mLen) ^ le64(src, mPos + mLen);
             if (v == 0) {
                 boolean stopped = false;
                 do {
-                    mLen += 4;
-                    v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
-                    if (v != 0) break;
-                    mLen += 4;
-                    v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
+                    mLen += 8;
+                    v = le64(src, ip + mLen) ^ le64(src, mPos + mLen);
                     if (ip + mLen >= ipEnd) {
                         stopped = true;
                         break;
                     }
                 } while (v == 0);
                 if (!stopped) {
-                    mLen += Integer.numberOfTrailingZeros(v) >>> 3;
+                    mLen += Long.numberOfTrailingZeros(v) >>> 3;
                 }
             } else {
-                mLen += Integer.numberOfTrailingZeros(v) >>> 3;
+                mLen += Long.numberOfTrailingZeros(v) >>> 3;
             }
             ip += mLen;
             ii = ip;
@@ -230,4 +227,14 @@ public final class Lzo1x {
                 | ((b[at + 2] & 0xff) << 16) | ((b[at + 3] & 0xff) << 24);
     }
 
+    private static long le64(byte[] b, int at) {
+        return (b[at] & 0xffL)
+                | ((b[at + 1] & 0xffL) << 8)
+                | ((b[at + 2] & 0xffL) << 16)
+                | ((b[at + 3] & 0xffL) << 24)
+                | ((b[at + 4] & 0xffL) << 32)
+                | ((b[at + 5] & 0xffL) << 40)
+                | ((b[at + 6] & 0xffL) << 48)
+                | ((b[at + 7] & 0xffL) << 56);
     }
+}
