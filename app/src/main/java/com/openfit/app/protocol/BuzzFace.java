@@ -87,9 +87,10 @@ public final class BuzzFace {
      * is the phone-to-watch payloadCase 2. The watch answers with {@code watch_face_list} carrying
      * the new {@code is_current}, or with {@code success} (field 4).
      *
-     * <p>This is a probe: the vendor app never sends {@code SET_WATCH_FACE}, so the firmware's
-     * handling of it is unproven. It only changes which face is shown, which the user can undo on
-     * the watch.
+     * <p>The vendor app never sends {@code SET_WATCH_FACE}, but the Buzz firmware accepts it
+     * (hardware-confirmed 2026-11-28): it answers {@code watch_face{success}} and the new current
+     * face is visible on the next list read. It only changes which face is shown, which the user
+     * can undo on the watch.
      */
     public static byte[] requestSetFace(String id) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();

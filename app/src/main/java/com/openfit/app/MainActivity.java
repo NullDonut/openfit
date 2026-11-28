@@ -4408,7 +4408,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Watch faces (SE ids 80/85 on the Watch Beat; WearPacket discovery and a set probe on the Buzz)
+    // Watch faces (SE ids 80/85 on the Watch Beat; WearPacket discovery and set on the Buzz)
     // ---------------------------------------------------------------------------------------
 
     private void onOpenWatchFaces() {

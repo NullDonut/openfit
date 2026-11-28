@@ -1090,12 +1090,18 @@ This is read-only discovery: the list request never changes anything. `SET_WATCH
 by the vendor app at all — its only face write is installing a downloaded file
 (`PREPARE_INSTALL_WATCH_FACE`), so removal and custom upload remain unobserved.
 
-**Set-face probe.** OpenFit also offers an explicit "make current" action on the Buzz:
+**Set current face — confirmed on hardware (2026-11-28).** An explicit "make current" action sends
 `WearPacket{type=WATCH_FACE, id=SET_WATCH_FACE(1), watch_face{ id: "<face id>" }}`, i.e.
-`08 04 10 01 32 <len> 12 <len> <id>` (`WatchFace.id` is field 2, string). The watch should answer
-with `watch_face_list` (the new `is_current`) or `success` (field 4, `08 04 10 01 32 02 20 01`).
-Because the vendor never exercises this path, the firmware's handling is **unproven**: it is a
-probe, offered only on the Buzz, behind a confirmation, and reversible on the watch.
+`08 04 10 01 32 16 12 14 <20 ASCII bytes>` (`WatchFace.id` is field 2, string). The Buzz answers
+`WearPacket{type=WATCH_FACE, id=1, watch_face{ success: true }}` — `08 04 10 01 32 02 20 01` — and
+`is_current` moves on the following `GET_INSTALLED_LIST`, which the app re-reads automatically.
+The vendor app never sends this, but the firmware implements it. OpenFit keeps it behind a
+confirmation; it is reversible on the watch.
+
+Note the Buzz's outbound chunk size is not fixed: the same 214-byte list arrived as a single
+notification on one read and as 12 × 18-byte chunks after a set. OpenFit's reassembler handles
+both, and its 28-byte set request is announced as two 18-byte chunks (`seMtu` is still 23 because
+the ZhBracelet path never calls `requestMtu`).
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 

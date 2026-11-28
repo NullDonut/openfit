@@ -47,7 +47,7 @@ data class FacesUiState(
     val status: String,
     val statusIsError: Boolean,
     val loading: Boolean,
-    /** True only on the ZhBracelet / ColorFit profile, where the set-face probe is wired. */
+    /** True only on the ZhBracelet / ColorFit profile, where setting a current face is wired. */
     val canSet: Boolean = false
 )
 
@@ -179,7 +179,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         Spacer(Modifier.height(26.dp))
         Text(
             text = if (state.canSet) {
-                "TAP A FACE TO MAKE IT CURRENT\nFACE SWITCHING IS A PROBE · CUSTOM UPLOAD COMES NEXT"
+                "TAP A FACE TO MAKE IT CURRENT\nSETTING A FACE IS LIVE · CUSTOM UPLOAD COMES NEXT"
             } else {
                 "READ-ONLY DISCOVERY\nFACE SWITCHING AND CUSTOM UPLOAD COME NEXT"
             },
