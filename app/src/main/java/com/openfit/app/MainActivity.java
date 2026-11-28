@@ -1505,6 +1505,12 @@ public final class MainActivity extends ComponentActivity {
         if (newState == BluetoothProfile.STATE_DISCONNECTED) {
             cancelConnectionTimeout();
             logBle("Disconnected · GATT status " + status);
+            if (buzzUploadActive || buzzUploadPrepPending) {
+                // The link dropped mid-install; stop cleanly and explain instead of waiting out the
+                // upload watchdog on a dead connection.
+                failBuzzUpload("The watch disconnected during the face install. "
+                        + "Reconnect and try again.");
+            }
             if (berryPhase) {
                 // The Berry channel sits beside the SE command channel, so a GATT drop during the
                 // Berry bind must not tear down the pairing UI; the attempt ends with the link.
@@ -3675,6 +3681,15 @@ public final class MainActivity extends ComponentActivity {
         while (pairingLog.size() > 200) pairingLog.remove(0);
     }
 
+    /**
+     * An install milestone. Written to the persistent connection log as well as the pairing log, so
+     * a reconnect (which clears the pairing log) cannot hide where a failed install stopped.
+     */
+    private void logInstall(String message) {
+        logBle(message);
+        logPairing(message);
+    }
+
     private static String hex(byte[] data) {
         if (data == null) return "null";
         StringBuilder out = new StringBuilder(data.length * 2);
@@ -4991,7 +5006,7 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadPrepareBusyScheduled = false;
         buzzUploadProgress = 0;
         buzzUploadContainer = container;
-        logPairing("custom-face install requested · " + container.length + " B");
+        logInstall("custom-face install requested · " + container.length + " B");
         setFacesStatus("Preparing the watch for the face...", false);
         // The upload stream's notifications are enabled only now, never during setup. Raise the MTU
         // first, then enable 6f04, then send prepare.
@@ -5019,19 +5034,19 @@ public final class MainActivity extends ComponentActivity {
         }
         if (!requested) {
             buzzUploadMtuPending = null;
-            logPairing("custom-face upload · MTU request refused, chunk "
+            logInstall("custom-face upload · MTU request refused, chunk "
                     + BuzzUpload.chunkSize(seMtu));
             onReady.run();
             return;
         }
-        logPairing("custom-face upload · requesting MTU " + BUZZ_UPLOAD_MTU_REQUEST);
+        logInstall("custom-face upload · requesting MTU " + BUZZ_UPLOAD_MTU_REQUEST);
         cancelBuzzUploadMtuTimeout();
         buzzUploadMtuTimeout = () -> {
             buzzUploadMtuTimeout = null;
             Runnable pending = buzzUploadMtuPending;
             buzzUploadMtuPending = null;
             if (pending != null) {
-                logPairing("custom-face upload · MTU request timed out, chunk "
+                logInstall("custom-face upload · MTU request timed out, chunk "
                         + BuzzUpload.chunkSize(seMtu));
                 pending.run();
             }
@@ -5097,7 +5112,7 @@ public final class MainActivity extends ComponentActivity {
         if (!buzzUploadActive) return;
         buzzUploadPrepPending = true;
         seTransportOpen = true;
-        logPairing("TX custom-face prepare · id 170 · " + container.length + " B");
+        logInstall("TX custom-face prepare · id 170 · " + container.length + " B");
         sendSe(BuzzFace.requestPrepareInstall("170", container.length), "custom-face prepare");
         armBuzzUploadTimeout("No reply from the watch to the face install.",
                 BUZZ_UPLOAD_PREPARE_TIMEOUT_MS);
@@ -5116,7 +5131,7 @@ public final class MainActivity extends ComponentActivity {
             // The watch keeps a face-upload session open after an interrupted install and refuses
             // every new prepare with "busy" until it is power-cycled. Stop early with a real fix
             // instead of waiting out the watchdog and blaming a missing reply.
-            logPairing("custom-face prepare · watch still busy after "
+            logInstall("custom-face prepare · watch still busy after "
                     + buzzUploadPrepareBusyRetries + " retries");
             failBuzzUpload("The watch is still busy with an earlier install. "
                     + "Restart the watch, then try again.");
@@ -5124,14 +5139,14 @@ public final class MainActivity extends ComponentActivity {
         }
         buzzUploadPrepareBusyScheduled = true;
         int attempt = ++buzzUploadPrepareBusyRetries;
-        logPairing("custom-face prepare · watch busy, retry " + attempt + "/"
+        logInstall("custom-face prepare · watch busy, retry " + attempt + "/"
                 + BUZZ_UPLOAD_PREPARE_BUSY_MAX_RETRIES);
         handler.postDelayed(() -> {
             buzzUploadPrepareBusyScheduled = false;
             if (!buzzUploadActive || !buzzUploadPrepPending) return;
             byte[] container = buzzUploadContainer;
             if (container == null) return;
-            logPairing("TX custom-face prepare · retry " + attempt + " · id 170");
+            logInstall("TX custom-face prepare · retry " + attempt + " · id 170");
             sendSe(BuzzFace.requestPrepareInstall("170", container.length), "custom-face prepare");
             // Do not re-arm the watchdog: the first send already started the prepare deadline.
         }, BUZZ_UPLOAD_PREPARE_BUSY_RETRY_MS);
@@ -5144,7 +5159,7 @@ public final class MainActivity extends ComponentActivity {
         int status = BuzzFace.parsePrepareStatus(message);
         if (status < 0) {
             // A late list/set reply can share the router; only a real status advances the install.
-            logPairing("custom-face prepare · ignoring a WatchFace packet without a status");
+            logInstall("custom-face prepare · ignoring a WatchFace packet without a status");
             return;
         }
         buzzUploadPrepPending = false;
@@ -5154,7 +5169,7 @@ public final class MainActivity extends ComponentActivity {
                     + BuzzFace.prepareStatusLabel(status) + ".");
             return;
         }
-        logPairing("custom-face prepare · READY");
+        logInstall("custom-face prepare · READY");
         beginBuzzUpload();
     }
 
@@ -5169,7 +5184,7 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadTotalBlocks = BuzzUpload.totalBlocks(buzzUploadFramed.length, buzzUploadChunk);
         buzzUploadBlock = 1;
         buzzUploadProgress = 0;
-        logPairing("custom-face upload · " + container.length + " B · framed "
+        logInstall("custom-face upload · " + container.length + " B · framed "
                 + buzzUploadFramed.length + " B · " + buzzUploadTotalBlocks + " block(s) · chunk "
                 + buzzUploadChunk);
         setFacesStatus("Uploading the face · keep the app open.", false);
@@ -5260,8 +5275,15 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadBlockDone = true;
         cancelBuzzUploadTimeout();
         int done = buzzUploadBlock;
+        int previous = buzzUploadProgress;
         buzzUploadProgress = (int) ((done * 100L) / buzzUploadTotalBlocks);
         logPairing("upload block " + done + "/" + buzzUploadTotalBlocks + " · done");
+        // A sparse trail in the persistent log: every 10% plus the final block. Per-block logging
+        // would flood the 200-line connection log on a ~830-block upload.
+        if (done == buzzUploadTotalBlocks || buzzUploadProgress / 10 > previous / 10) {
+            logBle("custom-face upload · " + buzzUploadProgress + "% · block "
+                    + done + "/" + buzzUploadTotalBlocks);
+        }
         setFacesStatus("Uploading the face · " + buzzUploadProgress + "%", false);
         buzzUploadBlock++;
         handler.postDelayed(this::sendBuzzBlock, BUZZ_UPLOAD_CHUNK_GAP_MS);
@@ -5274,7 +5296,7 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadBlockFrames = null;
         buzzUploadContainer = null;
         buzzUploadProgress = 100;
-        logPairing("custom-face upload complete · re-reading the face list");
+        logInstall("custom-face upload complete · re-reading the face list");
         setFacesStatus("Face uploaded. The watch is installing it; re-reading the list...", false);
         handler.postDelayed(() -> {
             buzzUploadProgress = -1;
@@ -5295,7 +5317,7 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadFramed = null;
         buzzUploadBlockFrames = null;
         buzzUploadProgress = -1;
-        if (wasRunning) logPairing("custom-face upload aborted · " + message);
+        if (wasRunning) logInstall("custom-face upload aborted · " + message);
         setFacesStatus(message, true);
     }
 
