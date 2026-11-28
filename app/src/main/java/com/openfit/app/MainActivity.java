@@ -777,7 +777,8 @@ public final class MainActivity extends ComponentActivity {
         facesScreen = new FacesScreenController(new FacesActions() {
             @Override public void onRefresh() { requestWatchFaceList(); }
             @Override public void onSetFace(String id) { confirmSetFace(id); }
-            @Override public void onInstallCustomFace() { onInstallCustomFace(); }
+            // Qualified: an unqualified call here would resolve to this override and recurse.
+            @Override public void onInstallCustomFace() { MainActivity.this.onInstallCustomFace(); }
         });
         facesPanel.addView(facesScreen.createView(this), lp(-1, -2));
         refreshFaces();
