@@ -140,8 +140,8 @@ public class WatchFaceBuilderTest {
 
     @Test public void compressesTheVendorExampleToAboutItsKnownSize() {
         // The known-good Buzz dial is 199732 B: header + table + 199468 compressed bytes for a
-        // 486752 B raw. Our LZO output differs slightly in size but must stay in the same league,
-        // proving the wrapper really compresses rather than storing.
+        // 486752 B raw. The compressor reproduces liblzo2 byte for byte (see Lzo1xTest), so this
+        // only checks the wrapper really compresses rather than storing the blocks.
         byte[] raw = ramp(486752);
         int total = WatchFaceBuilder.wrap(raw).length;
         assertTrue("expected a compressed container, got " + total, total < 486752);

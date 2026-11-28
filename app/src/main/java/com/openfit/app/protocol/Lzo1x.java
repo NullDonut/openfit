@@ -4,14 +4,17 @@ import java.util.Arrays;
 
 /**
  * A small, allocation-free LZO1X-1 compressor, ported from the reference
- * {@code lzo1x_1_compress} (minilzo). The Buzz stores each 4096-byte dial block compressed with
- * this exact format; a block whose two-byte table entry has bit15 set is inflated by the watch.
+ * {@code lzo1x_1_compress} (minilzo, integer dictionary variant). The Buzz stores each 4096-byte
+ * dial block compressed with this exact format; a block whose two-byte table entry has bit15 set is
+ * inflated by the watch.
  *
- * <p>Only compression is implemented — the app never decompresses a dial. The output is a
- * standard LZO1X stream, so it is not byte-identical to the vendor's blocks but decodes to the same
- * bytes; that is all the watch needs.
+ * <p>The port deliberately follows the reference byte for byte: for the known-good Buzz dial it
+ * reproduces all 119 vendor blocks exactly (verified against {@code liblzo2}). The watch's own
+ * inflater is pickier than a general LZO decoder, so emitting the same stream the vendor app emits
+ * matters.
  *
- * <p>Android-free so it can be exercised on the JVM.
+ * <p>Only compression is implemented — the app never decompresses a dial. Android-free so it can be
+ * exercised on the JVM.
  */
 public final class Lzo1x {
     private Lzo1x() {}
@@ -31,6 +34,9 @@ public final class Lzo1x {
     private static final int D_HIGH = (D_MASK >> 1) + 1;  // 0x2000
     /** Dictionary slots, one int per slot. */
     public static final int DICT_SLOTS = 1 << D_BITS;
+
+    // DINDEX(dv,p) = DM(DMUL(0x1824429d,dv) >> (32-D_BITS)); the 32-bit product is truncated.
+    private static final long HASH_MUL = 0x1824429dL;
 
     /**
      * Worst-case output for {@code n} input bytes (the reference bound is
@@ -52,48 +58,49 @@ public final class Lzo1x {
      * from {@link #newDictionary()}.
      */
     public static int compress(byte[] src, int srcOff, int srcLen, byte[] dst, int dstOff, int[] dict) {
+        // The reference wrapper only starts the compressor when its loop-overlap guard
+        // `(t + ll) >> 5` is non-zero; with a single block that means blocks shorter than 32
+        // bytes are emitted as one literal run. Buzz blocks are 4096 bytes, but matching the
+        // reference exactly keeps this usable for any block size.
+        if (srcLen < 32) {
+            return tail(src, srcOff, srcLen, srcOff, dst, dstOff, dstOff);
+        }
         Arrays.fill(dict, 0);
-        final int ipEnd = srcLen - 20;
         final int dstBase = dstOff;
+        final int ipEnd = srcOff + srcLen - 20;
+        final int srcEnd = srcOff + srcLen;
         int op = dstOff;
-        int ip = 4; // ti == 0 in the reference wrapper
-        int ii = 0;
+        int ip = srcOff + 4; // the reference starts four bytes in, then advances once before hashing
+        int ii = srcOff;
+        boolean advance = true;
 
         for (;;) {
-            if (ip >= ipEnd) break;
-            int dindex = dindex1(src, srcOff, ip);
-            int stored = dict[dindex];
-            dict[dindex] = ip + 1;
-            int mPos = 0;
-            int mOff;
-            boolean matched = false;
-            if (stored != 0) {
-                mPos = stored - 1;
-                mOff = ip - mPos;
-                matched = mOff != 0 && mOff <= M4_MAX_OFFSET
-                        && (mOff <= M2_MAX_OFFSET
-                                || src[srcOff + mPos + 3] == src[srcOff + ip + 3]);
-            }
-            if (!matched) {
-                dindex = dindex2(dindex);
-                stored = dict[dindex];
-                dict[dindex] = ip + 1;
-                if (stored != 0) {
-                    mPos = stored - 1;
-                    mOff = ip - mPos;
-                    matched = mOff != 0 && mOff <= M4_MAX_OFFSET
-                            && (mOff <= M2_MAX_OFFSET
-                                    || src[srcOff + mPos + 3] == src[srcOff + ip + 3]);
-                }
-            }
-            if (!matched
-                    || src[srcOff + mPos] != src[srcOff + ip]
-                    || src[srcOff + mPos + 1] != src[srcOff + ip + 1]
-                    || src[srcOff + mPos + 2] != src[srcOff + ip + 2]
-                    || src[srcOff + mPos + 3] != src[srcOff + ip + 3]) {
-                // No match: advance a little faster the longer the pending literal run grows.
+            if (advance) {
                 ip += 1 + ((ip - ii) >> 5);
-                continue;
+            }
+            advance = true;
+
+            // Find a 4-byte match. The reference uses one dictionary probe per position, keyed by a
+            // multiplicative hash of the four bytes. The dictionary holds offsets from the start of
+            // the block and starts zeroed, so an untouched slot means "candidate at offset 0".
+            int mPos;
+            int mOff;
+            for (;;) {
+                if (ip >= ipEnd) {
+                    return tail(src, srcOff, srcLen, ii, dst, dstBase, op);
+                }
+                int relative = ip - srcOff;
+                int dv = le32(src, ip);
+                int index = (int) ((((HASH_MUL * (dv & 0xffffffffL)) & 0xffffffffL) >>> (32 - D_BITS))
+                        & D_MASK);
+                int stored = dict[index];
+                dict[index] = relative;
+                mPos = srcOff + stored;
+                if (le32(src, mPos) == dv) {
+                    mOff = relative - stored;
+                    break;
+                }
+                ip += 1 + ((ip - ii) >> 5);
             }
 
             // Flush the pending literals.
@@ -101,11 +108,11 @@ public final class Lzo1x {
             if (t != 0) {
                 if (t <= 3) {
                     dst[op - 2] = (byte) (dst[op - 2] | t);
-                    System.arraycopy(src, srcOff + ii, dst, op, t);
+                    System.arraycopy(src, ii, dst, op, t);
                     op += t;
                 } else if (t <= 18) {
                     dst[op++] = (byte) (t - 3);
-                    System.arraycopy(src, srcOff + ii, dst, op, t);
+                    System.arraycopy(src, ii, dst, op, t);
                     op += t;
                 } else {
                     int tt = t - 18;
@@ -115,17 +122,34 @@ public final class Lzo1x {
                         dst[op++] = 0;
                     }
                     dst[op++] = (byte) tt;
-                    System.arraycopy(src, ii + srcOff, dst, op, t);
+                    System.arraycopy(src, ii, dst, op, t);
                     op += t;
                 }
             }
 
-            // Extend the match to its full length.
+            // Extend the match exactly like the reference's 64-bit fast path: compare eight
+            // bytes at a time and stop as soon as the hashing window ends.
             int mLen = 4;
-            while (ip + mLen < ipEnd && src[srcOff + ip + mLen] == src[srcOff + mPos + mLen]) {
-                mLen++;
+            int v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
+            if (v == 0) {
+                boolean stopped = false;
+                do {
+                    mLen += 4;
+                    v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
+                    if (v != 0) break;
+                    mLen += 4;
+                    v = le32(src, ip + mLen) ^ le32(src, mPos + mLen);
+                    if (ip + mLen >= ipEnd) {
+                        stopped = true;
+                        break;
+                    }
+                } while (v == 0);
+                if (!stopped) {
+                    mLen += Integer.numberOfTrailingZeros(v) >>> 3;
+                }
+            } else {
+                mLen += Integer.numberOfTrailingZeros(v) >>> 3;
             }
-            mOff = ip - mPos;
             ip += mLen;
             ii = ip;
 
@@ -165,12 +189,18 @@ public final class Lzo1x {
                 dst[op++] = (byte) (mOff << 2);
                 dst[op++] = (byte) (mOff >> 6);
             }
-        }
 
-        // Flush the trailing literals and the end marker.
-        int tail = srcLen - ii;
+            // The reference jumps straight back to the hashing step after a match, without the
+            // literal-skip advance.
+            advance = false;
+        }
+    }
+
+    /** Flushes the trailing literals and the end marker, mirroring the reference wrapper. */
+    private static int tail(byte[] src, int srcOff, int srcLen, int ii,
+                            byte[] dst, int dstBase, int op) {
+        int tail = srcOff + srcLen - ii;
         if (tail > 0) {
-            int base = srcLen - tail;
             if (op == dstBase && tail <= 238) {
                 dst[op++] = (byte) (17 + tail);
             } else if (tail <= 3) {
@@ -186,7 +216,7 @@ public final class Lzo1x {
                 }
                 dst[op++] = (byte) tt;
             }
-            System.arraycopy(src, srcOff + base, dst, op, tail);
+            System.arraycopy(src, ii, dst, op, tail);
             op += tail;
         }
         dst[op++] = (byte) (M4_MARKER | 1);
@@ -195,14 +225,9 @@ public final class Lzo1x {
         return op - dstBase;
     }
 
-    private static int dindex1(byte[] b, int base, int p) {
-        long dx2 = ((((long) (b[base + p + 3] & 0xff) << 6) ^ (b[base + p + 2] & 0xff)) << 5)
-                ^ (b[base + p + 1] & 0xff);
-        long dx3 = (dx2 << 5) ^ (b[base + p] & 0xff);
-        return (int) ((((0x21L * dx3) & 0xffffffffL) >> 5) & D_MASK);
+    private static int le32(byte[] b, int at) {
+        return (b[at] & 0xff) | ((b[at + 1] & 0xff) << 8)
+                | ((b[at + 2] & 0xff) << 16) | ((b[at + 3] & 0xff) << 24);
     }
 
-    private static int dindex2(int d) {
-        return (d & (D_MASK & 0x7ff)) ^ (D_HIGH | 0x1f);
     }
-}
