@@ -4879,22 +4879,27 @@ public final class MainActivity extends ComponentActivity {
         logPairing("DIY face · reading the photo");
         new Thread(() -> {
             byte[] container = null;
+            String dialId = null;
             String failure = null;
             try {
                 byte[] template = loadDiyTemplate();
                 int[] argb = decodeDiyImage(uri);
+                // A fresh id, or the watch rejects the upload as a duplicate of the template's face.
+                dialId = WatchFaceBuilder.newDialId(template);
                 container = WatchFaceBuilder.build(template, argb,
-                        WatchFaceBuilder.BACKGROUND_WIDTH, WatchFaceBuilder.BACKGROUND_HEIGHT);
+                        WatchFaceBuilder.BACKGROUND_WIDTH, WatchFaceBuilder.BACKGROUND_HEIGHT, dialId);
             } catch (IOException | SecurityException | OutOfMemoryError
                     | IllegalArgumentException e) {
                 failure = e.getMessage() != null ? e.getMessage() : e.toString();
             }
             final byte[] built = container;
+            final String id = dialId;
             final String error = failure;
             runOnUiThread(() -> {
                 if (error != null) {
                     setFacesStatus("Could not build the face: " + error, true);
                 } else {
+                    logInstall("DIY face · id " + id + " · container " + built.length + " B");
                     confirmDiyFace(built);
                 }
             });

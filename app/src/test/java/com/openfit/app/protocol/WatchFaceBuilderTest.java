@@ -3,6 +3,7 @@ package com.openfit.app.protocol;
 import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Random;
 
@@ -133,6 +134,70 @@ public class WatchFaceBuilderTest {
         try {
             WatchFaceBuilder.wrap(new byte[0]);
             fail("an empty dial must be rejected");
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+    }
+
+    @Test public void buildWritesAFreshDialIdAndNothingElseChanges() {
+        byte[] template = new byte[WatchFaceBuilder.BACKGROUND_OFFSET
+                + WatchFaceBuilder.BACKGROUND_BYTES + 16];
+        Arrays.fill(template, (byte) 0x5a);
+        byte[] templateId = "00050201050040000000".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(templateId, 0, template, 0, templateId.length);
+        int pixels = WatchFaceBuilder.BACKGROUND_WIDTH * WatchFaceBuilder.BACKGROUND_HEIGHT;
+        int[] argb = new int[pixels];
+        Arrays.fill(argb, 0xff1e90ff);
+
+        String dialId = "00050201050012345678";
+        byte[] dial = WatchFaceBuilder.build(template, argb, WatchFaceBuilder.BACKGROUND_WIDTH,
+                WatchFaceBuilder.BACKGROUND_HEIGHT, dialId);
+        byte[] raw = unwrap(dial);
+
+        assertEquals(dialId, WatchFaceBuilder.readDialId(raw));
+        // Only the 20 id bytes and the background changed; nothing else moved.
+        for (int i = 0; i < raw.length; i++) {
+            if (i < WatchFaceBuilder.DIAL_ID_BYTES) continue;
+            if (i >= WatchFaceBuilder.BACKGROUND_OFFSET
+                    && i < WatchFaceBuilder.BACKGROUND_OFFSET + WatchFaceBuilder.BACKGROUND_BYTES) {
+                continue;
+            }
+            assertEquals("byte " + i, template[i], raw[i]);
+        }
+    }
+
+    @Test public void newDialIdKeepsTheDevicePrefixAndIsFresh() {
+        byte[] template = new byte[WatchFaceBuilder.DIAL_ID_BYTES];
+        System.arraycopy("00050201050040000000".getBytes(StandardCharsets.US_ASCII), 0, template, 0,
+                WatchFaceBuilder.DIAL_ID_BYTES);
+        String a = WatchFaceBuilder.newDialId(template);
+        String b = WatchFaceBuilder.newDialId(template);
+        assertEquals(WatchFaceBuilder.DIAL_ID_BYTES, a.length());
+        assertTrue("the device prefix is kept", a.startsWith("000502010500"));
+        for (int i = 0; i < a.length(); i++) {
+            char c = a.charAt(i);
+            assertTrue("id must be decimal digits: " + a, c >= '0' && c <= '9');
+        }
+        assertTrue("two builds must not share an id", !a.equals(b));
+    }
+
+    @Test public void dialIdHelpersRejectMalformedInput() {
+        byte[] raw = new byte[WatchFaceBuilder.DIAL_ID_BYTES];
+        try {
+            WatchFaceBuilder.writeDialId(raw, "short");
+            fail("a short id must be rejected");
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+        try {
+            WatchFaceBuilder.writeDialId(raw, "0005020105004000000\u0000");
+            fail("a non-printable id must be rejected");
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+        try {
+            WatchFaceBuilder.readDialId(new byte[WatchFaceBuilder.DIAL_ID_BYTES]);
+            fail("a non-printable stored id must be rejected");
         } catch (IllegalArgumentException expected) {
             // ok
         }

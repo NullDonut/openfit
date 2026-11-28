@@ -1260,6 +1260,15 @@ converted to little-endian RGB565 (`(r>>3)<<11 | (g>>2)<<5 | (b>>3)`), leaving t
 layers in place. The template asset has that region zeroed — the builder always overwrites it, so
 shipping it blank drops the third-party artwork and lets the asset deflate to ~46 KB in the APK.
 
+The watch keys an installed face by that leading 20-byte ASCII id and rejects an upload whose id is
+already present, so the builder writes a **fresh** id for every photo instead of the template's.
+`WatchFaceBuilder.newDialId` keeps the template's device/face-type prefix (`000502010500`) and
+replaces the trailing eight digits with a value unique to the moment (`build(template, argb, w, h,
+id)` writes it; `readDialId`/`writeDialId` read and patch exactly those 20 bytes). Reusing the
+template's id collided with the face already installed under it (`00050201050040000000`, the picked
+asteroid dial) — the working explanation for a DIY upload that streams to 100% and is then refused
+by the watch.
+
 The patched raw is re-wrapped with the **same container layout** as `LzoUtils.mergeDialFile`, with
 every block compressed:
 
@@ -1294,7 +1303,8 @@ The built container feeds the **existing** `startBuzzUpload` path unchanged (MTU
 `16186f04` CCCD, prepare `READY` gate, per-chunk watchdog), so nothing on the proven upload path
 changed. `WatchFaceBuilderTest` checks the container shape, inflates every block with a test-only
 LZO1X decoder and compares it to the raw dial, covers an incompressible block, the RGB565
-conversion and that `build()` mutates only the background. Building emits a container identical in
+conversion, that `build()` mutates only the background, and that a fresh id is written without
+moving any other byte. Building emits a container identical in
 shape to any picked dial, so installing a photo is reversible like any custom face.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)

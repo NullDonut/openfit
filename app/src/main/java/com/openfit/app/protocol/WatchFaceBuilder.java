@@ -1,5 +1,8 @@
 package com.openfit.app.protocol;
 
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * Builds a ZhBracelet "DIY" dial for the ColorFit Ultra Buzz from a bundled raw template plus a
  * photo. The watch accepts a whole {@code AF AF AF 02} dial and shows whatever images it contains,
@@ -28,6 +31,13 @@ package com.openfit.app.protocol;
  * 26+2n  N B stored block data, concatenated
  * </pre>
  *
+ * <p><b>The face id.</b> The first {@value #DIAL_ID_BYTES} bytes of the raw dial are printable
+ * ASCII and are the id the watch reports in its face list and keys an installed dial by ({@code
+ * 00050201050040000000} in the template). The watch rejects an upload whose id is already
+ * installed, so a DIY build must carry a fresh one; {@link #newDialId} keeps the template's
+ * device/face-type prefix and replaces the trailing number. The vendor gives every DIY creation its
+ * own id for the same reason.
+ *
  * <p>The template is split into {@value #BLOCK_BYTES}-byte blocks and each block is compressed with
  * {@link Lzo1x} (LZO1X-1), then marked with bit15 so the watch inflates it. The vendor's own dials
  * compress every block; the watch's installer was observed to inflate unconditionally, so this
@@ -47,6 +57,10 @@ public final class WatchFaceBuilder {
     public static final int BACKGROUND_BYTES = BACKGROUND_WIDTH * BACKGROUND_HEIGHT * 2;
     /** Raw dial is cut into blocks of this size before wrapping. */
     public static final int BLOCK_BYTES = 4096;
+    /** The face id is the 20 ASCII bytes at the start of the raw dial. */
+    public static final int DIAL_ID_BYTES = 20;
+    /** Counts DIY ids made in this process so two builds in the same millisecond still differ. */
+    private static final AtomicInteger DIAL_ID_SEQ = new AtomicInteger();
 
     private WatchFaceBuilder() {}
 
@@ -57,6 +71,14 @@ public final class WatchFaceBuilder {
      * {@code Bitmap.getPixels}). The template is not modified.
      */
     public static byte[] build(byte[] template, int[] argb, int width, int height) {
+        return build(template, argb, width, height, null);
+    }
+
+    /**
+     * As {@link #build(byte[], int[], int, int)}, but first writes {@code dialId} into the raw dial's
+     * id field. A {@code null} id leaves the template's own id in place.
+     */
+    public static byte[] build(byte[] template, int[] argb, int width, int height, String dialId) {
         if (template == null || template.length < BACKGROUND_OFFSET + BACKGROUND_BYTES) {
             throw new IllegalArgumentException("the dial template is missing or truncated");
         }
@@ -69,7 +91,77 @@ public final class WatchFaceBuilder {
         }
         byte[] raw = template.clone();
         writeBackground(raw, argb, width, height);
+        if (dialId != null) {
+            writeDialId(raw, dialId);
+        }
         return wrap(raw);
+    }
+
+    /**
+     * Reads the {@value #DIAL_ID_BYTES}-byte ASCII face id at the start of a raw dial. This is the id
+     * the watch reports in its face list and keys an installed dial by.
+     */
+    public static String readDialId(byte[] raw) {
+        if (raw == null || raw.length < DIAL_ID_BYTES) {
+            throw new IllegalArgumentException("the dial is too short to hold an id");
+        }
+        char[] id = new char[DIAL_ID_BYTES];
+        for (int i = 0; i < DIAL_ID_BYTES; i++) {
+            int c = raw[i] & 0xff;
+            if (c < 0x20 || c > 0x7e) {
+                throw new IllegalArgumentException("the dial id is not printable ASCII");
+            }
+            id[i] = (char) c;
+        }
+        return new String(id);
+    }
+
+    /** Writes a {@value #DIAL_ID_BYTES}-character printable-ASCII face id into a raw dial. */
+    public static void writeDialId(byte[] raw, String dialId) {
+        if (raw == null || raw.length < DIAL_ID_BYTES) {
+            throw new IllegalArgumentException("the dial is too short to hold an id");
+        }
+        if (dialId == null || dialId.length() != DIAL_ID_BYTES) {
+            throw new IllegalArgumentException(
+                    "the dial id must be exactly " + DIAL_ID_BYTES + " characters");
+        }
+        byte[] bytes = new byte[DIAL_ID_BYTES];
+        for (int i = 0; i < DIAL_ID_BYTES; i++) {
+            char c = dialId.charAt(i);
+            if (c < 0x20 || c > 0x7e) {
+                throw new IllegalArgumentException("the dial id must be printable ASCII");
+            }
+            bytes[i] = (byte) c;
+        }
+        System.arraycopy(bytes, 0, raw, 0, DIAL_ID_BYTES);
+    }
+
+    /**
+     * A fresh face id for a DIY build: the template's own device/face-type prefix followed by an
+     * eight-digit number unique to this process and moment. The vendor gives every DIY creation its
+     * own id; reusing the template's would collide with the face already installed under that id and
+     * the watch would reject the upload as a duplicate.
+     */
+    public static String newDialId(byte[] template) {
+        String base = readDialId(template);
+        int fixed = Math.min(base.length(), DIAL_ID_BYTES - 8);
+        long value = nextDialNumber();
+        String tail = Long.toString(value);
+        StringBuilder id = new StringBuilder(DIAL_ID_BYTES);
+        id.append(base, 0, fixed);
+        for (int i = tail.length(); i < DIAL_ID_BYTES - fixed; i++) {
+            id.append('0');
+        }
+        id.append(tail);
+        return id.toString();
+    }
+
+    /** Eight decimal digits that are very unlikely to repeat within or between builds. */
+    private static long nextDialNumber() {
+        long mixed = System.currentTimeMillis() * 31
+                + DIAL_ID_SEQ.getAndIncrement() * 0x9E3779B9L
+                + ThreadLocalRandom.current().nextLong();
+        return Math.floorMod(mixed, 100_000_000L);
     }
 
     /** Writes {@code argb} into the raw dial's background region as little-endian RGB565. */
