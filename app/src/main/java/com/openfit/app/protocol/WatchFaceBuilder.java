@@ -28,12 +28,13 @@ package com.openfit.app.protocol;
  * 26+2n  N B stored block data, concatenated
  * </pre>
  *
- * <p>The template is split into {@value #BLOCK_BYTES}-byte blocks. This builder stores every block
- * <em>uncompressed</em> (bit15 clear), which is a legal choice the vendor also makes whenever a
- * block would not shrink — it only costs upload size, never correctness, and keeps the app free of
- * an LZO compressor. The watch decompresses a block only when bit15 is set.
+ * <p>The template is split into {@value #BLOCK_BYTES}-byte blocks and each block is compressed with
+ * {@link Lzo1x} (LZO1X-1), then marked with bit15 so the watch inflates it. The vendor's own dials
+ * compress every block; the watch's installer was observed to inflate unconditionally, so this
+ * builder never emits a stored (bit15 clear) block even when a block would not shrink.
  *
- * <p>Android-free, so the block maths and the RGB565 conversion can be unit tested on the JVM.
+ * <p>Android-free, so the block maths, the RGB565 conversion and the container wrapper can be unit
+ * tested on the JVM.
  */
 public final class WatchFaceBuilder {
     /** Byte offset of the full-screen background image inside the raw dial. */
@@ -86,9 +87,13 @@ public final class WatchFaceBuilder {
     }
 
     /**
-     * Wraps a raw dial into the {@code AF AF AF 02} container with every block stored uncompressed.
-     * The result is what {@link BuzzUpload#isDialContainer} expects and what the Buzz uploader
-     * streams as-is.
+     * Wraps a raw dial into the {@code AF AF AF 02} container, compressing every
+     * {@value #BLOCK_BYTES}-byte block with LZO1X-1. The result is what
+     * {@link BuzzUpload#isDialContainer} expects and what the Buzz uploader streams as-is.
+     *
+     * <p>The build runs the compressor twice — once to size the output exactly and once to fill it —
+     * so it needs no large scratch buffer. That is cheap (the whole dial is under 0.5 MB) and keeps
+     * peak memory low on weak phones.
      */
     public static byte[] wrap(byte[] raw) {
         if (raw == null || raw.length == 0) {
@@ -96,32 +101,52 @@ public final class WatchFaceBuilder {
         }
         int blocks = (raw.length + BLOCK_BYTES - 1) / BLOCK_BYTES;
         int header = BuzzUpload.DIAL_HEADER_BYTES + 2 * blocks;
-        byte[] out = new byte[header + raw.length];
+        int[] lengths = new int[blocks];
+        int[] dict = Lzo1x.newDictionary();
+        byte[] scratch = new byte[Lzo1x.maxCompressedLength(BLOCK_BYTES)];
+
+        long storedTotal = 0;
+        for (int i = 0; i < blocks; i++) {
+            int off = i * BLOCK_BYTES;
+            int length = Math.min(BLOCK_BYTES, raw.length - off);
+            int compressed = Lzo1x.compress(raw, off, length, scratch, 0, dict);
+            if (compressed >= 0x8000) {
+                throw new IllegalStateException("a dial block compressed past the 15-bit size field");
+            }
+            lengths[i] = compressed;
+            storedTotal += compressed;
+        }
+        if (storedTotal > Integer.MAX_VALUE - header) {
+            throw new IllegalStateException("the dial is too large to wrap");
+        }
+
+        byte[] out = new byte[header + (int) storedTotal];
         out[0] = (byte) 0xaf;
         out[1] = (byte) 0xaf;
         out[2] = (byte) 0xaf;
         out[3] = 0x02;
-        putLe32(out, 4, raw.length);   // raw length
-        putLe32(out, 8, 0);            // raw CRC (not checked)
-        putLe32(out, 12, raw.length);  // stored length: every block is uncompressed
-        putLe32(out, 16, 0);           // stored CRC (not checked)
+        putLe32(out, 4, raw.length);       // raw length
+        putLe32(out, 8, 0);                // raw CRC (the watch does not check it)
+        putLe32(out, 12, (int) storedTotal); // total compressed block length
+        putLe32(out, 16, 0);               // stored CRC (not checked)
         putLe32(out, 20, 0);
         out[24] = (byte) blocks;
         out[25] = (byte) (blocks >> 8);
-        for (int i = 0; i < blocks; i++) {
-            int length = Math.min(BLOCK_BYTES, raw.length - i * BLOCK_BYTES);
-            int p = BuzzUpload.DIAL_HEADER_BYTES + 2 * i;
-            out[p] = (byte) length;              // bit15 clear: stored uncompressed
-            out[p + 1] = (byte) (length >> 8);
-        }
-        System.arraycopy(raw, 0, out, header, raw.length);
-        return out;
-    }
 
-    /** Container size for a raw dial of {@code rawLength} bytes, storing every block uncompressed. */
-    public static int wrappedLength(int rawLength) {
-        int blocks = (rawLength + BLOCK_BYTES - 1) / BLOCK_BYTES;
-        return BuzzUpload.DIAL_HEADER_BYTES + 2 * blocks + rawLength;
+        int at = header;
+        for (int i = 0; i < blocks; i++) {
+            int off = i * BLOCK_BYTES;
+            int length = Math.min(BLOCK_BYTES, raw.length - off);
+            int p = BuzzUpload.DIAL_HEADER_BYTES + 2 * i;
+            int compressed = Lzo1x.compress(raw, off, length, out, at, dict);
+            if (compressed != lengths[i]) {
+                throw new IllegalStateException("LZO output changed between passes");
+            }
+            out[p] = (byte) (compressed | 0x8000); // bit15 set: the watch inflates this block
+            out[p + 1] = (byte) ((compressed | 0x8000) >> 8);
+            at += compressed;
+        }
+        return out;
     }
 
     private static void putLe32(byte[] out, int at, int value) {

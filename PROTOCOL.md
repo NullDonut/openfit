@@ -1260,14 +1260,14 @@ converted to little-endian RGB565 (`(r>>3)<<11 | (g>>2)<<5 | (b>>3)`), leaving t
 layers in place. The template asset has that region zeroed — the builder always overwrites it, so
 shipping it blank drops the third-party artwork and lets the asset deflate to ~46 KB in the APK.
 
-The patched raw is re-wrapped with the **same container layout** as `LzoUtils.mergeDialFile`, except
-every block is stored **uncompressed**:
+The patched raw is re-wrapped with the **same container layout** as `LzoUtils.mergeDialFile`, with
+every block compressed:
 
 ```
  0    4 B   magic AF AF AF 02
  4    4 B   raw length (LE32)
  8    4 B   raw CRC      (LE32; watch does not check it, written 0)
- 12   4 B   stored length (LE32; equals raw length because nothing is compressed)
+ 12   4 B   stored length (LE32; sum of the compressed block lengths)
  16   4 B   stored CRC    (LE32; not checked, written 0)
  20   4 B   0
  24   2 B   block count (LE16) = ceil(rawLen / 4096)
@@ -1275,18 +1275,23 @@ every block is stored **uncompressed**:
  26+2n  N B block data, concatenated
 ```
 
-`mergeDialFile` cuts the raw into **4096-byte** blocks (`nblk = ceil(rawLen/4096)`) and stores a
-block uncompressed (bit15 clear) whenever LZO would not shrink it, so bit15=0 is a legal, watch-
-accepted form — the watch only inflates a block when bit15 is set. Storing everything uncompressed
-avoids porting an LZO compressor into the APK; the only cost is upload size: the shipped template
-wraps to `26 + 2*119 + 486752 = 487016` B instead of the 199732 B a compressed container would be.
+`mergeDialFile` cuts the raw into **4096-byte** blocks (`nblk = ceil(rawLen/4096)`) and compresses
+each with **LZO1X-1**. Verified against a known-good dial: `liblzo2`'s `lzo1x_1_compress` reproduces
+its 119 block sizes exactly (199468 B total) and `lzo1x_decompress_safe` rebuilds the raw dial byte
+for byte. `Lzo1x` is a small pure-Java port of the same algorithm (no native library, no large
+buffers); its output is standard LZO1X, so it is a little larger than the vendor's (about 201143 B
+for the template) but inflates to the same bytes. Every block is emitted with bit15 set, even when
+a block would not shrink: on hardware the watch's installer inflates unconditionally, and an earlier
+build that stored blocks (bit15 clear) installed to 100% and then failed, so compressed is the only
+form tested to work. The header CRCs are written as 0 because the watch does not check them.
 The prepared size is the container length, exactly as the plain custom-face install already does.
 
 The built container feeds the **existing** `startBuzzUpload` path unchanged (MTU bump, lazy
 `16186f04` CCCD, prepare `READY` gate, per-chunk watchdog), so nothing on the proven upload path
-changed. `WatchFaceBuilderTest` checks the block maths, the RGB565 conversion and that
-`build()` mutates only the background. Building emits a container identical in shape to any picked
-dial, so installing a photo is reversible like any custom face.
+changed. `WatchFaceBuilderTest` checks the container shape, inflates every block with a test-only
+LZO1X decoder and compares it to the raw dial, covers an incompressible block, the RGB565
+conversion and that `build()` mutates only the background. Building emits a container identical in
+shape to any picked dial, so installing a photo is reversible like any custom face.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
