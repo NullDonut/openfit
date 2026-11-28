@@ -197,6 +197,13 @@ public final class MainActivity extends ComponentActivity {
     private static final long BUZZ_UPLOAD_PREPARE_TIMEOUT_MS = 15_000L;
     private static final long BUZZ_UPLOAD_NOTIFY_TIMEOUT_MS = 5_000L;
     private static final long BUZZ_UPLOAD_SETTLE_MS = 4_000L;
+    /**
+     * The install raises the ATT MTU only for itself, never during connection setup, so the proven
+     * link timing is untouched. 247 is the vendor's max (chunk 244); capping here also stops a
+     * phone from granting a larger MTU and producing frames the watch did not expect.
+     */
+    private static final int BUZZ_UPLOAD_MTU_REQUEST = 247;
+    private static final long BUZZ_UPLOAD_MTU_TIMEOUT_MS = 4_000L;
     /** A Buzz dial is ~200 KB; refuse anything absurd rather than buffering it on a weak phone. */
     private static final int BUZZ_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
     /** A settings write the watch does not answer is reported instead of leaving the UI stuck. */
@@ -331,6 +338,8 @@ public final class MainActivity extends ComponentActivity {
     private Runnable buzzUploadNotifyPending;              // start the upload once the CCCD is set
     private Runnable buzzUploadNotifyTimeout;
     private Runnable buzzUploadTimeout;
+    private Runnable buzzUploadMtuPending;                 // resume the install after an MTU change
+    private Runnable buzzUploadMtuTimeout;
     private boolean buzzUploadActive;                      // streaming or waiting on the watch
     private boolean buzzUploadPrepPending;                 // prepare reply still owed
     private byte[] buzzUploadContainer;                    // the AF AF AF 02 file as picked
@@ -1833,6 +1842,16 @@ public final class MainActivity extends ComponentActivity {
         logPairing("MTU " + mtu + " (status " + status + ") · chunk "
                 + SeGatt.chunkSize(seMtu) + " data bytes");
         logBle("SE transport MTU negotiated · " + seMtu + " bytes");
+        // A custom-face install can be parked on this callback; resume it with the new chunk size.
+        Runnable mtuPending = buzzUploadMtuPending;
+        if (mtuPending != null) {
+            buzzUploadMtuPending = null;
+            cancelBuzzUploadMtuTimeout();
+            logPairing("custom-face upload · MTU " + seMtu + " · chunk "
+                    + BuzzUpload.chunkSize(seMtu));
+            mtuPending.run();
+            return;
+        }
         if (seSetupStarted && !sePairStarted) startSePairing();
     }
 
@@ -4795,8 +4814,50 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadContainer = container;
         logPairing("custom-face install requested · " + container.length + " B");
         setFacesStatus("Preparing the watch for the face...", false);
-        // The upload stream's notifications are enabled only now, never during setup.
-        ensureLargeDataReady(() -> sendBuzzPrepare(container));
+        // The upload stream's notifications are enabled only now, never during setup. Raise the MTU
+        // first, then enable 6f04, then send prepare.
+        ensureUploadMtu(() -> ensureLargeDataReady(() -> sendBuzzPrepare(container)));
+    }
+
+    /**
+     * Raises the ATT MTU for this install only. The Buzz path never negotiates an MTU during
+     * connection setup (it stays at 23), so the upload would otherwise run at 20-byte chunks. A
+     * refused or timed-out request is not fatal: the upload simply continues at the current size.
+     */
+    @SuppressWarnings("MissingPermission")
+    private void ensureUploadMtu(Runnable onReady) {
+        BluetoothGatt source = gatt;
+        if (source == null || seMtu >= BUZZ_UPLOAD_MTU_REQUEST) {
+            onReady.run();
+            return;
+        }
+        buzzUploadMtuPending = () -> { if (buzzUploadActive) onReady.run(); };
+        boolean requested;
+        try {
+            requested = source.requestMtu(BUZZ_UPLOAD_MTU_REQUEST);
+        } catch (SecurityException e) {
+            requested = false;
+        }
+        if (!requested) {
+            buzzUploadMtuPending = null;
+            logPairing("custom-face upload · MTU request refused, chunk "
+                    + BuzzUpload.chunkSize(seMtu));
+            onReady.run();
+            return;
+        }
+        logPairing("custom-face upload · requesting MTU " + BUZZ_UPLOAD_MTU_REQUEST);
+        cancelBuzzUploadMtuTimeout();
+        buzzUploadMtuTimeout = () -> {
+            buzzUploadMtuTimeout = null;
+            Runnable pending = buzzUploadMtuPending;
+            buzzUploadMtuPending = null;
+            if (pending != null) {
+                logPairing("custom-face upload · MTU request timed out, chunk "
+                        + BuzzUpload.chunkSize(seMtu));
+                pending.run();
+            }
+        };
+        handler.postDelayed(buzzUploadMtuTimeout, BUZZ_UPLOAD_MTU_TIMEOUT_MS);
     }
 
     /** Enables the {@code 16186f04} CCCD on first use, then continues with the prepare packet. */
@@ -5015,6 +5076,8 @@ public final class MainActivity extends ComponentActivity {
         buzzUploadActive = false;
         buzzUploadPrepPending = false;
         cancelBuzzUploadTimeout();
+        cancelBuzzUploadMtuTimeout();
+        buzzUploadMtuPending = null;
         buzzUploadContainer = null;
         buzzUploadFramed = null;
         buzzUploadBlockFrames = null;
@@ -5050,13 +5113,22 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    private void cancelBuzzUploadMtuTimeout() {
+        if (buzzUploadMtuTimeout != null) {
+            handler.removeCallbacks(buzzUploadMtuTimeout);
+            buzzUploadMtuTimeout = null;
+        }
+    }
+
     /** Drops every upload field, used when the link is rebuilt. */
     private void resetBuzzUploadState() {
         buzzUploadActive = false;
         buzzUploadPrepPending = false;
         cancelBuzzUploadTimeout();
         cancelBuzzUploadNotifyTimeout();
+        cancelBuzzUploadMtuTimeout();
         buzzUploadNotifyPending = null;
+        buzzUploadMtuPending = null;
         buzzUploadContainer = null;
         buzzUploadFramed = null;
         buzzUploadBlockFrames = null;

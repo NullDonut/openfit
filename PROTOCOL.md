@@ -1224,11 +1224,17 @@ confirmation, then enables the `16186f04` notifications (lazily, never during co
 sends prepare and streams the file once the reply is `READY`. The read and set commands are
 unchanged. On the test run a 199732 B dial (framed to 199758 B, 56 blocks at `chunk = 20`) installed
 in roughly two to three minutes; the watch added it to the list as `00050201050040000000` (labelled
-`Stored on the watch`) and it became the current face after selection. That is slower than the
-vendor app because the saved-binding Buzz path never negotiates a larger MTU (`seMtu` stays 23, so
-`chunk = 20`, `chunksPerBlock = 200`, `blockBytes = 3596`); the vendor reads its upload MTU from the
-device-info frame and uses much larger chunks. The custom-face container is the `AF AF AF 02` file a
-ZhBracelet "dial" built by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to
+`Stored on the watch`) and it became the current face after selection. That first run was slower
+than the vendor app because the saved-binding Buzz path never negotiated a larger MTU (`seMtu`
+stayed 23, so `chunk = 20`, `chunksPerBlock = 200`, `blockBytes = 3596`), while the vendor reads its
+upload MTU from the device-info frame and uses much larger chunks. OpenFit now raises the ATT MTU
+**for the install only**: `ensureUploadMtu()` requests 247 (the vendor max, `chunk = 244`) just
+before enabling `16186f04` and sending prepare, and `handleMtuChanged` resumes the upload with the
+new chunk size. Connection setup is untouched, so the proven link timing is unchanged, and a refused
+or timed-out (4 s) request silently falls back to the current MTU, so the worst case is the original
+23/20 chunk size. **This install-time MTU bump is not yet hardware-confirmed.** The custom-face
+container is the `AF AF AF 02` file a ZhBracelet "dial" built by
+`com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to
 `DiyDialUtilsFather` as `onDialData(id, bytes)`, so it is exactly the uploaded payload — magic + raw
 length + raw CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and
 the LZO blocks, with `26 + 2*blocks + payloadLen` equal to the file length.
