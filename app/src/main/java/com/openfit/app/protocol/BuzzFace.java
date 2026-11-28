@@ -36,8 +36,8 @@ import java.util.List;
  *
  * <p>The SDK's own reply handler reads the installed list from {@code watch_face_list} (field 1);
  * a firmware that only reports ids may answer with {@code info_list} (field 8) instead, so both
- * shapes are accepted. Discovery and a set-face probe are wired here; removal and custom upload
- * are not.
+ * shapes are accepted. Discovery, a set-face probe and the custom-install prepare packet are
+ * coded here; the file bytes themselves stream through {@link BuzzUpload}.
  */
 public final class BuzzFace {
     private BuzzFace() {}
@@ -55,10 +55,28 @@ public final class BuzzFace {
     /** {@code WatchFace.WatchFaceID.SET_WATCH_FACE}. */
     public static final int WATCH_FACE_ID_SET_WATCH_FACE = 1;
 
+    /** {@code WatchFace.WatchFaceID.PREPARE_INSTALL_WATCH_FACE}. */
+    public static final int WATCH_FACE_ID_PREPARE_INSTALL = 4;
+
+    /** {@code WatchFace.PrepareStatus}; only {@link #PREPARE_STATUS_READY} proceeds. */
+    public static final int PREPARE_STATUS_READY = 0;
+    public static final int PREPARE_STATUS_BUSY = 1;
+    public static final int PREPARE_STATUS_DUPLICATED = 2;
+    public static final int PREPARE_STATUS_LOW_STORAGE = 3;
+    public static final int PREPARE_STATUS_LOW_BATTERY = 4;
+    public static final int PREPARE_STATUS_DOWNGRADE = 5;
+
     private static final int FACE_FIELD_WATCH_FACE_LIST = 1;
     private static final int FACE_FIELD_ID = 2;
     private static final int FACE_FIELD_SUCCESS = 4;
+    private static final int FACE_FIELD_PREPARE_STATUS = 5;
+    private static final int FACE_FIELD_PREPARE_INFO = 6;
+    private static final int FACE_FIELD_INSTALL_RESULT = 7;
     private static final int FACE_FIELD_INFO_LIST = 8;
+
+    private static final int PREPARE_INFO_FIELD_ID = 1;
+    private static final int PREPARE_INFO_FIELD_SIZE = 2;
+    private static final int PREPARE_INFO_FIELD_VERSION_CODE = 3;
 
     private static final int ITEM_FIELD_ID = 1;
     private static final int ITEM_FIELD_IS_CURRENT = 3;
@@ -117,6 +135,75 @@ public final class BuzzFace {
         long success = SeWear.readVarintField(face, FACE_FIELD_SUCCESS);
         if (success < 0) return null;
         return success == 1;
+    }
+
+    /**
+     * {@code WearPacket{type: WATCH_FACE, id: PREPARE_INSTALL_WATCH_FACE, watch_face{ prepare_info{
+     * id, size, version_code: 1 }}}} — the first step of a custom-face install. The watch answers
+     * with {@code watch_face.prepare_status} (field 5); only {@link #PREPARE_STATUS_READY} proceeds
+     * to the {@link BuzzUpload} file transfer. The vendor uses id {@code "170"} and
+     * {@code version_code = 1}; {@code size} is the length of the <b>unframed</b> file that will be
+     * uploaded. For id {@code "170"} and size 100 the frame is
+     * {@code 08 04 10 04 32 0b 32 09 0a 03 31 37 30 10 64 18 01}.
+     */
+    public static byte[] requestPrepareInstall(String id, long size) {
+        ByteArrayOutputStream info = new ByteArrayOutputStream();
+        if (id != null && !id.isEmpty()) {
+            SeWear.writeMessage(info, PREPARE_INFO_FIELD_ID, id.getBytes(StandardCharsets.UTF_8));
+        }
+        if (size != 0) {
+            // uint32, but face files are far below 2^31, so the int overload is exact here.
+            SeWear.writeVarintField(info, PREPARE_INFO_FIELD_SIZE, (int) size);
+        }
+        SeWear.writeVarintField(info, PREPARE_INFO_FIELD_VERSION_CODE, 1);
+
+        ByteArrayOutputStream face = new ByteArrayOutputStream();
+        SeWear.writeMessage(face, FACE_FIELD_PREPARE_INFO, info.toByteArray());
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        SeWear.writeVarintField(out, WEAR_FIELD_TYPE, TYPE_WATCH_FACE);
+        SeWear.writeVarintField(out, WEAR_FIELD_ID, WATCH_FACE_ID_PREPARE_INSTALL);
+        SeWear.writeMessage(out, WEAR_FIELD_WATCH_FACE, face.toByteArray());
+        return out.toByteArray();
+    }
+
+    /**
+     * Reads {@code watch_face.prepare_status} (field 5) from a prepare reply, or -1 when the packet
+     * is not a {@code WatchFace} or carries no status field. {@link #PREPARE_STATUS_READY} is 0, so
+     * a present-but-READY status is distinguishable from an absent one.
+     */
+    public static int parsePrepareStatus(byte[] wearPacket) {
+        if (!isWatchFace(wearPacket)) return -1;
+        byte[] face = SeWear.readMessageField(wearPacket, WEAR_FIELD_WATCH_FACE);
+        if (face == null) return -1;
+        long status = SeWear.readVarintField(face, FACE_FIELD_PREPARE_STATUS);
+        return status < 0 ? -1 : (int) status;
+    }
+
+    /**
+     * Reads {@code watch_face.install_result} (field 7) if the watch reports one after a transfer,
+     * or -1 when absent. The vendor never sends {@code REPORT_INSTALL_RESULT}, so this is a
+     * defensive read only.
+     */
+    public static int parseInstallResult(byte[] wearPacket) {
+        if (!isWatchFace(wearPacket)) return -1;
+        byte[] face = SeWear.readMessageField(wearPacket, WEAR_FIELD_WATCH_FACE);
+        if (face == null) return -1;
+        long result = SeWear.readVarintField(face, FACE_FIELD_INSTALL_RESULT);
+        return result < 0 ? -1 : (int) result;
+    }
+
+    /** Human-readable {@code WatchFace.PrepareStatus} label. */
+    public static String prepareStatusLabel(int status) {
+        switch (status) {
+            case PREPARE_STATUS_READY: return "ready";
+            case PREPARE_STATUS_BUSY: return "busy";
+            case PREPARE_STATUS_DUPLICATED: return "already installed";
+            case PREPARE_STATUS_LOW_STORAGE: return "low storage";
+            case PREPARE_STATUS_LOW_BATTERY: return "low battery";
+            case PREPARE_STATUS_DOWNGRADE: return "downgrade";
+            default: return "status " + status;
+        }
     }
 
     /** True when the reassembled packet is a {@code WATCH_FACE} WearPacket. */

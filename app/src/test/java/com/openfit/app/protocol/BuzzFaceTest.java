@@ -86,6 +86,34 @@ public class BuzzFaceTest {
         assertNull(BuzzFace.parseSetSuccess(null));
     }
 
+    /** PREPARE_INSTALL_WATCH_FACE carries WatchFace.prepare_info (field 6). */
+    @Test public void prepareInstallCarriesIdSizeAndVersion() {
+        assertArrayEquals(hex("08 04 10 04 32 0b 32 09 0a 03 31 37 30 10 64 18 01"),
+                BuzzFace.requestPrepareInstall("170", 100));
+        // An empty id drops the id field but keeps size and version_code.
+        assertArrayEquals(hex("08 04 10 04 32 06 32 04 10 64 18 01"),
+                BuzzFace.requestPrepareInstall("", 100));
+    }
+
+    @Test public void parsesThePrepareStatus() {
+        // WatchFace{ prepare_status: READY(0) } — field 5, tag 0x28.
+        assertEquals(BuzzFace.PREPARE_STATUS_READY,
+                BuzzFace.parsePrepareStatus(hex("08 04 10 04 32 02 28 00")));
+        assertEquals(BuzzFace.PREPARE_STATUS_DUPLICATED,
+                BuzzFace.parsePrepareStatus(hex("08 04 10 04 32 02 28 02")));
+        assertEquals("already installed", BuzzFace.prepareStatusLabel(BuzzFace.PREPARE_STATUS_DUPLICATED));
+        // No status field: absent, not READY.
+        assertEquals(-1, BuzzFace.parsePrepareStatus(hex("08 04 10 04 32 00")));
+        assertEquals(-1, BuzzFace.parsePrepareStatus(hex("08 02 10 04")));
+        assertEquals(-1, BuzzFace.parsePrepareStatus(null));
+    }
+
+    @Test public void parsesTheInstallResult() {
+        // WatchFace{ install_result: 0 } — field 7, tag 0x38.
+        assertEquals(0, BuzzFace.parseInstallResult(hex("08 04 10 04 32 02 38 00")));
+        assertEquals(-1, BuzzFace.parseInstallResult(hex("08 04 10 04 32 00")));
+    }
+
     private static byte[] hex(String text) {
         String clean = text.replace(" ", "");
         byte[] out = new byte[clean.length() / 2];

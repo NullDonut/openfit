@@ -1215,11 +1215,17 @@ per-chunk packet-number prefix.
 **Vendor constants.** Downloaded face: id `"170"`, prepare size hard-coded to 549884. DIY face: id
 `"170"`, prepare size = raw file length. Both upload the file bytes with the type string `"watch"`.
 
-**OpenFit status.** None of this is implemented. There is no Buzz face container to test with, so
-prepare and upload have never been sent to hardware; the read and set commands above are the only
-face traffic OpenFit emits. On the saved-binding Buzz path `seMtu` stays 23, so an implementation
-would get `chunk = 20` (`chunksPerBlock = 200`, `blockBytes = 3596`) unless it requests a larger MTU
-first.
+**OpenFit status.** The prepare packet, the prepare-status / install-result parsers and the
+big-data framing are implemented and unit-tested (`BuzzFace.requestPrepareInstall`,
+`BuzzFace.parsePrepareStatus`, and `BuzzUpload`), but **not wired**: prepare and upload have never
+been sent to hardware, so the read and set commands above are still the only face traffic OpenFit
+emits. The custom-face container is now known: the `AF AF AF 02` file is a ZhBracelet "dial" built
+by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to `DiyDialUtilsFather` as
+`onDialData(id, bytes)`, so it is exactly the payload the upload streams — magic + raw length + raw
+CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and the LZO
+blocks, with `26 + 2*blocks + payloadLen` equal to the file length. On the saved-binding Buzz path
+`seMtu` stays 23, so an implementation would get `chunk = 20` (`chunksPerBlock = 200`,
+`blockBytes = 3596`) unless it requests a larger MTU first.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
