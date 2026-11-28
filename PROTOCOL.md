@@ -374,9 +374,11 @@ Home, and turns the stream off again.
 
 #### Watch faces over SE (read-only discovery, 2026-11-27)
 
-The face commands ride the same `SEWear` envelope in field 7 (`watch_face`). OpenFit currently
-sends only the two read-only ids; the set/remove/install ids are recorded here but are not wired.
-Exact request bytes and reply parsers are pinned in `SeCommandsTest`.
+The face commands ride the same `SEWear` envelope in field 7 (`watch_face`). On this SE path OpenFit
+still sends only the two read-only ids; the set/remove/install ids are recorded here but are not
+wired. (The Buzz does not use this envelope for faces; its WearPacket set and custom install are
+wired and hardware-confirmed — see the Buzz sections.) Exact request bytes and reply parsers are
+pinned in `SeCommandsTest`.
 
 | id | `SEFunctionId` | OpenFit status |
 |---|---|---|
@@ -1104,7 +1106,7 @@ notification on one read and as 12 × 18-byte chunks after a set. OpenFit's reas
 both, and its 28-byte set request is announced as two 18-byte chunks (`seMtu` is still 23 because
 the ZhBracelet path never calls `requestMtu`).
 
-### Custom face install / big-data upload (decoded, not yet sent)
+### Custom face install / big-data upload (hardware-confirmed 2026-11-28)
 
 The Buzz cannot switch to a downloaded face by id. It installs a face by uploading a file: prepare,
 then stream the bytes over a separate big-data characteristic. NoiseFit's flow is
@@ -1215,21 +1217,21 @@ per-chunk packet-number prefix.
 **Vendor constants.** Downloaded face: id `"170"`, prepare size hard-coded to 549884. DIY face: id
 `"170"`, prepare size = raw file length. Both upload the file bytes with the type string `"watch"`.
 
-**OpenFit status.** The prepare packet, the prepare-status / install-result parsers and the
-big-data framing are implemented and unit-tested (`BuzzFace.requestPrepareInstall`,
-`BuzzFace.parsePrepareStatus`, and `BuzzUpload`), and the transport is now wired end to end behind
-an explicit **Install custom face** action on the Faces screen. Nothing is uploaded automatically:
-the user picks a file, OpenFit checks the `AF AF AF 02` container, shows a confirmation, and only
-then enables the `16186f04` notifications (lazily, never during connection setup), sends prepare and
-streams the file once the reply is `READY`. The read and set commands above are unchanged. The
-upload has **not been hardware-confirmed yet**. The custom-face container is known: the
-`AF AF AF 02` file is a ZhBracelet "dial" built by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile`
-and handed to `DiyDialUtilsFather` as `onDialData(id, bytes)`, so it is exactly the payload the
-upload streams — magic + raw length + raw CRC + compressed length + payload CRC + block count, then
-a two-byte-per-block table and the LZO blocks, with `26 + 2*blocks + payloadLen` equal to the file
-length. On the saved-binding Buzz path `seMtu` stays 23, so the uploader uses `chunk = 20`
-(`chunksPerBlock = 200`, `blockBytes = 3596`) unless a larger MTU is negotiated; the supplied test
-dial is 199732 B, framed to 199758 B, which is 56 blocks at that chunk size.
+**OpenFit status (hardware-confirmed 2026-11-28).** The full install runs end to end on a physical
+ColorFit Ultra Buzz behind an explicit **Install custom face** action on the Faces screen. Nothing is
+uploaded automatically: the user picks a file, OpenFit checks the `AF AF AF 02` container, shows a
+confirmation, then enables the `16186f04` notifications (lazily, never during connection setup),
+sends prepare and streams the file once the reply is `READY`. The read and set commands are
+unchanged. On the test run a 199732 B dial (framed to 199758 B, 56 blocks at `chunk = 20`) installed
+in roughly two to three minutes; the watch added it to the list as `00050201050040000000` (labelled
+`Stored on the watch`) and it became the current face after selection. That is slower than the
+vendor app because the saved-binding Buzz path never negotiates a larger MTU (`seMtu` stays 23, so
+`chunk = 20`, `chunksPerBlock = 200`, `blockBytes = 3596`); the vendor reads its upload MTU from the
+device-info frame and uses much larger chunks. The custom-face container is the `AF AF AF 02` file a
+ZhBracelet "dial" built by `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to
+`DiyDialUtilsFather` as `onDialData(id, bytes)`, so it is exactly the uploaded payload — magic + raw
+length + raw CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and
+the LZO blocks, with `26 + 2*blocks + payloadLen` equal to the file length.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
