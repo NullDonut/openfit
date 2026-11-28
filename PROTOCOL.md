@@ -1063,7 +1063,8 @@ with a different payload (`BuzzFace`).
 
 `WatchFace` oneof: `1 watch_face_list` (`WatchFaceItem.List`), `2 id`, `3 path`, `4 success`,
 `5 prepare_status`, `6 prepare_info`, `7 install_result`, `8 info_list` (`WatchFaceInfo.List`),
-`11 support_data_list`, `12 edit_request`, `13 edit_response`, `14 bg_image_result`.
+`11 support_data_list` (`WatchFaceSlot.List`), `12 edit_request`, `13 edit_response`,
+`14 bg_image_result`.
 
 `WatchFaceItem`: `1 id` (required string), `2 name` (required string), `3 is_current` (required
 bool), `4 can_remove`, `5 version_code`, `6 can_edit`, `7 background_color`, `8 background_image`,
@@ -1102,6 +1103,123 @@ Note the Buzz's outbound chunk size is not fixed: the same 214-byte list arrived
 notification on one read and as 12 × 18-byte chunks after a set. OpenFit's reassembler handles
 both, and its 28-byte set request is announced as two 18-byte chunks (`seMtu` is still 23 because
 the ZhBracelet path never calls `requestMtu`).
+
+### Custom face install / big-data upload (decoded, not yet sent)
+
+The Buzz cannot switch to a downloaded face by id. It installs a face by uploading a file: prepare,
+then stream the bytes over a separate big-data characteristic. NoiseFit's flow is
+
+1. `PREPARE_INSTALL_WATCH_FACE` (id 4) over the ordinary chunked transport.
+2. The watch answers with `watch_face.prepare_status` (field 5).
+3. On `READY`, the app frames the file and uploads it on `16186f04`.
+4. The watch acknowledges block by block; the last acknowledgement is the success signal.
+
+The vendor never sends `REPORT_INSTALL_RESULT` after a face upload. `UploadBigDataListener.onSuccess()`
+is treated as "transfer complete" and the UI reports success, so the watch is expected to add and
+activate the face on its own.
+
+**Prepare.** `service.n.m.a(id, size)` builds
+
+```
+WearPacket{ type: WATCH_FACE(4), id: PREPARE_INSTALL_WATCH_FACE(4),
+            watch_face { prepare_info { id: "<string>", size: <uint32>, version_code: 1 } } }
+```
+
+Wire tags: `08 04` (type), `10 04` (id), `32 <len>` (watch_face), `32 <len>` (`prepare_info`,
+`WatchFace` field 6), `0a <len> <id>` (`PrepareInfo` field 1), `10 <size varint>` (field 2),
+`18 01` (field 3, `version_code`). For id `"170"` and size 100:
+
+```
+08 04 10 04 32 0b 32 09 0a 03 31 37 30 10 64 18 01
+```
+
+The vendor uses id `"170"` for every face upload and `version_code = 1`. `size` is the length of the
+**unframed** file — the bytes that will be uploaded — not the framed length.
+
+**Prepare status.** The reply is `WearPacket{type=4, id=4, watch_face{prepare_status: N}}`
+(`WatchFace` field 5, tag `28`):
+
+| N | status | meaning |
+|---|--------|---------|
+| 0 | READY | proceed with the upload |
+| 1 | BUSY | watch is busy |
+| 2 | DUPLICATED | same id/version already installed |
+| 3 | LOW_STORAGE | not enough space |
+| 4 | LOW_BATTERY | battery too low |
+| 5 | DOWNGRADE | `version_code` older than the installed one |
+
+Only 0 proceeds. The vendor arms a 10 s timeout for the status reply.
+
+**Big-data channel.** `ZhBraceletService.startUploadBigData("watch", bytes, listener)` writes on
+characteristic `16186f04` with `WRITE_TYPE_NO_RESPONSE`, not on the `16186f02` protobuf path, and it
+parses the block ACKs from notifications on that same characteristic. The prepare packet still goes
+through the normal transport (`16186f02` out / `16186f01` in), so only the file body moves to
+`16186f04`.
+
+**Framing.** The SDK wraps the file in a 22-byte header and appends a CRC32:
+
+```
+offset  0    1 B   0
+offset  1    1 B   type: 16 = "watch", 1 = "lto", 32 = anything else
+offset  2   16 B   0
+offset 18    4 B   payload length, LE32
+offset 22    N B   payload (the face file itself)
+offset 22+N  4 B   CRC32 (IEEE/zlib) of header+payload, LE32
+```
+
+Total framed length is `N + 26`.
+
+**Blocks and chunks.** With `mtu` taken from the device-info frame (`(b[13] << 8) | b[14]`):
+
+```
+chunk           = max(20, mtu - 3)                              # 244 when mtu = 247
+chunksPerBlock  = 4000 / chunk                                  # integer division -> 16
+blockBytes      = (chunksPerBlock - 1) * (chunk - 2) + (chunk - 6)   # -> 3868
+blocks          = ceil(framedLength / blockBytes)
+lastBlockChunks = 1 if remainder <= chunk - 6
+                  else 1 + ceil((remainder - (chunk - 6)) / (chunk - 2))
+```
+
+A block is a run of chunks. Every chunk is exactly `chunk` bytes except the final chunk of the last
+block:
+
+```
+chunk 1 of a block:  01 00 <totalBlocks LE16> <blockIndex LE16> <data, up to chunk-6>
+chunk k > 1:         <k LE16> <data, up to chunk-2>
+```
+
+`blockIndex` and `k` are 1-based, and `totalBlocks` is repeated in every block's first chunk.
+With a 549884-byte payload the framed length is 549910: 143 blocks in total — 142 full blocks of
+3868 bytes plus a 654-byte last block of 3 chunks.
+
+**Handshake.** The phone drives one block at a time; the watch answers on `16186f04`:
+
+```
+phone: 00 00 00 00 <chunksInBlock LE16>   announce the block, then wait
+watch: 00 00 01 01 00 00                  send all chunks of this block
+phone: <chunk 1> ... <chunk n>
+watch: 00 00 01 00 00 00                  block complete
+watch: xx xx xx xx <k LE16>               resend chunk k of the current block
+```
+
+`00 00 01 01` is the go-ahead for the announced block; `00 00 01 00` advances to the next block, or
+completes the upload after the last block. A resend request is any frame with a non-zero LE16 in
+bytes 4..5, and re-sends that chunk index. The vendor arms a 30 s timeout per block and calls
+`onTimeout()` when no ACK arrives.
+
+Note the code space differs from the normal transport: its "done" is `00 00 01 03`, while the
+big-data block-done is `00 00 01 00`. The phone's block announce is byte-identical to
+`SeGatt.announce()` (`00 00 00 00 <count LE16>`), but it is written to `16186f04` as-is, with no
+per-chunk packet-number prefix.
+
+**Vendor constants.** Downloaded face: id `"170"`, prepare size hard-coded to 549884. DIY face: id
+`"170"`, prepare size = raw file length. Both upload the file bytes with the type string `"watch"`.
+
+**OpenFit status.** None of this is implemented. There is no Buzz face container to test with, so
+prepare and upload have never been sent to hardware; the read and set commands above are the only
+face traffic OpenFit emits. On the saved-binding Buzz path `seMtu` stays 23, so an implementation
+would get `chunk = 20` (`chunksPerBlock = 200`, `blockBytes = 3596`) unless it requests a larger MTU
+first.
 
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
