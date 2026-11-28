@@ -63,6 +63,7 @@ interface FacesActions {
     fun onRefresh()
     fun onSetFace(id: String)
     fun onInstallCustomFace()
+    fun onBuildDiyFace()
 }
 
 class FacesScreenController(private val actions: FacesActions) {
@@ -107,9 +108,10 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         Text(
             text = when {
                 state.canInstall ->
-                    "Tap a face to make it current, or install a custom dial from this phone. " +
-                        "Nothing is uploaded until you pick a file and confirm; the current face " +
-                        "is kept."
+                    "Tap a face to make it current, or make one from your own photo. The dial " +
+                        "keeps its clock and date while your photo becomes the background. " +
+                        "Nothing is uploaded until you pick an image and confirm; the current " +
+                        "face is kept."
                 state.canSet ->
                     "Tap a face to make it current. The watch confirms the change; you can undo " +
                         "it on the watch."
@@ -189,7 +191,21 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
                         label = if (state.uploadProgress >= 0) {
                             "Installing face..."
                         } else {
-                            "Install custom face"
+                            "Create a face from a photo"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            if (!state.loading && state.uploadProgress < 0) {
+                                actions.onBuildDiyFace()
+                            }
+                        }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    SecondaryButton(
+                        label = if (state.uploadProgress >= 0) {
+                            "Installing face..."
+                        } else {
+                            "Install a dial file"
                         },
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
@@ -235,7 +251,7 @@ private fun FacesScreen(state: FacesUiState, actions: FacesActions) {
         Text(
             text = when {
                 state.canInstall ->
-                    "TAP A FACE TO MAKE IT CURRENT\nINSTALL CUSTOM FACE IS LIVE · IT ASKS FIRST"
+                    "TAP A FACE TO MAKE IT CURRENT\nMAKE A FACE FROM A PHOTO · IT ASKS FIRST"
                 state.canSet ->
                     "TAP A FACE TO MAKE IT CURRENT\nSETTING A FACE IS LIVE"
                 else ->

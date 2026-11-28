@@ -24,6 +24,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -57,6 +59,7 @@ import com.openfit.app.protocol.SeWear;
 import com.openfit.app.protocol.SeGatt;
 import com.openfit.app.protocol.SeCommands;
 import com.openfit.app.protocol.SePairing;
+import com.openfit.app.protocol.WatchFaceBuilder;
 import com.openfit.app.protocol.ZhBraceletBinding;
 import com.openfit.app.protocol.ZhFrameReader;
 import com.openfit.app.ui.HealthScreenController;
@@ -107,6 +110,7 @@ public final class MainActivity extends ComponentActivity {
     private static final int REQUEST_QR_SCAN = 12;
     private static final int REQUEST_CAMERA_PERMISSION = 13;
     private static final int REQUEST_FACE_FILE = 14;
+    private static final int REQUEST_DIY_IMAGE = 15;
     private static final int C_BG = Color.rgb(8, 8, 8);
     private static final int C_CARD = Color.rgb(17, 17, 17);
     private static final int C_CARD_ALT = Color.rgb(27, 27, 27);
@@ -209,6 +213,13 @@ public final class MainActivity extends ComponentActivity {
     private static final long BUZZ_UPLOAD_MTU_TIMEOUT_MS = 4_000L;
     /** A Buzz dial is ~200 KB; refuse anything absurd rather than buffering it on a weak phone. */
     private static final int BUZZ_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
+    /**
+     * The bundled raw dial the DIY builder patches. It is the same raw the vendor wraps with
+     * {@code mergeDialFile}, with its background region cleared; the builder overwrites that
+     * region with the user's photo every time, so the shipped bytes only provide the clock/date
+     * layers and the atlas around them.
+     */
+    private static final String BUZZ_DIY_TEMPLATE_ASSET = "watchface/template_dial.bin";
     /** A settings write the watch does not answer is reported instead of leaving the UI stuck. */
     private static final long SE_COMMAND_TIMEOUT_MS = 6_000L;
     /** An at-top downward drag this far, this fast, refreshes and reconnects. */
@@ -348,6 +359,7 @@ public final class MainActivity extends ComponentActivity {
     private int buzzUploadPrepareBusyRetries;              // prepare re-sends after "busy"
     private boolean buzzUploadPrepareBusyScheduled;        // a busy retry is already queued
     private byte[] buzzUploadContainer;                    // the AF AF AF 02 file as picked
+    private byte[] buzzDiyTemplate;                        // cached raw dial for the DIY builder
     private byte[] buzzUploadFramed;                       // header + container + CRC32
     private List<byte[]> buzzUploadBlockFrames;            // chunks of the block in flight
     private int buzzUploadChunk = 20;
@@ -656,6 +668,14 @@ public final class MainActivity extends ComponentActivity {
             }
             return;
         }
+        if (requestCode == REQUEST_DIY_IMAGE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                readDiyImage(data.getData());
+            } else {
+                setFacesStatus("Face cancelled.", false);
+            }
+            return;
+        }
         if (requestCode == REQUEST_QR_SCAN) {
             try {
                 IntentResult result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
@@ -800,6 +820,7 @@ public final class MainActivity extends ComponentActivity {
             @Override public void onSetFace(String id) { confirmSetFace(id); }
             // Qualified: an unqualified call here would resolve to this override and recurse.
             @Override public void onInstallCustomFace() { MainActivity.this.onInstallCustomFace(); }
+            @Override public void onBuildDiyFace() { MainActivity.this.onBuildDiyFace(); }
         });
         facesPanel.addView(facesScreen.createView(this), lp(-1, -2));
         refreshFaces();
@@ -4807,6 +4828,144 @@ public final class MainActivity extends ComponentActivity {
                 .setNegativeButton("Cancel", (dialog, which) ->
                         setFacesStatus("Install cancelled.", false))
                 .setPositiveButton("Upload", (dialog, which) -> startBuzzUpload(data))
+                .show();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // DIY face: turn a photo into a dial by patching the bundled template's background.
+    // ---------------------------------------------------------------------------------------
+
+    /** Opens the photo picker. Nothing is built or uploaded until the user confirms. */
+    private void onBuildDiyFace() {
+        if (!buzzFacesActive() || seLargeDataChar == null) {
+            setFacesStatus("Connect the watch before creating a face.", true);
+            return;
+        }
+        if (buzzUploadActive || buzzUploadPrepPending) {
+            setFacesStatus("A face install is already running.", true);
+            return;
+        }
+        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+        pick.setType("image/*");
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(pick, "Pick a photo"), REQUEST_DIY_IMAGE);
+        } catch (RuntimeException e) {
+            setFacesStatus("No image picker is available on this phone.", true);
+        }
+    }
+
+    /**
+     * Reads and downscales the photo, patches the template, then asks for confirmation. All of it
+     * runs off the UI thread because a phone photo can be tens of megapixels.
+     */
+    private void readDiyImage(Uri uri) {
+        setFacesStatus("Preparing the photo...", false);
+        logPairing("DIY face · reading the photo");
+        new Thread(() -> {
+            byte[] container = null;
+            String failure = null;
+            try {
+                byte[] template = loadDiyTemplate();
+                int[] argb = decodeDiyImage(uri);
+                container = WatchFaceBuilder.build(template, argb,
+                        WatchFaceBuilder.BACKGROUND_WIDTH, WatchFaceBuilder.BACKGROUND_HEIGHT);
+            } catch (IOException | SecurityException | OutOfMemoryError
+                    | IllegalArgumentException e) {
+                failure = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
+            final byte[] built = container;
+            final String error = failure;
+            runOnUiThread(() -> {
+                if (error != null) {
+                    setFacesStatus("Could not build the face: " + error, true);
+                } else {
+                    confirmDiyFace(built);
+                }
+            });
+        }, "diy-face-build").start();
+    }
+
+    /** The bundled raw dial, read once and kept for the session. */
+    private byte[] loadDiyTemplate() throws IOException {
+        if (buzzDiyTemplate == null) {
+            try (InputStream in = getAssets().open(BUZZ_DIY_TEMPLATE_ASSET)) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buffer = new byte[16 * 1024];
+                int read;
+                while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
+                buzzDiyTemplate = out.toByteArray();
+            }
+        }
+        return buzzDiyTemplate;
+    }
+
+    /** Decodes the picked photo to exactly the background size, centre-cropped, as ARGB pixels. */
+    private int[] decodeDiyImage(Uri uri) throws IOException {
+        int outW = WatchFaceBuilder.BACKGROUND_WIDTH;
+        int outH = WatchFaceBuilder.BACKGROUND_HEIGHT;
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("the photo could not be opened");
+            BitmapFactory.decodeStream(in, null, bounds);
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IOException("the photo could not be read");
+        }
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 1;
+        while (bounds.outWidth / (options.inSampleSize * 2) >= outW
+                && bounds.outHeight / (options.inSampleSize * 2) >= outH) {
+            options.inSampleSize *= 2;
+        }
+        Bitmap decoded;
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("the photo could not be opened");
+            decoded = BitmapFactory.decodeStream(in, null, options);
+        }
+        if (decoded == null) throw new IOException("the photo could not be decoded");
+        Bitmap scaled = centerCrop(decoded, outW, outH);
+        if (scaled != decoded) decoded.recycle();
+        int[] argb = new int[outW * outH];
+        scaled.getPixels(argb, 0, outW, 0, 0, outW, outH);
+        scaled.recycle();
+        return argb;
+    }
+
+    /** Centre-crops {@code src} to the target aspect ratio, then scales it to exactly outW x outH. */
+    private static Bitmap centerCrop(Bitmap src, int outW, int outH) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        float target = (float) outW / outH;
+        float actual = (float) w / h;
+        int cropW;
+        int cropH;
+        if (actual > target) {
+            cropH = h;
+            cropW = Math.max(1, Math.round(h * target));
+        } else {
+            cropW = w;
+            cropH = Math.max(1, Math.round(w / target));
+        }
+        Bitmap cropped = Bitmap.createBitmap(src, (w - cropW) / 2, (h - cropH) / 2, cropW, cropH);
+        if (cropW == outW && cropH == outH) return cropped;
+        Bitmap out = Bitmap.createScaledBitmap(cropped, outW, outH, true);
+        if (out != cropped) cropped.recycle();
+        return out;
+    }
+
+    private void confirmDiyFace(byte[] container) {
+        new AlertDialog.Builder(this)
+                .setTitle("Create a face from this photo")
+                .setMessage("Use this photo as the face background and install it to the watch?\n\n"
+                        + "The dial keeps its own clock and date, and the watch installs this as a "
+                        + "new face, so this is reversible. The upload is "
+                        + readableSize(container.length)
+                        + "; keep the watch close and the app open until it finishes.")
+                .setNegativeButton("Cancel", (dialog, which) ->
+                        setFacesStatus("Face cancelled.", false))
+                .setPositiveButton("Apply", (dialog, which) -> startBuzzUpload(container))
                 .show();
     }
 

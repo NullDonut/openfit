@@ -1241,6 +1241,53 @@ ZhBracelet "dial" built by
 length + raw CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and
 the LZO blocks, with `26 + 2*blocks + payloadLen` equal to the file length.
 
+### DIY face builder (photo → dial)
+
+The Faces screen also offers **Create a face from a photo**. Because the watch takes a whole dial
+and there is no empty template, the app ships one raw dial as an asset
+(`assets/watchface/template_dial.bin`) and patches its background:
+
+```
+raw dial layout (little-endian, 486752 B in the shipped template)
+  0x000000  ASCII id, 20 B ("00050201050040000000")
+  0x0000??  atlas of character/date/graphic sprites (mixed native widths)
+  0x027000  320 x 385 RGB565 backdrop, 246400 B = 320*385*2
+  0x063280  further sprites to 0x076D60 (end)
+```
+
+`WatchFaceBuilder` overwrites `0x27000..0x63280` with the user's photo scaled to 320x385 and
+converted to little-endian RGB565 (`(r>>3)<<11 | (g>>2)<<5 | (b>>3)`), leaving the clock/date
+layers in place. The template asset has that region zeroed — the builder always overwrites it, so
+shipping it blank drops the third-party artwork and lets the asset deflate to ~46 KB in the APK.
+
+The patched raw is re-wrapped with the **same container layout** as `LzoUtils.mergeDialFile`, except
+every block is stored **uncompressed**:
+
+```
+ 0    4 B   magic AF AF AF 02
+ 4    4 B   raw length (LE32)
+ 8    4 B   raw CRC      (LE32; watch does not check it, written 0)
+ 12   4 B   stored length (LE32; equals raw length because nothing is compressed)
+ 16   4 B   stored CRC    (LE32; not checked, written 0)
+ 20   4 B   0
+ 24   2 B   block count (LE16) = ceil(rawLen / 4096)
+ 26   2*n B one LE16 per block: bit15 set = LZO, clear = stored uncompressed
+ 26+2n  N B block data, concatenated
+```
+
+`mergeDialFile` cuts the raw into **4096-byte** blocks (`nblk = ceil(rawLen/4096)`) and stores a
+block uncompressed (bit15 clear) whenever LZO would not shrink it, so bit15=0 is a legal, watch-
+accepted form — the watch only inflates a block when bit15 is set. Storing everything uncompressed
+avoids porting an LZO compressor into the APK; the only cost is upload size: the shipped template
+wraps to `26 + 2*119 + 486752 = 487016` B instead of the 199732 B a compressed container would be.
+The prepared size is the container length, exactly as the plain custom-face install already does.
+
+The built container feeds the **existing** `startBuzzUpload` path unchanged (MTU bump, lazy
+`16186f04` CCCD, prepare `READY` gate, per-chunk watchdog), so nothing on the proven upload path
+changed. `WatchFaceBuilderTest` checks the block maths, the RGB565 conversion and that
+`build()` mutates only the background. Building emits a container identical in shape to any picked
+dial, so installing a photo is reversible like any custom face.
+
 ## Ryeex profile (different SDK, same base UUIDs, not used by Ultra Buzz)
 
 Base service `00000001-0000-1000-8000-00805f9b34fb`, write `00000002-…`, read `00000003-…`.
