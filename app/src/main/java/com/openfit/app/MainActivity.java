@@ -191,11 +191,12 @@ public final class MainActivity extends ComponentActivity {
      * Custom-face upload pacing. The Buzz streams the dial over {@code 16186f04} one block at a
      * time and acknowledges each block, so these are watchdogs rather than transfer timings.
      */
-    private static final long BUZZ_UPLOAD_ACK_TIMEOUT_MS = 6_000L;
+    /** The vendor arms 30 s per block; keep the same generous watchdog, re-armed per chunk. */
+    private static final long BUZZ_UPLOAD_ACK_TIMEOUT_MS = 30_000L;
     private static final long BUZZ_UPLOAD_CHUNK_GAP_MS = 12L;
     private static final long BUZZ_UPLOAD_PREPARE_TIMEOUT_MS = 15_000L;
     private static final long BUZZ_UPLOAD_NOTIFY_TIMEOUT_MS = 5_000L;
-    private static final long BUZZ_UPLOAD_SETTLE_MS = 2_000L;
+    private static final long BUZZ_UPLOAD_SETTLE_MS = 4_000L;
     /** A Buzz dial is ~200 KB; refuse anything absurd rather than buffering it on a weak phone. */
     private static final int BUZZ_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
     /** A settings write the watch does not answer is reported instead of leaving the UI stuck. */
