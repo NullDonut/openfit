@@ -1232,8 +1232,10 @@ upload MTU from the device-info frame and uses much larger chunks. OpenFit now r
 before enabling `16186f04` and sending prepare, and `handleMtuChanged` resumes the upload with the
 new chunk size. Connection setup is untouched, so the proven link timing is unchanged, and a refused
 or timed-out (4 s) request silently falls back to the current MTU, so the worst case is the original
-23/20 chunk size. **This install-time MTU bump is not yet hardware-confirmed.** The custom-face
-container is the `AF AF AF 02` file a ZhBracelet "dial" built by
+23/20 chunk size. **The install-time MTU bump is hardware-confirmed (2026-11-28):** on a physical
+Buzz the install negotiated 247, streamed at `chunk = 244`, and finished noticeably faster than the
+`chunk = 20` run. The custom-face container is the `AF AF AF 02` file a
+ZhBracelet "dial" built by
 `com.zhapp.ble.utils.lzo.LzoUtils.mergeDialFile` and handed to
 `DiyDialUtilsFather` as `onDialData(id, bytes)`, so it is exactly the uploaded payload — magic + raw
 length + raw CRC + compressed length + payload CRC + block count, then a two-byte-per-block table and
