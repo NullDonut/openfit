@@ -195,6 +195,9 @@ public final class MainActivity extends ComponentActivity {
     private static final long BUZZ_UPLOAD_ACK_TIMEOUT_MS = 30_000L;
     private static final long BUZZ_UPLOAD_CHUNK_GAP_MS = 12L;
     private static final long BUZZ_UPLOAD_PREPARE_TIMEOUT_MS = 15_000L;
+    /** How long to wait before re-sending prepare after the watch answers "busy". */
+    private static final long BUZZ_UPLOAD_PREPARE_BUSY_RETRY_MS = 1_500L;
+    private static final int BUZZ_UPLOAD_PREPARE_BUSY_MAX_RETRIES = 10;
     private static final long BUZZ_UPLOAD_NOTIFY_TIMEOUT_MS = 5_000L;
     private static final long BUZZ_UPLOAD_SETTLE_MS = 4_000L;
     /**
@@ -342,6 +345,8 @@ public final class MainActivity extends ComponentActivity {
     private Runnable buzzUploadMtuTimeout;
     private boolean buzzUploadActive;                      // streaming or waiting on the watch
     private boolean buzzUploadPrepPending;                 // prepare reply still owed
+    private int buzzUploadPrepareBusyRetries;              // prepare re-sends after "busy"
+    private boolean buzzUploadPrepareBusyScheduled;        // a busy retry is already queued
     private byte[] buzzUploadContainer;                    // the AF AF AF 02 file as picked
     private byte[] buzzUploadFramed;                       // header + container + CRC32
     private List<byte[]> buzzUploadBlockFrames;            // chunks of the block in flight
@@ -3614,7 +3619,13 @@ public final class MainActivity extends ComponentActivity {
                     + (code == SeGatt.CODE_RESEND ? " " + payload : ""));
             if (code == SeGatt.CODE_READY) onSeReady();
             else if (code == SeGatt.CODE_RESEND) resendSeChunk(payload);
-            else if (code == SeGatt.CODE_BUSY) onSeBusy();
+            else if (code == SeGatt.CODE_BUSY) {
+                onSeBusy();
+                // A busy reply can arrive after the prepare chunk is already sent, when
+                // seCurrentWrite is null and onSeBusy() has nothing to retry. Re-send prepare
+                // while the install handshake is still waiting on the watch.
+                if (buzzUploadPrepPending && seCurrentWrite == null) retryBuzzPrepareAfterBusy();
+            }
             // CODE_DONE (01 03) arrives after the last chunk. The app-level SEWear reply is
             // what advances the bind, so the done frame needs no action here.
             return;
@@ -4810,6 +4821,8 @@ public final class MainActivity extends ComponentActivity {
         facesLoading = false;
         buzzUploadActive = true;
         buzzUploadPrepPending = false;
+        buzzUploadPrepareBusyRetries = 0;
+        buzzUploadPrepareBusyScheduled = false;
         buzzUploadProgress = 0;
         buzzUploadContainer = container;
         logPairing("custom-face install requested · " + container.length + " B");
@@ -4922,6 +4935,35 @@ public final class MainActivity extends ComponentActivity {
         sendSe(BuzzFace.requestPrepareInstall("170", container.length), "custom-face prepare");
         armBuzzUploadTimeout("No reply from the watch to the face install.",
                 BUZZ_UPLOAD_PREPARE_TIMEOUT_MS);
+    }
+
+    /**
+     * The watch sometimes answers the prepare handshake with "busy" instead of ready — most often
+     * when a face switch is still being applied. The busy frame lands after the prepare chunk has
+     * been sent, so {@code seCurrentWrite} is already null and the generic retry cannot fire. While
+     * the install is still waiting for a prepare reply, re-send it a few times; the original
+     * prepare watchdog still bounds the whole handshake.
+     */
+    private void retryBuzzPrepareAfterBusy() {
+        if (!buzzUploadActive || !buzzUploadPrepPending || buzzUploadPrepareBusyScheduled) return;
+        if (buzzUploadPrepareBusyRetries >= BUZZ_UPLOAD_PREPARE_BUSY_MAX_RETRIES) {
+            logPairing("custom-face prepare · still busy after "
+                    + buzzUploadPrepareBusyRetries + " retries");
+            return;
+        }
+        buzzUploadPrepareBusyScheduled = true;
+        int attempt = ++buzzUploadPrepareBusyRetries;
+        logPairing("custom-face prepare · watch busy, retry " + attempt + "/"
+                + BUZZ_UPLOAD_PREPARE_BUSY_MAX_RETRIES);
+        handler.postDelayed(() -> {
+            buzzUploadPrepareBusyScheduled = false;
+            if (!buzzUploadActive || !buzzUploadPrepPending) return;
+            byte[] container = buzzUploadContainer;
+            if (container == null) return;
+            logPairing("TX custom-face prepare · retry " + attempt + " · id 170");
+            sendSe(BuzzFace.requestPrepareInstall("170", container.length), "custom-face prepare");
+            // Do not re-arm the watchdog: the first send already started the prepare deadline.
+        }, BUZZ_UPLOAD_PREPARE_BUSY_RETRY_MS);
     }
 
     /** Handles the prepare reply: only {@code READY} proceeds to streaming the file. */

@@ -228,10 +228,10 @@ public final class BuzzFace {
             for (byte[] item : SeWear.readMessages(items, LIST_FIELD)) {
                 String id = SeWear.readStringField(item, ITEM_FIELD_ID);
                 if (id == null || id.isEmpty()) continue;
-                String name = SeWear.readStringField(item, ITEM_FIELD_NAME);
+                String name = normalizeFaceName(SeWear.readStringField(item, ITEM_FIELD_NAME));
                 boolean current = SeWear.readVarintField(item, ITEM_FIELD_IS_CURRENT) == 1;
                 boolean removable = SeWear.readVarintField(item, ITEM_FIELD_CAN_REMOVE) == 1;
-                faces.add(new SeCommands.WatchFace(id, name == null ? "" : name, current, removable));
+                faces.add(new SeCommands.WatchFace(id, name, current, removable));
             }
             return faces;
         }
@@ -246,5 +246,17 @@ public final class BuzzFace {
             }
         }
         return faces;
+    }
+
+    /**
+     * The Buzz fills {@code WatchFaceItem.name} with the literal ASCII {@code "null"} for faces
+     * that have no vendor label (all of its built-ins and the uploaded dials in practice), so
+     * treat that sentinel — and any blank string — as "no name" and let the UI number the face.
+     */
+    private static String normalizeFaceName(String name) {
+        if (name == null) return "";
+        String trimmed = name.trim();
+        if (trimmed.isEmpty() || trimmed.equalsIgnoreCase("null")) return "";
+        return trimmed;
     }
 }

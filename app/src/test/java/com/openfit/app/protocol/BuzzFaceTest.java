@@ -59,6 +59,18 @@ public class BuzzFaceTest {
         assertFalse(faces.get(1).removable);
     }
 
+    /** The Buzz sends the literal string "null" for faces without a vendor label. */
+    @Test public void literalNullNameIsTreatedAsEmpty() {
+        byte[] reply = hex(
+                "08 04 10 00 32 13"
+                + " 0a 11"
+                + " 0a 0f 0a 03 61 62 63 12 04 6e 75 6c 6c 18 00 20 00");
+        List<SeCommands.WatchFace> faces = BuzzFace.parseInstalledList(reply);
+        assertEquals(1, faces.size());
+        assertEquals("abc", faces.get(0).id);
+        assertEquals("", faces.get(0).name);
+    }
+
     @Test public void unexpectedOrMalformedRepliesYieldNoFaces() {
         assertTrue(BuzzFace.parseInstalledList(new byte[0]).isEmpty());
         assertTrue(BuzzFace.parseInstalledList(null).isEmpty());
