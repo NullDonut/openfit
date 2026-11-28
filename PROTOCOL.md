@@ -1279,11 +1279,15 @@ every block compressed:
 each with **LZO1X-1**. Verified against a known-good dial: `liblzo2`'s `lzo1x_1_compress` reproduces
 its 119 block sizes exactly (199468 B total) and `lzo1x_decompress_safe` rebuilds the raw dial byte
 for byte. `Lzo1x` is a small pure-Java port of the same algorithm (no native library, no large
-buffers); its output is standard LZO1X, so it is a little larger than the vendor's (about 201143 B
-for the template) but inflates to the same bytes. Every block is emitted with bit15 set, even when
-a block would not shrink: on hardware the watch's installer inflates unconditionally, and an earlier
-build that stored blocks (bit15 clear) installed to 100% and then failed, so compressed is the only
-form tested to work. The header CRCs are written as 0 because the watch does not check them.
+buffers) that reproduces that bitstream **byte for byte** — verified against `liblzo2` on the vendor
+dial and on a 540-block fuzz corpus, including the real 4096/3424-byte block sizes. That exactness
+matters: the watch's inflater is pickier than a general LZO decoder, so an earlier build that emitted
+a merely *valid* LZO stream was rejected. (The port follows the arm64 library's 64-bit match
+extension and its wrapper, which emits blocks under 32 bytes as one literal run.) Every block is
+emitted with bit15 set, even when a block would not shrink: on hardware the watch's installer
+inflates unconditionally, and an earlier build that stored blocks (bit15 clear) installed to 100% and
+then failed, so compressed is the only form tested to work. The header CRCs are written as 0 because
+the watch does not check them.
 The prepared size is the container length, exactly as the plain custom-face install already does.
 
 The built container feeds the **existing** `startBuzzUpload` path unchanged (MTU bump, lazy
